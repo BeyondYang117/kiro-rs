@@ -6,6 +6,7 @@ use tokio::sync::SemaphorePermit;
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConcurrencySnapshot {
+    pub session_affinity_enabled: bool,
     pub adaptive_concurrency: bool,
     pub recovering_credentials: usize,
     pub probing_credentials: usize,
@@ -26,6 +27,10 @@ pub struct ConcurrencySnapshot {
     pub cancelled_wait_total: u64,
     pub rate_limited_total: u64,
     pub adaptive_reduction_total: u64,
+    pub affinity_hit_total: u64,
+    pub affinity_miss_total: u64,
+    pub affinity_fallback_total: u64,
+    pub affinity_switch_total: u64,
     /// 所有已离队调用（含取消和错误）的耗时汇总；不含仍在等待的调用。
     pub finished_wait_total: u64,
     pub total_wait_ms: u64,
@@ -90,6 +95,10 @@ pub(super) struct ConcurrencyMetrics {
     cancelled_wait_total: AtomicU64,
     pub(super) rate_limited_total: AtomicU64,
     pub(super) adaptive_reduction_total: AtomicU64,
+    pub(super) affinity_hit_total: AtomicU64,
+    pub(super) affinity_miss_total: AtomicU64,
+    pub(super) affinity_fallback_total: AtomicU64,
+    pub(super) affinity_switch_total: AtomicU64,
     finished_wait_total: AtomicU64,
     total_wait_ms: AtomicU64,
     max_wait_ms: AtomicU64,
@@ -192,6 +201,7 @@ impl MultiTokenManager {
         let settings = &self.config.concurrency;
         let metrics = &self.concurrency_metrics;
         ConcurrencySnapshot {
+            session_affinity_enabled: self.config.session_affinity.enabled,
             adaptive_concurrency: settings.adaptive_concurrency,
             recovering_credentials: entries
                 .iter()
@@ -238,6 +248,10 @@ impl MultiTokenManager {
             cancelled_wait_total: metrics.cancelled_wait_total.load(Ordering::Relaxed),
             rate_limited_total: metrics.rate_limited_total.load(Ordering::Relaxed),
             adaptive_reduction_total: metrics.adaptive_reduction_total.load(Ordering::Relaxed),
+            affinity_hit_total: metrics.affinity_hit_total.load(Ordering::Relaxed),
+            affinity_miss_total: metrics.affinity_miss_total.load(Ordering::Relaxed),
+            affinity_fallback_total: metrics.affinity_fallback_total.load(Ordering::Relaxed),
+            affinity_switch_total: metrics.affinity_switch_total.load(Ordering::Relaxed),
             finished_wait_total: metrics.finished_wait_total.load(Ordering::Relaxed),
             total_wait_ms: metrics.total_wait_ms.load(Ordering::Relaxed),
             max_wait_ms: metrics.max_wait_ms.load(Ordering::Relaxed),
@@ -247,9 +261,12 @@ impl MultiTokenManager {
     pub(super) async fn reserve_credential(
         &self,
         model: Option<&str>,
+        affinity_key: Option<&AffinityKey>,
     ) -> anyhow::Result<ReservedCredential> {
         let mut waiting = None;
-        let result = self.reserve_credential_inner(model, &mut waiting).await;
+        let result = self
+            .reserve_credential_inner(model, affinity_key, &mut waiting)
+            .await;
         if let Some(guard) = waiting.as_mut() {
             guard.completed = true;
         }
@@ -274,6 +291,7 @@ impl MultiTokenManager {
     async fn reserve_credential_inner<'a>(
         &'a self,
         model: Option<&str>,
+        affinity_key: Option<&AffinityKey>,
         waiting: &mut Option<WaitingGuard<'a>>,
     ) -> anyhow::Result<ReservedCredential> {
         let deadline = tokio::time::Instant::now()
@@ -293,7 +311,7 @@ impl MultiTokenManager {
                         .expect("registered waiter remains in queue until dropped")
                 });
                 let (reserved, ready_at) =
-                    self.try_reserve_credential(model, &queue[..position])?;
+                    self.try_reserve_credential(model, affinity_key, &queue[..position])?;
                 if let Some(reserved) = reserved {
                     return Ok(reserved);
                 }

@@ -6,6 +6,9 @@ export function ConcurrencyPanel({ metrics }: { metrics: ConcurrencySnapshot }) 
   const averageWait = metrics.finishedWaitTotal > 0
     ? metrics.totalWaitMs / metrics.finishedWaitTotal / 1000
     : 0
+  const affinityHits = metrics.affinityHitTotal ?? 0
+  const affinityFallbacks = metrics.affinityFallbackTotal ?? 0
+  const affinityAttempts = affinityHits + affinityFallbacks
 
   return (
     <Card className="mb-6" aria-label="上游并发状态">
@@ -60,6 +63,16 @@ export function ConcurrencyPanel({ metrics }: { metrics: ConcurrencySnapshot }) 
             </p>
           </div>
         </dl>
+        {metrics.sessionAffinityEnabled !== undefined && (
+          <p className="mt-4 text-xs leading-relaxed text-muted-foreground">
+            会话亲和{metrics.sessionAffinityEnabled ? '已开启' : '已关闭'}
+            {' · '}已有绑定复用率 {affinityAttempts > 0 ? `${(affinityHits / affinityAttempts * 100).toFixed(1)}%` : '—'}
+            {' · '}命中 {affinityHits.toLocaleString()}
+            {' · '}分流 {affinityFallbacks.toLocaleString()}
+            {' · '}无绑定 {(metrics.affinityMissTotal ?? 0).toLocaleString()}
+            {' · '}成功改绑 {(metrics.affinitySwitchTotal ?? 0).toLocaleString()}
+          </p>
+        )}
         <p className="mt-4 border-t pt-3 text-xs leading-relaxed text-muted-foreground">
           累计获准 {metrics.admittedTotal.toLocaleString()} 次 · 入队 {metrics.queuedTotal.toLocaleString()} 次 · 取消等待 {metrics.cancelledWaitTotal.toLocaleString()} 次
           {' · '}已结束排队平均 {averageWait.toFixed(2)} 秒 / 最长 {(metrics.maxWaitMs / 1000).toFixed(2)} 秒

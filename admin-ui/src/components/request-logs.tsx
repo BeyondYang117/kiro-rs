@@ -143,6 +143,7 @@ export function RequestLogs({ onBack, onLogout }: { onBack: () => void; onLogout
               ['时间', formatTime(detail.data.timestamp)], ['接口', `${detail.data.method} ${detail.data.path}`],
               ['模型', detail.data.model ?? '—'], ['HTTP / 模式', `${detail.data.httpStatus || '—'} / ${detail.data.stream ? '流式' : '非流式'}`],
               ['总耗时 / 首包', `${formatDuration(detail.data.durationMs)} / ${formatDuration(detail.data.firstByteMs)}`],
+              ['会话亲和（最后一次调度）', detail.data.affinity === 'hit' ? '复用绑定账号' : detail.data.affinity === 'fallback' ? '绑定账号不可用，已分流' : detail.data.affinity === 'miss' ? '无有效绑定' : '—'],
               ['输入 / 输出 Token', `${formatNumber(detail.data.inputTokens)} / ${formatNumber(detail.data.outputTokens)}`],
             ].map(([key, value]) => <div key={key}><dt className="text-muted-foreground">{key}</dt><dd className="mt-1 break-all">{value}</dd></div>)}
           </dl>

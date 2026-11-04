@@ -31,6 +31,7 @@ export interface LogRecord {
   httpStatus: number
   durationMs: number
   firstByteMs: number | null
+  affinity?: 'hit' | 'miss' | 'fallback'
   inputTokens: number | null
   outputTokens: number | null
   credentialId: number | null

@@ -931,6 +931,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_affinity_binds_only_validated_responses_across_response_modes() {
+        let session = "abcdef01-2345-6789-abcd-0123456789ab";
+        let key = crate::kiro::token_manager::session_key(session).unwrap();
+        for (cc, buffered, streaming, outcome) in [
+            (false, false, false, "success"),
+            (false, false, true, "success"),
+            (true, false, true, "success"),
+            (true, true, true, "success"),
+            (false, false, false, "empty"),
+            (false, false, false, "disconnect"),
+            (false, false, true, "cancel"),
+        ] {
+            let valid = frame("assistantResponseEvent", json!({"content":"hello"}));
+            let mut upstream = match outcome {
+                "empty" => mock_scripted(vec![Vec::new()]).await,
+                "disconnect" => mock_response(valid, StatusCode::OK, true).await,
+                "cancel" => {
+                    mock_controlled(
+                        valid,
+                        StatusCode::OK,
+                        false,
+                        Some(std::sync::Arc::new(tokio::sync::Notify::new())),
+                    )
+                    .await
+                }
+                _ => mock(valid).await,
+            };
+            upstream.state.cc_buffered_stream = buffered;
+            let req = request(json!({"model":"claude-sonnet-5", "max_tokens":1024,
+                "metadata":{"user_id":format!("user_test_session_{session}")},
+                "stream":streaming, "messages":[{"role":"user", "content":"hi"}]}));
+            let response = dispatch(upstream.state.clone(), req, cc).await;
+            if outcome == "cancel" {
+                let mut stream = response.into_body().into_data_stream();
+                while let Some(chunk) = stream.next().await {
+                    if String::from_utf8_lossy(&chunk.unwrap()).contains("hello") {
+                        break;
+                    }
+                }
+                drop(stream);
+            } else {
+                to_bytes(response.into_body(), 1_000_000).await.unwrap();
+            }
+            let before = upstream.manager.snapshot().concurrency;
+            assert_eq!(before.affinity_hit_total, 0, "{outcome}");
+            assert!(before.affinity_miss_total > 0);
+            drop(
+                upstream
+                    .manager
+                    .acquire_context_with_affinity(None, Some(&key))
+                    .await
+                    .unwrap(),
+            );
+            let after = upstream.manager.snapshot().concurrency;
+            if outcome == "success" {
+                assert_eq!(after.affinity_hit_total, 1, "{cc}/{buffered}/{streaming}");
+            } else {
+                assert_eq!(after.affinity_hit_total, 0, "{outcome}");
+                assert_eq!(after.affinity_miss_total, before.affinity_miss_total + 1);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn empty_completions_retry_without_leaking_content_or_usage() {
         for (cc, buffered) in [(false, false), (true, false), (true, true)] {
             for streaming in [false, true] {

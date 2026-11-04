@@ -36,6 +36,7 @@
 - **Token 自动刷新**: 自动管理和刷新 OAuth Token
 - **多凭据支持**: 支持配置多个凭据，按优先级自动故障转移
 - **负载均衡**: 默认 `balanced`（按在途请求数、历史成功次数、优先级依次选择），支持 `priority`（优先复用当前账号，满载/冷却时分流）模式
+- **会话软亲和**: 默认优先复用同一会话上次成功的账号，满载/冷却或不符合模型资格时立即分流，保留公平排队
 - **并发保护**: 全局/单账号在途上限、有界等待及账号级 429 冷却，取消和流结束自动释放名额
 - **智能重试**: 每轮上游 HTTP 尝试最多 `min(凭据数 × 3, 9)` 次；空回复另有最多 2 次重试
 - **凭据回写**: 自动原子回写刷新后的 Token 和管理变更，支持单凭据与多凭据格式
@@ -217,6 +218,9 @@ docker login -u abu116
 | `requestLogPath` | string | 凭据文件同目录下的 `kiro_requests.sqlite3` | 调用日志 SQLite 数据库路径；相对路径基于进程工作目录 |
 | `requestLogRetentionDays` | integer | `30` | 日志保留天数，最小 1；同时定期清理至最近 100000 条 |
 | `loadBalancingMode` | string | `balanced` | `balanced` 按在途请求数、累计成功次数、优先级依次选择；`priority` 优先复用当前账号 |
+| `sessionAffinity.enabled` | boolean | `true` | 两种调度模式均优先复用会话上次成功的账号；设为 `false` 恢复原调度规则 |
+| `sessionAffinity.ttlSeconds` | integer | `1800` | 绑定自上次成功响应起的有效秒数，范围 1～86400 |
+| `sessionAffinity.maxEntries` | integer | `10000` | 进程内绑定数量上限，范围 1～1000000；超限淘汰最久未成功的绑定 |
 | `concurrency.maxInFlight` | integer | `64` | 全局上游在途调用上限，必须大于 0 |
 | `concurrency.maxInFlightPerCredential` | integer | `4` | 单账号在途调用上限，必须大于 0 |
 | `concurrency.maxWaiting` | integer | `128` | 等待名额的调用上限；`0` 表示满载/冷却时立即拒绝 |
@@ -234,6 +238,10 @@ docker login -u abu116
 等待者在名额释放、账号管理变更或冷却到期后重新参与调度。对当前可调度的等待者按入队顺序分配名额，新请求不能插队；如果前面的调用暂时没有符合模型、容量和冷却条件的账号，后面的调用可使用空闲账号，避免 Opus 等请求阻塞整个队列。等待被取消、超时或出错时会移出队列并唤醒后续调用。队列满或等待超时会返回 `503 overloaded_error` 和 `Retry-After: 1`，不消耗 Provider 的 HTTP 重试预算；已经开始的 SSE 通过错误事件报告失败。等待上限针对每次获取上游名额，既不是整个客户端请求的总超时，也不限制处于退避中的客户端请求数。并发限制不等同于每分钟请求数或 token 配额限制。
 
 未指定 `loadBalancingMode` 的配置现在默认使用 `balanced`；显式设置的 `priority` 保留。并发参数修改后重启生效，冷却状态仅保存在内存中。多实例共享账号池时仍需额外的跨实例协调。
+
+会话软亲和默认开启，在公平队列允许分配名额后，优先选择该会话上次成功使用且当前可调度的账号。账号满载、冷却、禁用、删除或不支持请求模型时，立即按原有 `balanced` / `priority` 规则选其他账号；不会专门等待绑定账号。没有有效绑定的请求沿用原调度规则，`priority` 的“当前账号”仍是全局偏好。仅在 Messages 响应完整且通过现有响应校验后建立或刷新绑定；空响应、解码失败、断流和取消不会更新绑定，分流请求成功后才改绑。同一会话并发请求按成功完成顺序更新绑定。
+
+绑定键使用规范化 `conversationId` UUID 的哈希。客户端通过 `metadata.user_id` 中的 `session_<UUID>` 或 JSON `session_id` 提供稳定标识；没有稳定标识时转换器每次生成新 UUID，无法跨请求复用。绑定不依赖模型，但每次选账号仍检查模型资格；WebSearch 的 MCP 调用不建立会话绑定。绑定仅保存在当前进程，重启清空，设置修改后重启生效；只保存哈希、账号 ID 和成功时间，数量受上限约束。亲和不保证 Kiro 上游缓存命中，也不改变 token 用量统计。
 
 设置 `concurrency.adaptiveConcurrency: true` 后，每个账号初始使用配置的单账号上限。收到 429 时将其恢复目标减半（向下取整，最小 1），保留原有冷却规则；同一批已在途请求陆续返回的 429 只触发一次降档，但每次仍会按 `Retry-After` 延长冷却。冷却结束后仅允许一个在途调用探测。探测的 2xx 响应体完整读完后恢复至减半后的目标，此后每完成一轮当前上限数量的响应，增加一个名额，直到达到配置上限。例如上限为 4 时，恢复过程为单请求探测 → 2 → 3 → 4。新一轮调用再次收到 429 会重新减半并探测，其他账号不受影响。满载判断和公平队列均使用实际生效的上限。
 
@@ -562,6 +570,8 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
 统计和余额缓存均使用同目录临时文件原子替换，新文件在 Unix 上使用 `0600` 权限。统计保存会串行处理并保留写入期间的新更新，保存失败后仍会重试。
 
 管理首页每 5 秒刷新并发状态：全局在途/等待数量及上限、等待中的 Opus/其他调用数量、账号冷却/满载数量、排队拒绝/超时次数、429 次数和排队耗时；账号列表展示各账号在途数量与剩余冷却时间。“已启用凭据”不等于此刻可调度，冷却与满载账号数可重叠。
+
+会话亲和指标同样通过 `GET /api/admin/credentials` 的 `concurrency` 返回：`sessionAffinityEnabled` 为开关；`affinityHitTotal` 为复用绑定账号次数，`affinityMissTotal` 为无有效绑定次数，`affinityFallbackTotal` 为已有绑定但分流次数，`affinitySwitchTotal` 为有效绑定经成功响应切换账号的次数。前三项在每次获得上游名额时计数，包含重试，不是客户端请求数或上游缓存命中数；已有绑定复用率为 `hit / (hit + fallback)`。管理首页展示这些指标，调用详情和日志 JSON 的 `affinity` 字段记录最后一次带会话标识的调度结果（`hit` / `miss` / `fallback`），可以结合首包耗时、上游尝试和 429 记录评估效果；旧日志没有此字段。所有亲和累计指标自进程启动起统计。
 
 启用自适应并发后，管理首页同时显示恢复中、单请求探测中的账号数和实际降档次数，账号列表显示当前生效上限及单请求探测成功后的目标上限。`concurrency.adaptiveConcurrency` 表示是否启用，`concurrency.recoveringCredentials` 统计已启用且尚在探测或尚未恢复配置上限的账号（包括冷却中的账号），`concurrency.probingCredentials` 是其中处于单请求探测的账号数；`concurrency.adaptiveReductionTotal` 只统计容量实际降低的次数，同批请求的迟到 429 不重复计数；`credentials[].effectiveConcurrencyLimit` 是各账号当前容量上限，探测中的账号还会返回 `adaptiveProbeTarget`，冷却仍会暂时阻止调度。
 

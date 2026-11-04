@@ -36,6 +36,7 @@ export interface CredentialStatusItem {
 }
 
 export interface ConcurrencySnapshot {
+  sessionAffinityEnabled?: boolean
   adaptiveConcurrency?: boolean
   recoveringCredentials?: number
   probingCredentials?: number
@@ -56,6 +57,10 @@ export interface ConcurrencySnapshot {
   cancelledWaitTotal: number
   rateLimitedTotal: number
   adaptiveReductionTotal?: number
+  affinityHitTotal?: number
+  affinityMissTotal?: number
+  affinityFallbackTotal?: number
+  affinitySwitchTotal?: number
   finishedWaitTotal: number
   totalWaitMs: number
   maxWaitMs: number

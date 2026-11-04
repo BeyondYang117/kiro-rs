@@ -65,6 +65,7 @@ pub(super) fn response_events(
         request_body: String,
         body: Option<BoxStream<'static, Result<bytes::Bytes, reqwest::Error>>>,
         credential_id: u64,
+        affinity_key: Option<crate::kiro::token_manager::AffinityKey>,
         decoder: UpstreamResponseDecoder,
         prefix: Vec<Event>,
         prefix_bytes: usize,
@@ -119,6 +120,7 @@ pub(super) fn response_events(
             };
             self.request_body = body;
             self.credential_id = response.credential_id();
+            self.affinity_key = response.affinity_key();
             let required_fields = std::mem::take(&mut self.decoder.required_fields);
             self.decoder =
                 UpstreamResponseDecoder::for_response(&response, policy, required_fields);
@@ -135,6 +137,7 @@ pub(super) fn response_events(
     let state = State {
         request_body,
         credential_id: response.credential_id(),
+        affinity_key: response.affinity_key(),
         decoder: UpstreamResponseDecoder::for_response(&response, policy, required_fields),
         body: Some(response.bytes_stream()),
         prefix: Vec::new(),
@@ -287,7 +290,7 @@ pub(super) fn response_events(
                         }),
                         None,
                     );
-                    provider.report_response_success(state.credential_id);
+                    provider.report_response_success(state.credential_id, state.affinity_key);
                     state.done = true;
                     return Ok(Some((std::mem::take(&mut state.prefix), state)));
                 }
@@ -317,6 +320,7 @@ pub(super) fn response_events(
                     provider.call_api(&state.request_body).await?
                 };
                 state.credential_id = response.credential_id();
+                state.affinity_key = response.affinity_key();
                 let required_fields = std::mem::take(&mut state.decoder.required_fields);
                 state.decoder =
                     UpstreamResponseDecoder::for_response(&response, policy, required_fields);

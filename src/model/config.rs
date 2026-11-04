@@ -65,6 +65,39 @@ impl ConcurrencyConfig {
     }
 }
 
+/// 会话软亲和：只有成功响应才建立/刷新绑定。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SessionAffinityConfig {
+    pub enabled: bool,
+    pub ttl_seconds: u64,
+    pub max_entries: usize,
+}
+
+impl Default for SessionAffinityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ttl_seconds: 1800,
+            max_entries: 10_000,
+        }
+    }
+}
+
+impl SessionAffinityConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (1..=86_400).contains(&self.ttl_seconds),
+            "sessionAffinity.ttlSeconds 必须在 1..=86400 之间"
+        );
+        anyhow::ensure!(
+            (1..=1_000_000).contains(&self.max_entries),
+            "sessionAffinity.maxEntries 必须在 1..=1000000 之间"
+        );
+        Ok(())
+    }
+}
+
 /// KNA 应用配置
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -162,6 +195,9 @@ pub struct Config {
     #[serde(default)]
     pub concurrency: ConcurrencyConfig,
 
+    #[serde(default)]
+    pub session_affinity: SessionAffinityConfig,
+
     /// 是否开启非流式响应的 thinking 块提取（默认 true）
     ///
     /// 启用后，非流式响应中的 `<thinking>...</thinking>` 标签会被解析为
@@ -198,6 +234,7 @@ impl std::fmt::Debug for Config {
             .field("tls_backend", &self.tls_backend)
             .field("load_balancing_mode", &self.load_balancing_mode)
             .field("concurrency", &self.concurrency)
+            .field("session_affinity", &self.session_affinity)
             .field("cc_buffered_stream", &self.cc_buffered_stream)
             .field("default_endpoint", &self.default_endpoint)
             .finish_non_exhaustive()
@@ -293,6 +330,7 @@ impl Default for Config {
             request_log_retention_days: default_request_log_retention_days(),
             load_balancing_mode: default_load_balancing_mode(),
             concurrency: ConcurrencyConfig::default(),
+            session_affinity: SessionAffinityConfig::default(),
             extract_thinking: default_extract_thinking(),
             default_endpoint: default_endpoint(),
             endpoints: HashMap::new(),
@@ -384,6 +422,31 @@ mod tests {
                 .to_string()
                 .contains("toolOutputRecoveryAttempts")
         );
+    }
+
+    #[test]
+    fn session_affinity_defaults_roundtrip_and_validation() {
+        let defaults: Config = serde_json::from_str("{}").unwrap();
+        assert!(defaults.session_affinity.enabled);
+        assert_eq!(defaults.session_affinity.ttl_seconds, 1800);
+        assert_eq!(defaults.session_affinity.max_entries, 10_000);
+        let partial: Config = serde_json::from_value(serde_json::json!({
+            "sessionAffinity":{"enabled":false,"ttlSeconds":60}
+        }))
+        .unwrap();
+        partial.session_affinity.validate().unwrap();
+        let encoded = serde_json::to_value(partial).unwrap();
+        assert_eq!(encoded["sessionAffinity"]["enabled"], false);
+        assert_eq!(encoded["sessionAffinity"]["maxEntries"], 10_000);
+        for value in [
+            serde_json::json!({"ttlSeconds":0}),
+            serde_json::json!({"ttlSeconds":u64::MAX}),
+            serde_json::json!({"maxEntries":0}),
+            serde_json::json!({"maxEntries":usize::MAX}),
+        ] {
+            let settings: SessionAffinityConfig = serde_json::from_value(value).unwrap();
+            assert!(settings.validate().is_err());
+        }
     }
 
     #[test]

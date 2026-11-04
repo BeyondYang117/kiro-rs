@@ -15,7 +15,9 @@ use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::endpoint::{KiroEndpoint, RequestContext};
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
-use crate::kiro::token_manager::{CallContext, CapacityError, MultiTokenManager};
+use crate::kiro::token_manager::{
+    AffinityKey, CallContext, CapacityError, MultiTokenManager, session_key,
+};
 use crate::model::config::TlsBackend;
 use parking_lot::Mutex;
 
@@ -50,11 +52,15 @@ impl std::error::Error for UpstreamApiError {}
 /// 上游响应持有凭据预留，直到响应读取完毕或被丢弃。
 pub struct UpstreamResponse {
     response: reqwest::Response,
+    affinity_key: Option<AffinityKey>,
     context: CallContext,
     token_manager: Arc<MultiTokenManager>,
 }
 
 impl UpstreamResponse {
+    pub(crate) fn affinity_key(&self) -> Option<AffinityKey> {
+        self.affinity_key
+    }
     pub(crate) fn headers(&self) -> &reqwest::header::HeaderMap {
         self.response.headers()
     }
@@ -125,8 +131,14 @@ impl KiroProvider {
     }
 
     /// Called only after the Messages response has been decoded and validated.
-    pub(crate) fn report_response_success(&self, credential_id: u64) {
+    pub(crate) fn report_response_success(
+        &self,
+        credential_id: u64,
+        affinity_key: Option<AffinityKey>,
+    ) {
         self.token_manager.report_success(credential_id);
+        self.token_manager
+            .report_session_success(affinity_key, credential_id);
     }
 
     /// 创建带代理配置和端点注册表的 KiroProvider 实例
@@ -297,6 +309,7 @@ impl KiroProvider {
                 self.token_manager.report_success(ctx.id);
                 return Ok(UpstreamResponse {
                     response,
+                    affinity_key: None,
                     context: ctx,
                     token_manager: self.token_manager.clone(),
                 });
@@ -409,12 +422,16 @@ impl KiroProvider {
         let mut force_refreshed: HashSet<u64> = HashSet::new();
         let api_type = if is_stream { "流式" } else { "非流式" };
 
-        // 尝试从请求体中提取模型信息
-        let model = Self::extract_model_from_request(request_body);
+        // 一次解析同时提取模型资格和会话亲和信息。
+        let (model, affinity_key) = Self::extract_routing_from_request(request_body);
 
         for attempt in 0..max_retries {
             // 获取调用上下文（绑定 index、credentials、token）
-            let ctx = match self.token_manager.acquire_context(model.as_deref()).await {
+            let ctx = match self
+                .token_manager
+                .acquire_context_with_affinity(model.as_deref(), affinity_key.as_ref())
+                .await
+            {
                 Ok(c) => c,
                 Err(e) if e.is::<CapacityError>() => return Err(e),
                 Err(e) => {
@@ -497,6 +514,7 @@ impl KiroProvider {
             if status.is_success() {
                 return Ok(UpstreamResponse {
                     response,
+                    affinity_key,
                     context: ctx,
                     token_manager: self.token_manager.clone(),
                 });
@@ -648,20 +666,24 @@ impl KiroProvider {
         }))
     }
 
-    /// 从请求体中提取模型信息
+    /// 从请求体中提取模型和会话亲和键。
     ///
-    /// 尝试解析 JSON 请求体，提取 conversationState.currentMessage.userInputMessage.modelId
-    fn extract_model_from_request(request_body: &str) -> Option<String> {
+    /// 模型和 conversationId 独立解析，缺失会话标识不影响模型资格检查。
+    fn extract_routing_from_request(request_body: &str) -> (Option<String>, Option<AffinityKey>) {
         use serde_json::Value;
 
-        let json: Value = serde_json::from_str(request_body).ok()?;
-
-        json.get("conversationState")?
-            .get("currentMessage")?
-            .get("userInputMessage")?
-            .get("modelId")?
-            .as_str()
-            .map(|s| s.to_string())
+        let Ok(json) = serde_json::from_str::<Value>(request_body) else {
+            return (None, None);
+        };
+        let model = json
+            .pointer("/conversationState/currentMessage/userInputMessage/modelId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let key = json
+            .pointer("/conversationState/conversationId")
+            .and_then(Value::as_str)
+            .and_then(session_key);
+        (model, key)
     }
 
     fn retry_after(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<Duration> {
@@ -749,6 +771,7 @@ mod response_tests {
             manager.clone(),
             UpstreamResponse {
                 response,
+                affinity_key: None,
                 context,
                 token_manager: manager,
             },
@@ -904,6 +927,7 @@ mod response_tests {
                 };
                 let response = UpstreamResponse {
                     response: reqwest::Response::from(http::Response::new(body)),
+                    affinity_key: None,
                     context,
                     token_manager: manager.clone(),
                 };

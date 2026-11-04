@@ -35,6 +35,149 @@ async fn wait_for_waiters(manager: &MultiTokenManager, count: usize) {
     .expect("waiter registration must complete");
 }
 
+#[tokio::test]
+async fn affinity_is_per_session_and_remaps_only_after_success_in_both_modes() {
+    for mode in ["balanced", "priority"] {
+        let manager = manager(
+            serde_json::json!({"loadBalancingMode":mode,
+            "concurrency":{"maxInFlightPerCredential":1}}),
+            2,
+        );
+        let a = [1; 32];
+        let b = [2; 32];
+        // Selecting an account alone must not create a successful binding.
+        let first = manager
+            .acquire_context_with_affinity(None, Some(&a))
+            .await
+            .unwrap();
+        assert_eq!(first.id, 1);
+        drop(first);
+        manager.report_session_success(Some(a), 1);
+        manager.report_session_success(Some(b), 2);
+        let held = manager
+            .acquire_context_with_affinity(None, Some(&a))
+            .await
+            .unwrap();
+        assert_eq!(held.id, 1);
+        let other = manager
+            .acquire_context_with_affinity(None, Some(&b))
+            .await
+            .unwrap();
+        assert_eq!(other.id, 2);
+        drop(other);
+        // A's account is full: use account 2 immediately, even though account 1 is preferred.
+        let fallback = manager
+            .acquire_context_with_affinity(None, Some(&a))
+            .await
+            .unwrap();
+        assert_eq!(fallback.id, 2);
+        drop(fallback);
+        drop(held);
+        let unchanged = manager
+            .acquire_context_with_affinity(None, Some(&a))
+            .await
+            .unwrap();
+        assert_eq!(unchanged.id, 1, "failed/cancelled fallback cannot remap");
+        let successful = manager
+            .acquire_context_with_affinity(None, Some(&a))
+            .await
+            .unwrap();
+        assert_eq!(successful.id, 2);
+        manager.report_session_success(Some(a), successful.id);
+        drop((unchanged, successful));
+        let rebound = manager
+            .acquire_context_with_affinity(None, Some(&a))
+            .await
+            .unwrap();
+        assert_eq!(rebound.id, 2);
+        let metrics = manager.snapshot().concurrency;
+        assert_eq!(metrics.affinity_miss_total, 1);
+        assert_eq!(metrics.affinity_hit_total, 4);
+        assert_eq!(metrics.affinity_fallback_total, 2);
+        assert_eq!(metrics.affinity_switch_total, 1);
+    }
+}
+
+#[tokio::test]
+async fn affinity_skips_cooling_disabled_deleted_and_model_ineligible_accounts() {
+    for unavailable in ["cooling", "disabled", "deleted", "model"] {
+        let manager = manager(serde_json::json!({}), 2);
+        let key = [1; 32];
+        manager.report_session_success(Some(key), 1);
+        {
+            let mut entries = manager.entries.lock();
+            match unavailable {
+                "cooling" => {
+                    entries[0].cooldown = Some((Instant::now(), StdDuration::from_secs(60)))
+                }
+                "disabled" => {
+                    entries[0].disabled = true;
+                    entries[0].disabled_reason = Some(DisabledReason::Manual);
+                }
+                "deleted" => {
+                    entries.remove(0);
+                }
+                "model" => entries[0].credentials.subscription_title = Some("KIRO FREE".into()),
+                _ => unreachable!(),
+            }
+        }
+        let context = timeout(
+            StdDuration::from_secs(1),
+            manager.acquire_context_with_affinity(Some("claude-opus-4-6"), Some(&key)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(context.id, 2, "{unavailable}");
+        assert_eq!(manager.snapshot().concurrency.affinity_fallback_total, 1);
+        // A deleted account's delayed completion must not replace the new binding.
+        manager.report_session_success(Some(key), 2);
+        manager.report_session_success(Some(key), 1);
+        if unavailable == "deleted" || unavailable == "disabled" {
+            assert_eq!(manager.snapshot().concurrency.affinity_switch_total, 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn affinity_does_not_jump_the_queue_and_can_be_disabled() {
+    let manager = manager(serde_json::json!({"concurrency":{"maxInFlight":1}}), 2);
+    let key = [1; 32];
+    manager.report_session_success(Some(key), 2);
+    let active = manager.acquire_context(None).await.unwrap();
+    let pending = manager.clone();
+    let older = tokio::spawn(async move { pending.acquire_context(None).await.unwrap() });
+    wait_for_waiters(&manager, 1).await;
+    let pending = manager.clone();
+    let sticky = tokio::spawn(async move {
+        pending
+            .acquire_context_with_affinity(None, Some(&key))
+            .await
+            .unwrap()
+    });
+    wait_for_waiters(&manager, 2).await;
+    drop(active);
+    let older = timeout(StdDuration::from_secs(1), older)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!sticky.is_finished());
+    drop(older);
+    assert_eq!(sticky.await.unwrap().id, 2);
+
+    let disabled = self::manager(serde_json::json!({"sessionAffinity":{"enabled":false}}), 2);
+    disabled.report_session_success(Some(key), 2);
+    assert_eq!(
+        disabled
+            .acquire_context_with_affinity(None, Some(&key))
+            .await
+            .unwrap()
+            .id,
+        1
+    );
+    assert_eq!(disabled.snapshot().concurrency.affinity_miss_total, 0);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_load_obeys_both_limits_in_both_modes() {
     for mode in ["balanced", "priority"] {

@@ -90,6 +90,9 @@ pub struct Record {
     http_status: u16,
     duration_ms: u64,
     first_byte_ms: Option<u64>,
+    /// 最后一次带会话标识的调度结果；旧日志没有此字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    affinity: Option<String>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     credential_id: Option<u64>,
@@ -112,6 +115,7 @@ impl Record {
             http_status: 0,
             duration_ms: 0,
             first_byte_ms: None,
+            affinity: None,
             input_tokens: None,
             output_tokens: None,
             credential_id: None,
@@ -150,6 +154,12 @@ pub fn request_metadata(model: &str, stream: bool) {
             record.model = Some(redact(&model.chars().take(256).collect::<String>()));
             record.stream = stream;
         }
+    });
+}
+
+pub(crate) fn affinity_selection(outcome: &str) {
+    let _ = CURRENT.try_with(|context| {
+        context.lock().affinity = Some(outcome.to_owned());
     });
 }
 

@@ -27,7 +27,10 @@ use crate::kiro::model::token_refresh::{
 use crate::kiro::model::usage_limits::UsageLimitsResponse;
 use crate::model::config::Config;
 
+mod affinity;
 mod concurrency;
+use affinity::SessionAffinity;
+pub(crate) use affinity::{AffinityKey, session_key};
 pub use concurrency::ConcurrencySnapshot;
 use concurrency::{ConcurrencyMetrics, Waiter};
 
@@ -533,9 +536,10 @@ pub struct MultiTokenManager {
     /// 在途名额由调用上下文持有，包含 Token 获取和响应体消费。
     in_flight_slots: Arc<Semaphore>,
     waiting_slots: Semaphore,
-    /// 锁顺序：wait_queue -> entries -> current_id/load_balancing_mode。
+    /// 锁顺序：wait_queue -> entries -> current_id/load_balancing_mode/session_affinity。
     wait_queue: Mutex<Vec<Waiter>>,
     concurrency_metrics: ConcurrencyMetrics,
+    session_affinity: Mutex<SessionAffinity>,
     capacity_changed: Arc<Notify>,
     /// 凭据文件路径（用于回写）
     credentials_path: Option<PathBuf>,
@@ -649,6 +653,7 @@ impl MultiTokenManager {
         is_multiple_format: bool,
     ) -> anyhow::Result<Self> {
         config.concurrency.validate()?;
+        config.session_affinity.validate()?;
         anyhow::ensure!(
             config.tool_output_recovery_attempts <= 2,
             "toolOutputRecoveryAttempts 必须在 0..=2 之间"
@@ -756,6 +761,7 @@ impl MultiTokenManager {
             waiting_slots,
             wait_queue: Mutex::new(Vec::new()),
             concurrency_metrics: ConcurrencyMetrics::default(),
+            session_affinity: Mutex::new(SessionAffinity::default()),
             capacity_changed: Arc::new(Notify::new()),
             credentials_path,
             is_multiple_format: AtomicBool::new(is_multiple_format),
@@ -841,6 +847,7 @@ impl MultiTokenManager {
     fn try_reserve_credential(
         &self,
         model: Option<&str>,
+        affinity_key: Option<&AffinityKey>,
         earlier_waiters: &[Waiter],
     ) -> anyhow::Result<(Option<ReservedCredential>, Option<Instant>)> {
         let mut entries = self.entries.lock();
@@ -896,19 +903,32 @@ impl MultiTokenManager {
         }
         let balanced = self.load_balancing_mode.lock().as_str() == "balanced";
         let current_id = *self.current_id.lock();
+        let affinity_key = affinity_key.filter(|_| self.config.session_affinity.enabled);
+        let preferred = affinity_key.and_then(|key| {
+            self.session_affinity.lock().preferred(
+                key,
+                now,
+                StdDuration::from_secs(self.config.session_affinity.ttl_seconds),
+            )
+        });
         let best = eligible
             .filter(|e| self.dispatchable(e, model, now))
             .min_by_key(|e| {
                 if balanced {
                     (
-                        0,
+                        u8::from(preferred.is_some_and(|id| e.id != id)),
                         e.in_flight.load(Ordering::Relaxed),
                         e.success_count,
                         e.credentials.priority,
                     )
                 } else {
                     // 保留 priority 对当前账号的偏好；满载/冷却时使用其他账号。
-                    (u8::from(e.id != current_id), 0, 0, e.credentials.priority)
+                    (
+                        u8::from(preferred.is_some_and(|id| e.id != id)),
+                        u64::from(e.id != current_id),
+                        0,
+                        e.credentials.priority,
+                    )
                 }
             });
         let Some(entry) = best else {
@@ -917,6 +937,18 @@ impl MultiTokenManager {
         let Ok(global_slot) = self.in_flight_slots.clone().try_acquire_owned() else {
             return Ok((None, ready_at));
         };
+        if affinity_key.is_some() {
+            let (counter, outcome) = match preferred {
+                Some(id) if id == entry.id => (&self.concurrency_metrics.affinity_hit_total, "hit"),
+                Some(_) => (
+                    &self.concurrency_metrics.affinity_fallback_total,
+                    "fallback",
+                ),
+                None => (&self.concurrency_metrics.affinity_miss_total, "miss"),
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
+            crate::request_log::affinity_selection(outcome);
+        }
         *self.current_id.lock() = entry.id;
         Ok((
             Some(ReservedCredential {
@@ -1003,6 +1035,14 @@ impl MultiTokenManager {
     /// # 参数
     /// - `model`: 可选的模型名称，用于过滤支持该模型的凭据（如 opus 模型需要付费订阅）
     pub async fn acquire_context(&self, model: Option<&str>) -> anyhow::Result<CallContext> {
+        self.acquire_context_with_affinity(model, None).await
+    }
+
+    pub(crate) async fn acquire_context_with_affinity(
+        &self,
+        model: Option<&str>,
+        affinity_key: Option<&AffinityKey>,
+    ) -> anyhow::Result<CallContext> {
         let total = self.total_count();
         let max_attempts = (total * MAX_FAILURES_PER_CREDENTIAL as usize).max(1);
         let mut attempt_count = 0;
@@ -1020,7 +1060,7 @@ impl MultiTokenManager {
                 id,
                 credentials,
                 reservation,
-            } = self.reserve_credential(model).await?;
+            } = self.reserve_credential(model, affinity_key).await?;
 
             // 尝试获取/刷新 Token
             match self.try_ensure_token(id, &credentials).await {
