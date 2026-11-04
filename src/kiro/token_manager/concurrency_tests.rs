@@ -465,6 +465,100 @@ async fn snapshot_distinguishes_enabled_cooling_saturated_and_deleted_active_acc
 }
 
 #[tokio::test]
+async fn available_slots_respect_model_eligibility_cooldown_and_disabled_accounts() {
+    let manager = manager(
+        serde_json::json!({"concurrency":{
+            "maxInFlight":3,"maxInFlightPerCredential":2,"adaptiveConcurrency":false
+        }}),
+        3,
+    );
+    manager.entries.lock()[1].credentials.subscription_title = Some("KIRO FREE".into());
+    manager.set_disabled(3, true).unwrap();
+    let metrics = manager.snapshot().concurrency;
+    assert_eq!(metrics.global_available_slots, 3);
+    assert_eq!(metrics.available_slots, 3);
+    assert_eq!(metrics.available_opus_slots, 2);
+
+    let active = manager
+        .acquire_context(Some("claude-opus-4.6"))
+        .await
+        .unwrap();
+    let metrics = manager.snapshot().concurrency;
+    assert_eq!(metrics.global_available_slots, 2);
+    assert_eq!(metrics.available_slots, 2);
+    assert_eq!(metrics.available_opus_slots, 1);
+
+    manager.report_rate_limited_for_context(&active, None);
+    let metrics = manager.snapshot().concurrency;
+    assert_eq!(metrics.available_slots, 2);
+    assert_eq!(metrics.available_opus_slots, 0);
+    manager.set_disabled(2, true).unwrap();
+    assert_eq!(manager.snapshot().concurrency.available_slots, 0);
+
+    drop(active);
+    expire_cooldown(&manager, 1);
+    let metrics = manager.snapshot().concurrency;
+    assert_eq!(metrics.available_slots, 2);
+    assert_eq!(metrics.available_opus_slots, 2);
+}
+
+#[tokio::test]
+async fn deleted_calls_still_limit_available_slots_and_large_account_limits_do_not_overflow() {
+    let manager = manager(
+        serde_json::json!({"concurrency":{"maxInFlight":7,"maxInFlightPerCredential":u64::MAX}}),
+        2,
+    );
+    assert_eq!(manager.snapshot().concurrency.available_slots, 7);
+    let active = manager.acquire_context(None).await.unwrap();
+    manager.set_disabled(active.id, true).unwrap();
+    manager.delete_credential(active.id).unwrap();
+    let metrics = manager.snapshot().concurrency;
+    assert_eq!(metrics.in_flight, 1);
+    assert_eq!(metrics.global_available_slots, 6);
+    assert_eq!(metrics.available_slots, 6);
+    assert_eq!(metrics.available_opus_slots, 6);
+
+    drop(active);
+    let metrics = manager.snapshot().concurrency;
+    assert_eq!(metrics.available_slots, 7);
+    assert_eq!(metrics.available_opus_slots, 7);
+    manager.set_disabled(2, true).unwrap();
+    manager.delete_credential(2).unwrap();
+    let metrics = manager.snapshot().concurrency;
+    assert_eq!(metrics.global_available_slots, 7);
+    assert_eq!(metrics.available_slots, 0);
+    assert_eq!(metrics.available_opus_slots, 0);
+}
+
+#[tokio::test]
+async fn available_slots_follow_adaptive_draining_probe_and_recovery() {
+    let manager = manager(
+        serde_json::json!({"concurrency": {
+            "adaptiveConcurrency": true, "maxInFlight":8, "maxInFlightPerCredential":8
+        }}),
+        1,
+    );
+    let mut active = Vec::new();
+    for _ in 0..4 {
+        active.push(manager.acquire_context(None).await.unwrap());
+    }
+    manager.report_rate_limited_for_context(&active[0], None);
+    expire_cooldown(&manager, 1);
+    assert_eq!(manager.snapshot().concurrency.available_slots, 0);
+    drop(active);
+    assert_eq!(manager.snapshot().concurrency.available_slots, 1);
+
+    let probe = manager.acquire_context(None).await.unwrap();
+    assert_eq!(manager.snapshot().concurrency.available_slots, 0);
+    manager.report_transport_success(&probe);
+    let metrics = manager.snapshot().concurrency;
+    assert_eq!(metrics.available_slots, 3);
+    assert_eq!(metrics.available_opus_slots, 3);
+    drop(probe);
+    assert_eq!(manager.snapshot().concurrency.available_slots, 4);
+}
+
+#[tokio::test]
 async fn cooling_accounts_are_skipped_and_expiry_wakes_waiters_without_a_release() {
     for mode in ["balanced", "priority"] {
         let manager = manager(

@@ -28,6 +28,12 @@ export function ConcurrencyPanel({ metrics }: { metrics: ConcurrencySnapshot }) 
               每账号上限 {metrics.maxInFlightPerCredential}
               {metrics.adaptiveConcurrency && ' · 自适应已开启'}
             </p>
+            {metrics.availableSlots !== undefined && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                空余名额 {metrics.availableSlots} · Opus {metrics.availableOpusSlots ?? 0}
+                {' · '}全局空余 {metrics.globalAvailableSlots ?? 0}
+              </p>
+            )}
           </div>
           <div>
             <dt className="text-xs text-muted-foreground">等待调用</dt>

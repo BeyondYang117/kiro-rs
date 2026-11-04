@@ -125,6 +125,9 @@ mod tests {
         assert_eq!(value["available"], 2);
         assert_eq!(value["concurrency"]["maxInFlight"], 2);
         assert_eq!(value["concurrency"]["inFlight"], 1);
+        assert_eq!(value["concurrency"]["globalAvailableSlots"], 1);
+        assert_eq!(value["concurrency"]["availableSlots"], 0);
+        assert_eq!(value["concurrency"]["availableOpusSlots"], 0);
         assert_eq!(value["concurrency"]["waiting"], 1);
         assert_eq!(value["concurrency"]["waitingOpus"], 0);
         assert_eq!(value["concurrency"]["coolingCredentials"], 1);

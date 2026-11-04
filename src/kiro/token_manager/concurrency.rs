@@ -15,6 +15,9 @@ pub struct ConcurrencySnapshot {
     pub max_waiting: usize,
     pub wait_timeout_seconds: u64,
     pub in_flight: usize,
+    pub global_available_slots: usize,
+    pub available_slots: usize,
+    pub available_opus_slots: usize,
     pub waiting: usize,
     pub waiting_opus: usize,
     pub cooling_credentials: usize,
@@ -200,6 +203,27 @@ impl MultiTokenManager {
     ) -> ConcurrencySnapshot {
         let settings = &self.config.concurrency;
         let metrics = &self.concurrency_metrics;
+        let global_available_slots = self.in_flight_slots.available_permits();
+        let now = Instant::now();
+        let mut available_slots = 0usize;
+        let mut available_opus_slots = 0usize;
+        for entry in entries
+            .iter()
+            .filter(|entry| self.dispatchable(entry, None, now))
+        {
+            let remaining = self
+                .effective_concurrency_limit(entry)
+                .saturating_sub(entry.in_flight.load(Ordering::Relaxed));
+            let remaining = usize::try_from(remaining).unwrap_or(usize::MAX);
+            available_slots = available_slots
+                .saturating_add(remaining)
+                .min(global_available_slots);
+            if entry.credentials.supports_opus() {
+                available_opus_slots = available_opus_slots
+                    .saturating_add(remaining)
+                    .min(global_available_slots);
+            }
+        }
         ConcurrencySnapshot {
             session_affinity_enabled: self.config.session_affinity.enabled,
             adaptive_concurrency: settings.adaptive_concurrency,
@@ -223,7 +247,10 @@ impl MultiTokenManager {
             max_waiting: settings.max_waiting,
             wait_timeout_seconds: settings.wait_timeout_seconds,
             // 被删除但响应仍在消费的账号仍占用全局名额，不能用 entries 求和。
-            in_flight: settings.max_in_flight - self.in_flight_slots.available_permits(),
+            in_flight: settings.max_in_flight - global_available_slots,
+            global_available_slots,
+            available_slots,
+            available_opus_slots,
             waiting: queue.len(),
             waiting_opus: queue.iter().filter(|waiter| waiter.requires_opus).count(),
             cooling_credentials: entries

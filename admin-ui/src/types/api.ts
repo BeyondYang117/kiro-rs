@@ -45,6 +45,9 @@ export interface ConcurrencySnapshot {
   maxWaiting: number
   waitTimeoutSeconds: number
   inFlight: number
+  globalAvailableSlots?: number
+  availableSlots?: number
+  availableOpusSlots?: number
   waiting: number
   waitingOpus?: number
   coolingCredentials: number

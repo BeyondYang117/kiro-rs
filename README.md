@@ -572,6 +572,8 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
 
 管理首页每 5 秒刷新并发状态：全局在途/等待数量及上限、等待中的 Opus/其他调用数量、账号冷却/满载数量、排队拒绝/超时次数、429 次数和排队耗时；账号列表展示各账号在途数量与剩余冷却时间。“已启用凭据”不等于此刻可调度，冷却与满载账号数可重叠。
 
+空余容量通过 `concurrency.globalAvailableSlots`（全局剩余名额）、`availableSlots`（通用调用可用名额）和 `availableOpusSlots`（Opus 可用名额）展示。账号池可用名额按未禁用、冷却已结束账号的生效上限减去在途数计算，再受全局剩余名额约束；Opus 仅计支持该模型的账号。两类容量共享全局资源，不能相加。全局有空余而账号池容量为零时，应检查账号冷却、满载及模型资格。指标是采样时的容量估计，包含尚未结束的已删除账号对全局名额的占用；既有等待者仍按公平队列优先调度，空余数不保证新请求立即获准，也不预测 Token 刷新是否成功。
+
 会话亲和指标同样通过 `GET /api/admin/credentials` 的 `concurrency` 返回：`sessionAffinityEnabled` 为开关；`affinityHitTotal` 为复用绑定账号次数，`affinityMissTotal` 为无有效绑定次数，`affinityFallbackTotal` 为已有绑定但分流次数，`affinitySwitchTotal` 为有效绑定经成功响应切换账号的次数。前三项在每次获得上游名额时计数，包含重试，不是客户端请求数或上游缓存命中数；已有绑定复用率为 `hit / (hit + fallback)`。管理首页展示这些指标，调用详情和日志 JSON 的 `affinity` 字段记录最后一次带会话标识的调度结果（`hit` / `miss` / `fallback`），可以结合首包耗时、上游尝试和 429 记录评估效果；旧日志没有此字段。所有亲和累计指标自进程启动起统计。
 
 启用自适应并发后，管理首页同时显示恢复中、单请求探测中的账号数和实际降档次数，账号列表显示当前生效上限及单请求探测成功后的目标上限。`concurrency.adaptiveConcurrency` 表示是否启用，`concurrency.recoveringCredentials` 统计已启用且尚在探测或尚未恢复配置上限的账号（包括冷却中的账号），`concurrency.probingCredentials` 是其中处于单请求探测的账号数；`concurrency.adaptiveReductionTotal` 只统计容量实际降低的次数，同批请求的迟到 429 不重复计数；`credentials[].effectiveConcurrencyLimit` 是各账号当前容量上限，探测中的账号还会返回 `adaptiveProbeTarget`，冷却仍会暂时阻止调度。
