@@ -74,7 +74,7 @@ mod tests {
         let manager = Arc::new(
             MultiTokenManager::new(
                 serde_json::from_value(serde_json::json!({"concurrency":{
-                "maxInFlight":2,"maxInFlightPerCredential":1}}))
+                "maxInFlight":2,"maxInFlightPerCredential":1,"adaptiveConcurrency":false}}))
                 .unwrap(),
                 (1..=2)
                     .map(|id| KiroCredentials {

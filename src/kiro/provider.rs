@@ -895,7 +895,8 @@ mod response_tests {
                 let manager = Arc::new(
                     MultiTokenManager::new(
                         serde_json::from_value(serde_json::json!({"concurrency": {
-                            "adaptiveConcurrency": true, "rateLimitCooldownSeconds": 1
+                            "adaptiveConcurrency": true, "maxInFlightPerCredential": 4,
+                            "rateLimitCooldownSeconds": 1
                         }}))
                         .unwrap(),
                         vec![KiroCredentials {

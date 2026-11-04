@@ -11,9 +11,10 @@
   "loadBalancingMode": "balanced",
   "concurrency": {
     "maxInFlight": 64,
-    "maxInFlightPerCredential": 4,
+    "maxInFlightPerCredential": 8,
     "maxWaiting": 128,
     "waitTimeoutSeconds": 30,
-    "rateLimitCooldownSeconds": 30
+    "rateLimitCooldownSeconds": 30,
+    "adaptiveConcurrency": true
   }
 }

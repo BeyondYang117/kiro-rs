@@ -222,11 +222,11 @@ docker login -u abu116
 | `sessionAffinity.ttlSeconds` | integer | `1800` | 绑定自上次成功响应起的有效秒数，范围 1～86400 |
 | `sessionAffinity.maxEntries` | integer | `10000` | 进程内绑定数量上限，范围 1～1000000；超限淘汰最久未成功的绑定 |
 | `concurrency.maxInFlight` | integer | `64` | 全局上游在途调用上限，必须大于 0 |
-| `concurrency.maxInFlightPerCredential` | integer | `4` | 单账号在途调用上限，必须大于 0 |
+| `concurrency.maxInFlightPerCredential` | integer | `8` | 单账号在途调用上限，必须大于 0 |
 | `concurrency.maxWaiting` | integer | `128` | 等待名额的调用上限；`0` 表示满载/冷却时立即拒绝 |
 | `concurrency.waitTimeoutSeconds` | integer | `30` | 每次获取调用名额的最长等待秒数，范围 1～86400 |
 | `concurrency.rateLimitCooldownSeconds` | integer | `30` | 账号收到 429 后的最短冷却秒数，范围 1～86400；与 `Retry-After` 取较长者 |
-| `concurrency.adaptiveConcurrency` | boolean | `false` | 启用账号级自适应并发：429 后降低容量，冷却后单请求探测，再逐步恢复至配置上限 |
+| `concurrency.adaptiveConcurrency` | boolean | `true` | 启用账号级自适应并发：429 后降低容量，冷却后单请求探测，再逐步恢复至配置上限 |
 | `ccBufferedStream` | boolean | `true` | `/cc/v1/messages` 是否缓冲完整流；设为 `false` 可实时返回内容 |
 | `extractThinking` | boolean | `true` | 非流式响应的 thinking 块提取。启用后 `<thinking>` 标签会被解析为独立的 `thinking` 内容块 |
 | `defaultEndpoint` | string | `ide` | 默认 Kiro 端点。凭据未显式指定 `endpoint` 时使用。当前支持：`ide` |
@@ -243,9 +243,9 @@ docker login -u abu116
 
 绑定键使用规范化 `conversationId` UUID 的哈希。客户端通过 `metadata.user_id` 中的 `session_<UUID>` 或 JSON `session_id` 提供稳定标识；没有稳定标识时转换器每次生成新 UUID，无法跨请求复用。绑定不依赖模型，但每次选账号仍检查模型资格；WebSearch 的 MCP 调用不建立会话绑定。绑定仅保存在当前进程，重启清空，设置修改后重启生效；只保存哈希、账号 ID 和成功时间，数量受上限约束。亲和不保证 Kiro 上游缓存命中，也不改变 token 用量统计。
 
-设置 `concurrency.adaptiveConcurrency: true` 后，每个账号初始使用配置的单账号上限。收到 429 时将其恢复目标减半（向下取整，最小 1），保留原有冷却规则；同一批已在途请求陆续返回的 429 只触发一次降档，但每次仍会按 `Retry-After` 延长冷却。冷却结束后仅允许一个在途调用探测。探测的 2xx 响应体完整读完后恢复至减半后的目标，此后每完成一轮当前上限数量的响应，增加一个名额，直到达到配置上限。例如上限为 4 时，恢复过程为单请求探测 → 2 → 3 → 4。新一轮调用再次收到 429 会重新减半并探测，其他账号不受影响。满载判断和公平队列均使用实际生效的上限。
+账号级自适应并发默认开启，每个账号初始使用配置的单账号上限（默认 8）。收到 429 时将其恢复目标减半（向下取整，最小 1），保留原有冷却规则；同一批已在途请求陆续返回的 429 只触发一次降档，但每次仍会按 `Retry-After` 延长冷却。冷却结束后仅允许一个在途调用探测。探测的 2xx 响应体完整读完后恢复至减半后的目标，此后每完成一轮当前上限数量的响应，增加一个名额，直到达到配置上限。例如上限为 8 时，恢复过程为单请求探测 → 4 → 5 → 6 → 7 → 8。新一轮调用再次收到 429 会重新减半并探测，其他账号不受影响。满载判断和公平队列均使用实际生效的上限。
 
-降低上限不会取消已在途的调用；调度器等待其释放名额后再允许探测。容量恢复以传输完成为依据，与业务响应校验和成功统计分开。取消、丢弃响应、响应体读取失败、限流前请求的迟到成功和克隆上下文的重复回报不会推动恢复；完整收到但业务内容无效的 2xx 仍可能推动容量恢复。该策略只控制并发，不保证满足上游 RPM/TPM 限额，状态在重启后重置。默认关闭以兼容已有配置。
+降低上限不会取消已在途的调用；调度器等待其释放名额后再允许探测。容量恢复以传输完成为依据，与业务响应校验和成功统计分开。取消、丢弃响应、响应体读取失败、限流前请求的迟到成功和克隆上下文的重复回报不会推动恢复；完整收到但业务内容无效的 2xx 仍可能推动容量恢复。该策略只控制并发，不保证满足上游 RPM/TPM 限额，状态在重启后重置。已有配置显式指定的上限和开关继续生效；省略字段时使用新的默认值。设为 `concurrency.adaptiveConcurrency: false` 可关闭自适应机制。
 
 完整配置示例：
 
@@ -272,10 +272,11 @@ docker login -u abu116
    "loadBalancingMode": "balanced",
    "concurrency": {
       "maxInFlight": 64,
-      "maxInFlightPerCredential": 4,
+      "maxInFlightPerCredential": 8,
       "maxWaiting": 128,
       "waitTimeoutSeconds": 30,
-      "rateLimitCooldownSeconds": 30
+      "rateLimitCooldownSeconds": 30,
+      "adaptiveConcurrency": true
    },
    "extractThinking": true
 }

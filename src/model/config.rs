@@ -29,11 +29,11 @@ impl Default for ConcurrencyConfig {
     fn default() -> Self {
         Self {
             max_in_flight: 64,
-            max_in_flight_per_credential: 4,
+            max_in_flight_per_credential: 8,
             max_waiting: 128,
             wait_timeout_seconds: 30,
             rate_limit_cooldown_seconds: 30,
-            adaptive_concurrency: false,
+            adaptive_concurrency: true,
         }
     }
 }
@@ -454,9 +454,9 @@ mod tests {
         let defaults: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(defaults.load_balancing_mode, "balanced");
         assert_eq!(defaults.concurrency.max_in_flight, 64);
-        assert_eq!(defaults.concurrency.max_in_flight_per_credential, 4);
+        assert_eq!(defaults.concurrency.max_in_flight_per_credential, 8);
         assert_eq!(defaults.concurrency.max_waiting, 128);
-        assert!(!defaults.concurrency.adaptive_concurrency);
+        assert!(defaults.concurrency.adaptive_concurrency);
         let config: Config = serde_json::from_str(
             r#"{"loadBalancingMode":"priority","concurrency":{"maxWaiting":0,"maxInFlight":2}}"#,
         )
@@ -464,16 +464,19 @@ mod tests {
         config.concurrency.validate().unwrap();
         assert_eq!(config.load_balancing_mode, "priority");
         assert_eq!(config.concurrency.max_waiting, 0);
+        assert_eq!(config.concurrency.max_in_flight_per_credential, 8);
+        assert!(config.concurrency.adaptive_concurrency);
         assert_eq!(config.concurrency.wait_timeout_seconds, 30);
         let encoded = serde_json::to_value(config).unwrap();
         assert_eq!(encoded["concurrency"]["maxInFlight"], 2);
         assert_eq!(encoded["concurrency"]["maxWaiting"], 0);
-        assert_eq!(encoded["concurrency"]["adaptiveConcurrency"], false);
-        let enabled: Config = serde_json::from_value(serde_json::json!({
-            "concurrency": {"adaptiveConcurrency": true}
+        assert_eq!(encoded["concurrency"]["adaptiveConcurrency"], true);
+        let explicit: Config = serde_json::from_value(serde_json::json!({
+            "concurrency": {"maxInFlightPerCredential": 4, "adaptiveConcurrency": false}
         }))
         .unwrap();
-        assert!(enabled.concurrency.adaptive_concurrency);
+        assert_eq!(explicit.concurrency.max_in_flight_per_credential, 4);
+        assert!(!explicit.concurrency.adaptive_concurrency);
     }
 
     #[test]

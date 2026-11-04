@@ -785,9 +785,12 @@ async fn adaptive_control_can_be_disabled_and_handles_a_single_slot() {
         assert_eq!(manager.snapshot().entries[0].effective_concurrency_limit, 1);
         assert_eq!(manager.snapshot().concurrency.recovering_credentials, 0);
     }
-    let manager = manager(serde_json::json!({}), 1);
+    let manager = manager(
+        serde_json::json!({"concurrency":{"adaptiveConcurrency":false}}),
+        1,
+    );
     manager.report_rate_limited(1, None);
-    assert_eq!(manager.snapshot().entries[0].effective_concurrency_limit, 4);
+    assert_eq!(manager.snapshot().entries[0].effective_concurrency_limit, 8);
     assert!(!manager.snapshot().concurrency.adaptive_concurrency);
 }
 
