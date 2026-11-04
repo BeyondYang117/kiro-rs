@@ -220,6 +220,10 @@ impl EventStreamDecoder {
         DecodeIter { decoder: self }
     }
 
+    pub fn has_pending_data(&self) -> bool {
+        !self.buffer.is_empty()
+    }
+
     /// 尝试容错恢复
     ///
     /// 根据错误类型采用不同的恢复策略（参考 kiro-kt 的设计）：
@@ -289,7 +293,6 @@ impl EventStreamDecoder {
             }
         }
     }
-
 }
 
 /// 解码迭代器

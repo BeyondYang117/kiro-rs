@@ -10,7 +10,7 @@ use axum::{
 use crate::kiro::provider::KiroProvider;
 
 use super::{
-    handlers::{count_tokens, get_models, post_messages, post_messages_cc},
+    handlers::{count_tokens, get_model, get_models, post_messages, post_messages_cc},
     middleware::{AppState, auth_middleware, cors_layer},
 };
 
@@ -32,14 +32,16 @@ const MAX_BODY_SIZE: usize = 50 * 1024 * 1024;
 /// # 参数
 /// - `api_key`: API 密钥，用于验证客户端请求
 /// - `kiro_provider`: 可选的 KiroProvider，用于调用上游 API
-
-/// 创建带有 KiroProvider 的 Anthropic API 路由
+/// - `extract_thinking`: 是否从非流式响应中提取 thinking 块
+/// - `cc_buffered_stream`: 是否缓冲 Claude Code 流式响应以更正初始 usage
 pub fn create_router_with_provider(
     api_key: impl Into<String>,
     kiro_provider: Option<KiroProvider>,
     extract_thinking: bool,
+    cc_buffered_stream: bool,
 ) -> Router {
     let mut state = AppState::new(api_key, extract_thinking);
+    state.cc_buffered_stream = cc_buffered_stream;
     if let Some(provider) = kiro_provider {
         state = state.with_kiro_provider(provider);
     }
@@ -47,6 +49,7 @@ pub fn create_router_with_provider(
     // 需要认证的 /v1 路由
     let v1_routes = Router::new()
         .route("/models", get(get_models))
+        .route("/models/{model_id}", get(get_model))
         .route("/messages", post(post_messages))
         .route("/messages/count_tokens", post(count_tokens))
         .layer(middleware::from_fn_with_state(
@@ -57,6 +60,8 @@ pub fn create_router_with_provider(
     // 需要认证的 /cc/v1 路由（Claude Code 兼容端点）
     // 与 /v1 的区别：流式响应会等待 contextUsageEvent 后再发送 message_start
     let cc_v1_routes = Router::new()
+        .route("/models", get(get_models))
+        .route("/models/{model_id}", get(get_model))
         .route("/messages", post(post_messages_cc))
         .route("/messages/count_tokens", post(count_tokens))
         .layer(middleware::from_fn_with_state(

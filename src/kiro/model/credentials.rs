@@ -11,7 +11,7 @@ use crate::http_client::ProxyConfig;
 use crate::model::config::Config;
 
 /// Kiro OAuth 凭证
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct KiroCredentials {
     /// 凭据唯一标识符（自增 ID）
@@ -111,6 +111,24 @@ pub struct KiroCredentials {
     pub endpoint: Option<String>,
 }
 
+/// Debug 仅输出运维元数据，避免令牌、客户端密钥和代理认证进入日志。
+impl std::fmt::Debug for KiroCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KiroCredentials")
+            .field("id", &self.id)
+            .field("auth_method", &self.auth_method)
+            .field("priority", &self.priority)
+            .field("disabled", &self.disabled)
+            .field("expires_at", &self.expires_at)
+            .field("subscription_title", &self.subscription_title)
+            .field("endpoint", &self.endpoint)
+            .field("has_access_token", &self.access_token.is_some())
+            .field("has_refresh_token", &self.refresh_token.is_some())
+            .field("has_api_key", &self.kiro_api_key.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// 判断是否为零（用于跳过序列化）
 fn is_zero(value: &u32) -> bool {
     *value == 0
@@ -135,7 +153,7 @@ fn canonicalize_auth_method_value(value: &str) -> &str {
 #[serde(untagged)]
 pub enum CredentialsConfig {
     /// 单个凭据（旧格式）
-    Single(KiroCredentials),
+    Single(Box<KiroCredentials>),
     /// 多凭据数组（新格式）
     Multiple(Vec<KiroCredentials>),
 }
@@ -170,7 +188,7 @@ impl CredentialsConfig {
         match self {
             CredentialsConfig::Single(mut cred) => {
                 cred.canonicalize_auth_method();
-                vec![cred]
+                vec![*cred]
             }
             CredentialsConfig::Multiple(mut creds) => {
                 // 按优先级排序（数字越小优先级越高）
@@ -517,9 +535,11 @@ mod tests {
 
     #[test]
     fn test_machine_id_field_serialization() {
-        let mut creds = KiroCredentials::default();
-        creds.refresh_token = Some("test".to_string());
-        creds.machine_id = Some("b".repeat(64));
+        let creds = KiroCredentials {
+            refresh_token: Some("test".to_string()),
+            machine_id: Some("b".repeat(64)),
+            ..Default::default()
+        };
 
         let json = creds.to_pretty_json().unwrap();
         assert!(json.contains("machineId"));
@@ -527,9 +547,11 @@ mod tests {
 
     #[test]
     fn test_machine_id_field_none_not_serialized() {
-        let mut creds = KiroCredentials::default();
-        creds.refresh_token = Some("test".to_string());
-        creds.machine_id = None;
+        let creds = KiroCredentials {
+            refresh_token: Some("test".to_string()),
+            machine_id: None,
+            ..Default::default()
+        };
 
         let json = creds.to_pretty_json().unwrap();
         assert!(!json.contains("machineId"));
@@ -645,10 +667,12 @@ mod tests {
 
     #[test]
     fn test_auth_api_region_serialization() {
-        let mut creds = KiroCredentials::default();
-        creds.refresh_token = Some("test".to_string());
-        creds.auth_region = Some("eu-west-1".to_string());
-        creds.api_region = Some("us-west-2".to_string());
+        let creds = KiroCredentials {
+            refresh_token: Some("test".to_string()),
+            auth_region: Some("eu-west-1".to_string()),
+            api_region: Some("us-west-2".to_string()),
+            ..Default::default()
+        };
 
         let json = creds.to_pretty_json().unwrap();
         assert!(json.contains("authRegion"));
@@ -659,10 +683,12 @@ mod tests {
 
     #[test]
     fn test_auth_api_region_none_not_serialized() {
-        let mut creds = KiroCredentials::default();
-        creds.refresh_token = Some("test".to_string());
-        creds.auth_region = None;
-        creds.api_region = None;
+        let creds = KiroCredentials {
+            refresh_token: Some("test".to_string()),
+            auth_region: None,
+            api_region: None,
+            ..Default::default()
+        };
 
         let json = creds.to_pretty_json().unwrap();
         assert!(!json.contains("authRegion"));
@@ -671,11 +697,13 @@ mod tests {
 
     #[test]
     fn test_auth_api_region_roundtrip() {
-        let mut original = KiroCredentials::default();
-        original.refresh_token = Some("refresh".to_string());
-        original.region = Some("us-east-1".to_string());
-        original.auth_region = Some("eu-west-1".to_string());
-        original.api_region = Some("ap-northeast-1".to_string());
+        let original = KiroCredentials {
+            refresh_token: Some("refresh".to_string()),
+            region: Some("us-east-1".to_string()),
+            auth_region: Some("eu-west-1".to_string()),
+            api_region: Some("ap-northeast-1".to_string()),
+            ..Default::default()
+        };
 
         let json = original.to_pretty_json().unwrap();
         let parsed = KiroCredentials::from_json(&json).unwrap();
@@ -707,9 +735,11 @@ mod tests {
         config.region = "config-region".to_string();
         config.auth_region = Some("config-auth-region".to_string());
 
-        let mut creds = KiroCredentials::default();
-        creds.region = Some("cred-region".to_string());
-        creds.auth_region = Some("cred-auth-region".to_string());
+        let creds = KiroCredentials {
+            region: Some("cred-region".to_string()),
+            auth_region: Some("cred-auth-region".to_string()),
+            ..Default::default()
+        };
 
         assert_eq!(creds.effective_auth_region(&config), "cred-auth-region");
     }
@@ -720,8 +750,10 @@ mod tests {
         config.region = "config-region".to_string();
         config.auth_region = Some("config-auth-region".to_string());
 
-        let mut creds = KiroCredentials::default();
-        creds.region = Some("cred-region".to_string());
+        let creds = KiroCredentials {
+            region: Some("cred-region".to_string()),
+            ..Default::default()
+        };
         // auth_region 未设置
 
         assert_eq!(creds.effective_auth_region(&config), "cred-region");
@@ -757,8 +789,10 @@ mod tests {
         config.region = "config-region".to_string();
         config.api_region = Some("config-api-region".to_string());
 
-        let mut creds = KiroCredentials::default();
-        creds.api_region = Some("cred-api-region".to_string());
+        let creds = KiroCredentials {
+            api_region: Some("cred-api-region".to_string()),
+            ..Default::default()
+        };
 
         assert_eq!(creds.effective_api_region(&config), "cred-api-region");
     }
@@ -790,8 +824,10 @@ mod tests {
         let mut config = Config::default();
         config.region = "config-region".to_string();
 
-        let mut creds = KiroCredentials::default();
-        creds.region = Some("cred-region".to_string());
+        let creds = KiroCredentials {
+            region: Some("cred-region".to_string()),
+            ..Default::default()
+        };
 
         assert_eq!(creds.effective_api_region(&config), "config-region");
     }
@@ -802,9 +838,11 @@ mod tests {
         let mut config = Config::default();
         config.region = "default".to_string();
 
-        let mut creds = KiroCredentials::default();
-        creds.auth_region = Some("auth-only".to_string());
-        creds.api_region = Some("api-only".to_string());
+        let creds = KiroCredentials {
+            auth_region: Some("auth-only".to_string()),
+            api_region: Some("api-only".to_string()),
+            ..Default::default()
+        };
 
         assert_eq!(creds.effective_auth_region(&config), "auth-only");
         assert_eq!(creds.effective_api_region(&config), "api-only");
@@ -815,8 +853,10 @@ mod tests {
     #[test]
     fn test_effective_proxy_credential_overrides_global() {
         let global = ProxyConfig::new("http://global:8080");
-        let mut creds = KiroCredentials::default();
-        creds.proxy_url = Some("socks5://cred:1080".to_string());
+        let creds = KiroCredentials {
+            proxy_url: Some("socks5://cred:1080".to_string()),
+            ..Default::default()
+        };
 
         let result = creds.effective_proxy(Some(&global));
         assert_eq!(result, Some(ProxyConfig::new("socks5://cred:1080")));
@@ -825,10 +865,12 @@ mod tests {
     #[test]
     fn test_effective_proxy_credential_with_auth() {
         let global = ProxyConfig::new("http://global:8080");
-        let mut creds = KiroCredentials::default();
-        creds.proxy_url = Some("http://proxy:3128".to_string());
-        creds.proxy_username = Some("user".to_string());
-        creds.proxy_password = Some("pass".to_string());
+        let creds = KiroCredentials {
+            proxy_url: Some("http://proxy:3128".to_string()),
+            proxy_username: Some("user".to_string()),
+            proxy_password: Some("pass".to_string()),
+            ..Default::default()
+        };
 
         let result = creds.effective_proxy(Some(&global));
         let expected = ProxyConfig::new("http://proxy:3128").with_auth("user", "pass");
@@ -838,8 +880,10 @@ mod tests {
     #[test]
     fn test_effective_proxy_direct_bypasses_global() {
         let global = ProxyConfig::new("http://global:8080");
-        let mut creds = KiroCredentials::default();
-        creds.proxy_url = Some("direct".to_string());
+        let creds = KiroCredentials {
+            proxy_url: Some("direct".to_string()),
+            ..Default::default()
+        };
 
         let result = creds.effective_proxy(Some(&global));
         assert_eq!(result, None);
@@ -848,8 +892,10 @@ mod tests {
     #[test]
     fn test_effective_proxy_direct_case_insensitive() {
         let global = ProxyConfig::new("http://global:8080");
-        let mut creds = KiroCredentials::default();
-        creds.proxy_url = Some("DIRECT".to_string());
+        let creds = KiroCredentials {
+            proxy_url: Some("DIRECT".to_string()),
+            ..Default::default()
+        };
 
         let result = creds.effective_proxy(Some(&global));
         assert_eq!(result, None);
@@ -869,5 +915,31 @@ mod tests {
         let creds = KiroCredentials::default();
         let result = creds.effective_proxy(None);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn credential_debug_omits_secrets_and_proxy_authentication() {
+        let secret = "sensitive-sentinel";
+        let credentials = KiroCredentials {
+            id: Some(7),
+            access_token: Some(secret.into()),
+            refresh_token: Some(secret.into()),
+            client_secret: Some(secret.into()),
+            kiro_api_key: Some(secret.into()),
+            proxy_url: Some(format!("http://user:{secret}@localhost")),
+            proxy_username: Some(secret.into()),
+            proxy_password: Some(secret.into()),
+            ..Default::default()
+        };
+        let debug = format!(
+            "{:?}",
+            CredentialsConfig::Single(Box::new(credentials.clone()))
+        );
+        assert!(!debug.contains(secret));
+        assert!(debug.contains("id: Some(7)"));
+        // Debug redaction must not change the persistence format.
+        let encoded = serde_json::to_value(credentials).unwrap();
+        assert_eq!(encoded["refreshToken"], secret);
+        assert_eq!(encoded["kiroApiKey"], secret);
     }
 }

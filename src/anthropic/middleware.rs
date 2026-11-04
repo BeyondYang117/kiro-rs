@@ -25,6 +25,8 @@ pub struct AppState {
     pub kiro_provider: Option<Arc<KiroProvider>>,
     /// 是否开启非流式响应的 thinking 块提取
     pub extract_thinking: bool,
+    /// 缓冲 Claude Code SSE，默认保持准确初始 usage 的行为。
+    pub cc_buffered_stream: bool,
 }
 
 impl AppState {
@@ -34,6 +36,7 @@ impl AppState {
             api_key: api_key.into(),
             kiro_provider: None,
             extract_thinking,
+            cc_buffered_stream: true,
         }
     }
 
@@ -75,4 +78,5 @@ pub fn cors_layer() -> tower_http::cors::CorsLayer {
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any)
+        .expose_headers([axum::http::HeaderName::from_static("x-request-id")])
 }

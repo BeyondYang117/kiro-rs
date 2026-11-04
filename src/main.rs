@@ -5,6 +5,7 @@ mod common;
 mod http_client;
 mod kiro;
 mod model;
+mod request_log;
 pub mod token;
 
 use std::collections::HashMap;
@@ -17,6 +18,7 @@ use kiro::provider::KiroProvider;
 use kiro::token_manager::MultiTokenManager;
 use model::arg::Args;
 use model::config::Config;
+use tracing_subscriber::prelude::*;
 
 #[tokio::main]
 async fn main() {
@@ -24,10 +26,15 @@ async fn main() {
     let args = Args::parse();
 
     // 初始化日志
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer().with_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            ),
+        )
+        .with(
+            request_log::DiagnosticLayer.with_filter(tracing_subscriber::filter::LevelFilter::WARN),
         )
         .init();
 
@@ -49,7 +56,7 @@ async fn main() {
         std::process::exit(1);
     });
 
-    // 判断是否为多凭据格式（用于刷新后回写）
+    // 记录原始凭据格式，回写时尽量保留
     let is_multiple_format = credentials_config.is_multiple();
 
     // 转换为按优先级排序的凭据列表
@@ -93,7 +100,7 @@ async fn main() {
     });
 
     if proxy_config.is_some() {
-        tracing::info!("已配置 HTTP 代理: {}", config.proxy_url.as_ref().unwrap());
+        tracing::info!("已配置 HTTP 代理");
     }
 
     // 构建端点注册表
@@ -111,10 +118,7 @@ async fn main() {
 
     // 校验所有凭据声明的端点都已注册
     for cred in &credentials_list {
-        let name = cred
-            .endpoint
-            .as_deref()
-            .unwrap_or(&config.default_endpoint);
+        let name = cred.endpoint.as_deref().unwrap_or(&config.default_endpoint);
         if !endpoints.contains_key(name) {
             tracing::error!(
                 "凭据 id={:?} 指定了未知端点 \"{}\"（已注册: {:?}）",
@@ -133,7 +137,7 @@ async fn main() {
         config.clone(),
         credentials_list,
         proxy_config.clone(),
-        Some(credentials_path.into()),
+        Some(credentials_path.clone().into()),
         is_multiple_format,
     )
     .unwrap_or_else(|e| {
@@ -141,6 +145,22 @@ async fn main() {
         std::process::exit(1);
     });
     let token_manager = Arc::new(token_manager);
+    let log_path = config
+        .request_log_path
+        .clone()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(&credentials_path)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("kiro_requests.sqlite3")
+        });
+    let request_logs = request_log::LogStore::open(&log_path, config.request_log_retention_days)
+        .unwrap_or_else(|error| {
+            tracing::error!("初始化调用日志失败: {error:#}");
+            std::process::exit(1);
+        });
+    tracing::info!(path = %log_path.display(), "调用日志持久化已启用");
     let kiro_provider = KiroProvider::with_proxy(
         token_manager.clone(),
         proxy_config.clone(),
@@ -155,6 +175,7 @@ async fn main() {
         auth_type: config.count_tokens_auth_type.clone(),
         proxy: proxy_config,
         tls_backend: config.tls_backend,
+        timeout_secs: config.count_tokens_timeout_seconds,
     });
 
     // 构建 Anthropic API 路由（profile_arn 由 provider 层根据实际凭据动态注入）
@@ -162,6 +183,7 @@ async fn main() {
         &api_key,
         Some(kiro_provider),
         config.extract_thinking,
+        config.cc_buffered_stream,
     );
 
     // 构建 Admin API 路由（如果配置了非空的 admin_api_key）
@@ -180,7 +202,8 @@ async fn main() {
             let admin_service =
                 admin::AdminService::new(token_manager.clone(), endpoint_names.clone());
             let admin_state = admin::AdminState::new(admin_key, admin_service);
-            let admin_app = admin::create_admin_router(admin_state);
+            let admin_app = admin::create_admin_router(admin_state)
+                .layer(axum::Extension(request_logs.clone()));
 
             // 创建 Admin UI 路由
             let admin_ui_app = admin_ui::create_admin_ui_router();
@@ -195,10 +218,15 @@ async fn main() {
         anthropic_app
     };
 
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        request_logs,
+        request_log::middleware,
+    ));
+
     // 启动服务器
     let addr = format!("{}:{}", config.host, config.port);
     tracing::info!("启动 Anthropic API 端点: {}", addr);
-    tracing::info!("API Key: {}***", &api_key[..(api_key.len() / 2)]);
+    tracing::info!("API Key 认证已启用");
     tracing::info!("可用 API:");
     tracing::info!("  GET  /v1/models");
     tracing::info!("  POST /v1/messages");

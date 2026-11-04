@@ -7,15 +7,13 @@
 //! - 西文字符：每个计 1 个字符单位
 //! - 4 个字符单位 = 1 token（四舍五入）
 
-use crate::anthropic::types::{
-    CountTokensRequest, CountTokensResponse, Message, SystemMessage, Tool,
-};
+use crate::anthropic::types::{CountTokensResponse, Message, SystemMessage, Tool};
 use crate::http_client::{ProxyConfig, build_client};
 use crate::model::config::TlsBackend;
 use std::sync::OnceLock;
 
 /// Count Tokens API 配置
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct CountTokensConfig {
     /// 外部 count_tokens API 地址
     pub api_url: Option<String>,
@@ -27,21 +25,69 @@ pub struct CountTokensConfig {
     pub proxy: Option<ProxyConfig>,
 
     pub tls_backend: TlsBackend,
+    /// 远程计数总超时（秒）。
+    pub timeout_secs: u64,
 }
 
-/// 全局配置存储
-static COUNT_TOKENS_CONFIG: OnceLock<CountTokensConfig> = OnceLock::new();
+impl Default for CountTokensConfig {
+    fn default() -> Self {
+        Self {
+            api_url: None,
+            api_key: None,
+            auth_type: "x-api-key".into(),
+            proxy: None,
+            tls_backend: TlsBackend::default(),
+            timeout_secs: 10,
+        }
+    }
+}
 
-/// 初始化 count_tokens 配置
-///
-/// 应在应用启动时调用一次
+/// 全局计数服务；共享连接池，避免每个请求重新构建客户端。
+static COUNT_TOKENS_SERVICE: OnceLock<CountTokensService> = OnceLock::new();
+
+struct CountTokensService {
+    config: CountTokensConfig,
+    client: Option<reqwest::Client>,
+}
+
+impl CountTokensService {
+    fn new(config: CountTokensConfig) -> Self {
+        let client = config.api_url.as_ref().and_then(|_| {
+            match build_client(
+                config.proxy.as_ref(),
+                config.timeout_secs.max(1),
+                config.tls_backend,
+            ) {
+                Ok(client) => Some(client),
+                Err(error) => {
+                    tracing::warn!("无法初始化远程 token 计数客户端，将使用本地估算: {error:#}");
+                    None
+                }
+            }
+        });
+        Self { config, client }
+    }
+
+    async fn count(&self, request: &TokenCountRequest<'_>) -> u64 {
+        if let (Some(url), Some(client)) = (&self.config.api_url, &self.client) {
+            match call_remote_count_tokens(client, url, &self.config, request).await {
+                Ok(tokens) => return tokens,
+                Err(error) => {
+                    tracing::warn!("远程 count_tokens API 调用失败，回退到本地计算: {error:#}")
+                }
+            }
+        }
+        count_all_tokens_local(
+            request.system.as_deref(),
+            request.messages,
+            request.tools.as_deref(),
+        )
+    }
+}
+
+/// 应在应用启动时调用一次。
 pub fn init_config(config: CountTokensConfig) {
-    let _ = COUNT_TOKENS_CONFIG.set(config);
-}
-
-/// 获取配置
-fn get_config() -> Option<&'static CountTokensConfig> {
-    COUNT_TOKENS_CONFIG.get()
+    let _ = COUNT_TOKENS_SERVICE.set(CountTokensService::new(config));
 }
 
 /// 判断字符是否为非西文字符
@@ -105,114 +151,88 @@ pub fn count_tokens(text: &str) -> u64 {
 /// 估算请求的输入 tokens
 ///
 /// 优先调用远程 API，失败时回退到本地计算
-pub(crate) fn count_all_tokens(
-    model: String,
-    system: Option<Vec<SystemMessage>>,
-    messages: Vec<Message>,
-    tools: Option<Vec<Tool>>,
+pub(crate) async fn count_all_tokens(
+    model: &str,
+    system: &Option<Vec<SystemMessage>>,
+    messages: &[Message],
+    tools: &Option<Vec<Tool>>,
 ) -> u64 {
-    // 检查是否配置了远程 API
-    if let Some(config) = get_config() {
-        if let Some(api_url) = &config.api_url {
-            // 尝试调用远程 API
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(call_remote_count_tokens(
-                    api_url, config, model, &system, &messages, &tools,
-                ))
-            });
-
-            match result {
-                Ok(tokens) => {
-                    tracing::debug!("远程 count_tokens API 返回: {}", tokens);
-                    return tokens;
-                }
-                Err(e) => {
-                    tracing::warn!("远程 count_tokens API 调用失败，回退到本地计算: {}", e);
-                }
-            }
-        }
+    let request = TokenCountRequest {
+        model,
+        system,
+        messages,
+        tools,
+    };
+    match COUNT_TOKENS_SERVICE.get() {
+        Some(service) => service.count(&request).await,
+        None => count_all_tokens_local(system.as_deref(), messages, tools.as_deref()),
     }
-
-    // 本地计算
-    count_all_tokens_local(system, messages, tools)
 }
 
-/// 调用远程 count_tokens API
+/// 直接序列化借用的数据，避免克隆整个会话。
+#[derive(serde::Serialize)]
+struct TokenCountRequest<'a> {
+    model: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: &'a Option<Vec<SystemMessage>>,
+    messages: &'a [Message],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: &'a Option<Vec<Tool>>,
+}
+
 async fn call_remote_count_tokens(
+    client: &reqwest::Client,
     api_url: &str,
     config: &CountTokensConfig,
-    model: String,
-    system: &Option<Vec<SystemMessage>>,
-    messages: &Vec<Message>,
-    tools: &Option<Vec<Tool>>,
-) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-    let client = build_client(config.proxy.as_ref(), 300, config.tls_backend)?;
-
-    // 构建请求体
-    let request = CountTokensRequest {
-        model: model, // 模型名称用于 token 计算
-        messages: messages.clone(),
-        system: system.clone(),
-        tools: tools.clone(),
-    };
-
-    // 构建请求
-    let mut req_builder = client.post(api_url);
-
-    // 设置认证头
-    if let Some(api_key) = &config.api_key {
-        if config.auth_type == "bearer" {
-            req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
+    request: &TokenCountRequest<'_>,
+) -> anyhow::Result<u64> {
+    let mut builder = client.post(api_url);
+    if let Some(key) = &config.api_key {
+        builder = if config.auth_type == "bearer" {
+            builder.bearer_auth(key)
         } else {
-            req_builder = req_builder.header("x-api-key", api_key);
-        }
+            builder.header("x-api-key", key)
+        };
     }
-
-    // 发送请求
-    let response = req_builder
-        .header("Content-Type", "application/json")
-        .json(&request)
+    let response = builder
+        .json(request)
         .send()
-        .await?;
-
-    if !response.status().is_success() {
-        return Err(format!("API 返回错误状态: {}", response.status()).into());
-    }
-
-    let result: CountTokensResponse = response.json().await?;
+        .await
+        .map_err(|error| error.without_url())?;
+    let response = response
+        .error_for_status()
+        .map_err(|error| error.without_url())?;
+    let result: CountTokensResponse = response.json().await.map_err(|error| error.without_url())?;
+    anyhow::ensure!(result.input_tokens > 0, "远程计数必须为正整数");
     Ok(result.input_tokens as u64)
 }
 
 /// 本地计算请求的输入 tokens
 fn count_all_tokens_local(
-    system: Option<Vec<SystemMessage>>,
-    messages: Vec<Message>,
-    tools: Option<Vec<Tool>>,
+    system: Option<&[SystemMessage]>,
+    messages: &[Message],
+    tools: Option<&[Tool]>,
 ) -> u64 {
     let mut total = 0;
 
     // 系统消息
-    if let Some(ref system) = system {
+    if let Some(system) = system {
         for msg in system {
             total += count_tokens(&msg.text);
         }
     }
 
     // 用户消息
-    for msg in &messages {
+    for msg in messages {
         if let serde_json::Value::String(s) = &msg.content {
             total += count_tokens(s);
         } else if let serde_json::Value::Array(arr) = &msg.content {
-            for item in arr {
-                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
-                    total += count_tokens(text);
-                }
-            }
+            total += arr.iter().map(count_content_tokens).sum::<u64>();
         }
     }
 
     // 工具定义
-    if let Some(ref tools) = tools {
+    if let Some(tools) = tools {
         for tool in tools {
             total += count_tokens(&tool.name);
             total += count_tokens(&tool.description);
@@ -222,6 +242,31 @@ fn count_all_tokens_local(
     }
 
     total.max(1)
+}
+
+fn count_content_tokens(block: &serde_json::Value) -> u64 {
+    match block.get("type").and_then(|value| value.as_str()) {
+        Some("text") => block
+            .get("text")
+            .and_then(|v| v.as_str())
+            .map(count_tokens)
+            .unwrap_or(0),
+        Some("thinking") => block
+            .get("thinking")
+            .and_then(|v| v.as_str())
+            .map(count_tokens)
+            .unwrap_or(0),
+        Some("tool_use") => block
+            .get("input")
+            .map(|v| count_tokens(&v.to_string()))
+            .unwrap_or(0),
+        Some("tool_result") | Some("compaction") => match block.get("content") {
+            Some(serde_json::Value::String(text)) => count_tokens(text),
+            Some(serde_json::Value::Array(blocks)) => blocks.iter().map(count_content_tokens).sum(),
+            _ => 0,
+        },
+        _ => 0,
+    }
 }
 
 /// 估算输出 tokens
@@ -242,4 +287,188 @@ pub(crate) fn estimate_output_tokens(content: &[serde_json::Value]) -> i32 {
     }
 
     total.max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn counts_large_tool_results_for_compaction_threshold() {
+        let messages = vec![super::Message {
+            role: "user".into(),
+            content: serde_json::json!([
+                {"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"x".repeat(200_000)}]}
+            ]),
+        }];
+        assert!(super::count_all_tokens_local(None, &messages, None) >= 50_000);
+    }
+
+    struct TokenServer {
+        url: String,
+        requests: std::sync::Arc<
+            std::sync::Mutex<
+                Vec<(
+                    std::net::SocketAddr,
+                    axum::http::HeaderMap,
+                    serde_json::Value,
+                )>,
+            >,
+        >,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for TokenServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn token_server() -> TokenServer {
+        use axum::{
+            Json,
+            body::Body,
+            extract::{ConnectInfo, Path},
+            http::{HeaderMap, StatusCode},
+            response::IntoResponse,
+        };
+        use futures::{StreamExt, stream};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let app = axum::Router::new().route(
+            "/{mode}",
+            axum::routing::post(
+                move |Path(mode): Path<String>,
+                      ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+                      headers: HeaderMap,
+                      Json(body): Json<serde_json::Value>| {
+                    captured.lock().unwrap().push((peer, headers, body));
+                    async move {
+                        match mode.as_str() {
+                            "error" => (StatusCode::TOO_MANY_REQUESTS, "busy").into_response(),
+                            "invalid" => {
+                                Json(serde_json::json!({"input_tokens":-1})).into_response()
+                            }
+                            "malformed" => "not json".into_response(),
+                            "slow" => Body::from_stream(
+                                stream::once(async {
+                                    Ok::<_, std::io::Error>("{\"input_tokens\":")
+                                })
+                                .chain(stream::pending::<Result<&str, std::io::Error>>()),
+                            )
+                            .into_response(),
+                            _ => Json(serde_json::json!({"input_tokens":123})).into_response(),
+                        }
+                    }
+                },
+            ),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        TokenServer {
+            url,
+            requests,
+            task,
+        }
+    }
+
+    fn remote_config(url: String) -> super::CountTokensConfig {
+        super::CountTokensConfig {
+            api_url: Some(url),
+            timeout_secs: 1,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_counting_works_on_current_thread_and_reuses_connections() {
+        use super::*;
+        let server = token_server().await;
+        let messages = vec![Message {
+            role: "user".into(),
+            content: serde_json::json!("hello"),
+        }];
+        let system = Some(vec![SystemMessage {
+            text: "instructions".into(),
+        }]);
+        let tools = None;
+        let request = TokenCountRequest {
+            model: "claude-sonnet-5",
+            system: &system,
+            messages: &messages,
+            tools: &tools,
+        };
+        for auth_type in ["x-api-key", "bearer"] {
+            let mut config = remote_config(format!("{}/ok", server.url));
+            config.api_key = Some("test-secret".into());
+            config.auth_type = auth_type.into();
+            let service = CountTokensService::new(config);
+            assert_eq!(service.count(&request).await, 123);
+            assert_eq!(service.count(&request).await, 123);
+        }
+        let captured = server.requests.lock().unwrap();
+        assert_eq!(captured.len(), 4);
+        assert_eq!(
+            captured[0].0, captured[1].0,
+            "HTTP connection should be reused"
+        );
+        assert_eq!(captured[2].0, captured[3].0);
+        assert_eq!(captured[0].1["x-api-key"], "test-secret");
+        assert_eq!(captured[2].1["authorization"], "Bearer test-secret");
+        assert_eq!(
+            captured[0].2,
+            serde_json::json!({"model":"claude-sonnet-5", "system":[{"text":"instructions"}], "messages":[{"role":"user","content":"hello"}]})
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_errors_and_invalid_counts_fall_back_to_local_estimates() {
+        use super::*;
+        let server = token_server().await;
+        let messages = vec![Message {
+            role: "user".into(),
+            content: serde_json::json!("你好 world"),
+        }];
+        let request = TokenCountRequest {
+            model: "claude-sonnet-5",
+            system: &None,
+            messages: &messages,
+            tools: &None,
+        };
+        let local = count_all_tokens_local(None, &messages, None);
+        for mode in ["error", "invalid", "malformed"] {
+            let service = CountTokensService::new(remote_config(format!("{}/{mode}", server.url)));
+            assert_eq!(service.count(&request).await, local);
+        }
+        assert_eq!(
+            count_all_tokens("test", &None, &messages, &None).await,
+            local
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_timeout_covers_response_body_and_falls_back() {
+        use super::*;
+        let server = token_server().await;
+        let service = CountTokensService::new(remote_config(format!("{}/slow", server.url)));
+        let request = TokenCountRequest {
+            model: "test",
+            system: &None,
+            messages: &[],
+            tools: &None,
+        };
+        let started = std::time::Instant::now();
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(3), service.count(&request))
+                .await
+                .unwrap();
+        assert_eq!(result, 1);
+        assert!(started.elapsed() >= std::time::Duration::from_millis(900));
+    }
 }

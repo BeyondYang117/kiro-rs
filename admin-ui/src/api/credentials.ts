@@ -11,7 +11,7 @@ import type {
 } from '@/types/api'
 
 // 创建 axios 实例
-const api = axios.create({
+export const api = axios.create({
   baseURL: '/api/admin',
   headers: {
     'Content-Type': 'application/json',

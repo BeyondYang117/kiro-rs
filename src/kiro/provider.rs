@@ -8,14 +8,14 @@
 use reqwest::Client;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::time::sleep;
 
 use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::endpoint::{KiroEndpoint, RequestContext};
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
-use crate::kiro::token_manager::MultiTokenManager;
+use crate::kiro::token_manager::{CallContext, CapacityError, MultiTokenManager};
 use crate::model::config::TlsBackend;
 use parking_lot::Mutex;
 
@@ -24,6 +24,69 @@ const MAX_RETRIES_PER_CREDENTIAL: usize = 3;
 
 /// 总重试次数硬上限（避免无限重试）
 const MAX_TOTAL_RETRIES: usize = 9;
+
+/// 不提前重试要求更长等待的响应，也不让单次退避无限挂起。
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+/// Preserve the upstream status so a rejected request is not reported as 502.
+#[derive(Debug)]
+pub struct UpstreamApiError {
+    pub status: reqwest::StatusCode,
+    pub body: String,
+}
+
+impl std::fmt::Display for UpstreamApiError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Kiro API 请求失败: {} {}",
+            self.status, self.body
+        )
+    }
+}
+
+impl std::error::Error for UpstreamApiError {}
+
+/// 上游响应持有凭据预留，直到响应读取完毕或被丢弃。
+pub struct UpstreamResponse {
+    response: reqwest::Response,
+    context: CallContext,
+}
+
+impl UpstreamResponse {
+    pub(crate) fn headers(&self) -> &reqwest::header::HeaderMap {
+        self.response.headers()
+    }
+
+    pub(crate) fn credential_id(&self) -> u64 {
+        self.context.id
+    }
+
+    pub fn bytes_stream(
+        self,
+    ) -> futures::stream::BoxStream<'static, Result<bytes::Bytes, reqwest::Error>> {
+        use futures::StreamExt;
+        futures::stream::unfold(
+            (self.response.bytes_stream(), Some(self.context)),
+            |(mut stream, mut context)| async move {
+                context.as_ref()?;
+                let chunk = stream.next().await?;
+                if chunk.is_err() {
+                    // An errored body cannot make further progress; release immediately.
+                    context.take();
+                }
+                Some((chunk, (stream, context)))
+            },
+        )
+        .boxed()
+    }
+
+    pub async fn text(self) -> reqwest::Result<String> {
+        let result = self.response.text().await;
+        drop(self.context);
+        result
+    }
+}
 
 /// Kiro API Provider
 ///
@@ -46,6 +109,11 @@ pub struct KiroProvider {
 }
 
 impl KiroProvider {
+    /// Called only after the Messages response has been decoded and validated.
+    pub(crate) fn report_response_success(&self, credential_id: u64) {
+        self.token_manager.report_success(credential_id);
+    }
+
     /// 创建带代理配置和端点注册表的 KiroProvider 实例
     ///
     /// # Arguments
@@ -66,8 +134,8 @@ impl KiroProvider {
         );
         let tls_backend = token_manager.config().tls_backend;
         // 预热：构建全局代理对应的 Client
-        let initial_client = build_client(proxy.as_ref(), 720, tls_backend)
-            .expect("创建 HTTP 客户端失败");
+        let initial_client =
+            build_client(proxy.as_ref(), 720, tls_backend).expect("创建 HTTP 客户端失败");
         let mut cache = HashMap::new();
         cache.insert(proxy.clone(), initial_client);
 
@@ -94,10 +162,7 @@ impl KiroProvider {
     }
 
     /// 根据凭据选择 endpoint 实现
-    fn endpoint_for(
-        &self,
-        credentials: &KiroCredentials,
-    ) -> anyhow::Result<Arc<dyn KiroEndpoint>> {
+    fn endpoint_for(&self, credentials: &KiroCredentials) -> anyhow::Result<Arc<dyn KiroEndpoint>> {
         let name = credentials
             .endpoint
             .as_deref()
@@ -111,22 +176,22 @@ impl KiroProvider {
     /// 发送非流式 API 请求
     ///
     /// 支持多凭据故障转移（见 [`Self::call_api_with_retry`]）
-    pub async fn call_api(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
+    pub async fn call_api(&self, request_body: &str) -> anyhow::Result<UpstreamResponse> {
         self.call_api_with_retry(request_body, false).await
     }
 
     /// 发送流式 API 请求
-    pub async fn call_api_stream(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
+    pub async fn call_api_stream(&self, request_body: &str) -> anyhow::Result<UpstreamResponse> {
         self.call_api_with_retry(request_body, true).await
     }
 
     /// 发送 MCP API 请求（WebSearch 等工具调用）
-    pub async fn call_mcp(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
+    pub async fn call_mcp(&self, request_body: &str) -> anyhow::Result<UpstreamResponse> {
         self.call_mcp_with_retry(request_body).await
     }
 
     /// 内部方法：带重试逻辑的 MCP API 调用
-    async fn call_mcp_with_retry(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
+    async fn call_mcp_with_retry(&self, request_body: &str) -> anyhow::Result<UpstreamResponse> {
         let total_credentials = self.token_manager.total_count();
         let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
         let mut last_error: Option<anyhow::Error> = None;
@@ -136,6 +201,7 @@ impl KiroProvider {
             // MCP 调用（WebSearch 等工具）不涉及模型选择，无需按模型过滤凭据
             let ctx = match self.token_manager.acquire_context(None).await {
                 Ok(c) => c,
+                Err(e) if e.is::<CapacityError>() => return Err(e),
                 Err(e) => {
                     last_error = Some(e);
                     continue;
@@ -173,9 +239,15 @@ impl KiroProvider {
                 .header("Connection", "close");
             let request = endpoint.decorate_mcp(base, &rctx);
 
+            crate::request_log::attempt_started(ctx.id, endpoint.name());
             let response = match request.send().await {
                 Ok(resp) => resp,
                 Err(e) => {
+                    crate::request_log::attempt_result(
+                        None,
+                        Some(&crate::request_log::error_chain(&e)),
+                        None,
+                    );
                     tracing::warn!(
                         "MCP 请求发送失败（尝试 {}/{}）: {}",
                         attempt + 1,
@@ -183,6 +255,7 @@ impl KiroProvider {
                         e
                     );
                     last_error = Some(e.into());
+                    drop(ctx);
                     if attempt + 1 < max_retries {
                         sleep(Self::retry_delay(attempt)).await;
                     }
@@ -191,15 +264,38 @@ impl KiroProvider {
             };
 
             let status = response.status();
+            let upstream_id = response
+                .headers()
+                .get("x-amzn-requestid")
+                .or_else(|| response.headers().get("x-amz-request-id"))
+                .or_else(|| response.headers().get("x-request-id"))
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            crate::request_log::attempt_result(Some(status.as_u16()), None, upstream_id.as_deref());
+            let retry_after = Self::retry_after(response.headers(), SystemTime::now());
+            if status.as_u16() == 429 {
+                self.token_manager.report_rate_limited(ctx.id, retry_after);
+            }
 
             // 成功响应
             if status.is_success() {
                 self.token_manager.report_success(ctx.id);
-                return Ok(response);
+                return Ok(UpstreamResponse {
+                    response,
+                    context: ctx,
+                });
             }
 
             // 失败响应
-            let body = response.text().await.unwrap_or_default();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|error| format!("读取上游错误响应失败: {error:#}"));
+            crate::request_log::attempt_result(
+                Some(status.as_u16()),
+                Some(&body),
+                upstream_id.as_deref(),
+            );
 
             // 402 额度用尽
             if status.as_u16() == 402 && endpoint.is_monthly_request_limit(&body) {
@@ -211,9 +307,9 @@ impl KiroProvider {
                 continue;
             }
 
-            // 400 Bad Request
+            // 与对话端点一致保留无须重试的参数错误。
             if status.as_u16() == 400 {
-                anyhow::bail!("MCP 请求失败: {} {}", status, body);
+                return Err(UpstreamApiError { status, body }.into());
             }
 
             // 401/403 凭据问题
@@ -222,11 +318,16 @@ impl KiroProvider {
                 if endpoint.is_bearer_token_invalid(&body) && !force_refreshed.contains(&ctx.id) {
                     force_refreshed.insert(ctx.id);
                     tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
-                    if self.token_manager.force_refresh_token_for(ctx.id).await.is_ok() {
-                        tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
-                        continue;
+                    match self.token_manager.force_refresh_token_for(ctx.id).await {
+                        Ok(_) => {
+                            tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
+                            continue;
+                        }
+                        Err(error) => {
+                            tracing::warn!(credential_id = ctx.id, error = %format!("{error:#}"),
+                            "Token 强制刷新失败，计入失败")
+                        }
                     }
-                    tracing::warn!("凭据 #{} token 强制刷新失败，计入失败", ctx.id);
                 }
 
                 let has_available = self.token_manager.report_failure(ctx.id);
@@ -246,9 +347,13 @@ impl KiroProvider {
                     status,
                     body
                 );
-                last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
+                last_error = Some(UpstreamApiError { status, body }.into());
+                drop(ctx);
                 if attempt + 1 < max_retries {
-                    sleep(Self::retry_delay(attempt)).await;
+                    let Some(delay) = Self::response_retry_delay(attempt, retry_after) else {
+                        break;
+                    };
+                    sleep(delay).await;
                 }
                 continue;
             }
@@ -260,6 +365,7 @@ impl KiroProvider {
 
             // 兜底
             last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
+            drop(ctx);
             if attempt + 1 < max_retries {
                 sleep(Self::retry_delay(attempt)).await;
             }
@@ -280,7 +386,7 @@ impl KiroProvider {
         &self,
         request_body: &str,
         is_stream: bool,
-    ) -> anyhow::Result<reqwest::Response> {
+    ) -> anyhow::Result<UpstreamResponse> {
         let total_credentials = self.token_manager.total_count();
         let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
         let mut last_error: Option<anyhow::Error> = None;
@@ -294,6 +400,7 @@ impl KiroProvider {
             // 获取调用上下文（绑定 index、credentials、token）
             let ctx = match self.token_manager.acquire_context(model.as_deref()).await {
                 Ok(c) => c,
+                Err(e) if e.is::<CapacityError>() => return Err(e),
                 Err(e) => {
                     last_error = Some(e);
                     continue;
@@ -330,9 +437,15 @@ impl KiroProvider {
                 .header("Connection", "close");
             let request = endpoint.decorate_api(base, &rctx);
 
+            crate::request_log::attempt_started(ctx.id, endpoint.name());
             let response = match request.send().await {
                 Ok(resp) => resp,
                 Err(e) => {
+                    crate::request_log::attempt_result(
+                        None,
+                        Some(&crate::request_log::error_chain(&e)),
+                        None,
+                    );
                     tracing::warn!(
                         "API 请求发送失败（尝试 {}/{}）: {}",
                         attempt + 1,
@@ -342,6 +455,7 @@ impl KiroProvider {
                     // 网络错误通常是上游/链路瞬态问题，不应导致"禁用凭据"或"切换凭据"
                     // （否则一段时间网络抖动会把所有凭据都误禁用，需要重启才能恢复）
                     last_error = Some(e.into());
+                    drop(ctx);
                     if attempt + 1 < max_retries {
                         sleep(Self::retry_delay(attempt)).await;
                     }
@@ -350,15 +464,37 @@ impl KiroProvider {
             };
 
             let status = response.status();
+            let upstream_id = response
+                .headers()
+                .get("x-amzn-requestid")
+                .or_else(|| response.headers().get("x-amz-request-id"))
+                .or_else(|| response.headers().get("x-request-id"))
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            crate::request_log::attempt_result(Some(status.as_u16()), None, upstream_id.as_deref());
+            let retry_after = Self::retry_after(response.headers(), SystemTime::now());
+            if status.as_u16() == 429 {
+                self.token_manager.report_rate_limited(ctx.id, retry_after);
+            }
 
-            // 成功响应
+            // Messages callers validate the body before reporting success.
             if status.is_success() {
-                self.token_manager.report_success(ctx.id);
-                return Ok(response);
+                return Ok(UpstreamResponse {
+                    response,
+                    context: ctx,
+                });
             }
 
             // 失败响应：读取 body 用于日志/错误信息
-            let body = response.text().await.unwrap_or_default();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|error| format!("读取上游错误响应失败: {error:#}"));
+            crate::request_log::attempt_result(
+                Some(status.as_u16()),
+                Some(&body),
+                upstream_id.as_deref(),
+            );
 
             // 402 Payment Required 且额度用尽：禁用凭据并故障转移
             if status.as_u16() == 402 && endpoint.is_monthly_request_limit(&body) {
@@ -391,7 +527,7 @@ impl KiroProvider {
 
             // 400 Bad Request - 请求问题，重试/切换凭据无意义
             if status.as_u16() == 400 {
-                anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
+                return Err(UpstreamApiError { status, body }.into());
             }
 
             // 401/403 - 更可能是凭据/权限问题：计入失败并允许故障转移
@@ -408,11 +544,16 @@ impl KiroProvider {
                 if endpoint.is_bearer_token_invalid(&body) && !force_refreshed.contains(&ctx.id) {
                     force_refreshed.insert(ctx.id);
                     tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
-                    if self.token_manager.force_refresh_token_for(ctx.id).await.is_ok() {
-                        tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
-                        continue;
+                    match self.token_manager.force_refresh_token_for(ctx.id).await {
+                        Ok(_) => {
+                            tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
+                            continue;
+                        }
+                        Err(error) => {
+                            tracing::warn!(credential_id = ctx.id, error = %format!("{error:#}"),
+                            "Token 强制刷新失败，计入失败")
+                        }
                     }
-                    tracing::warn!("凭据 #{} token 强制刷新失败，计入失败", ctx.id);
                 }
 
                 let has_available = self.token_manager.report_failure(ctx.id);
@@ -434,7 +575,7 @@ impl KiroProvider {
                 continue;
             }
 
-            // 429/408/5xx - 瞬态上游错误：重试但不禁用或切换凭据
+            // 429/408/5xx - 瞬态错误不计入认证失败；429 账号冷却后重新调度
             // （避免 429 high traffic / 502 high load 等瞬态错误把所有凭据锁死）
             if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
                 tracing::warn!(
@@ -444,14 +585,13 @@ impl KiroProvider {
                     status,
                     body
                 );
-                last_error = Some(anyhow::anyhow!(
-                    "{} API 请求失败: {} {}",
-                    api_type,
-                    status,
-                    body
-                ));
+                last_error = Some(UpstreamApiError { status, body }.into());
+                drop(ctx);
                 if attempt + 1 < max_retries {
-                    sleep(Self::retry_delay(attempt)).await;
+                    let Some(delay) = Self::response_retry_delay(attempt, retry_after) else {
+                        break;
+                    };
+                    sleep(delay).await;
                 }
                 continue;
             }
@@ -475,6 +615,7 @@ impl KiroProvider {
                 status,
                 body
             ));
+            drop(ctx);
             if attempt + 1 < max_retries {
                 sleep(Self::retry_delay(attempt)).await;
             }
@@ -506,6 +647,28 @@ impl KiroProvider {
             .map(|s| s.to_string())
     }
 
+    fn retry_after(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<Duration> {
+        let value = headers
+            .get(reqwest::header::RETRY_AFTER)?
+            .to_str()
+            .ok()?
+            .trim();
+        if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+            // 超大整数同样视为超长等待，不能因溢出回退为立即重试。
+            return Some(Duration::from_secs(value.parse().unwrap_or(u64::MAX)));
+        }
+        let deadline = httpdate::parse_http_date(value).ok()?;
+        Some(deadline.duration_since(now).unwrap_or_default())
+    }
+
+    fn response_retry_delay(attempt: usize, retry_after: Option<Duration>) -> Option<Duration> {
+        let delay = retry_after.unwrap_or_default();
+        if delay > MAX_RETRY_AFTER {
+            return None;
+        }
+        Some(Self::retry_delay(attempt).max(delay))
+    }
+
     fn retry_delay(attempt: usize) -> Duration {
         // 指数退避 + 少量抖动，避免上游抖动时放大故障
         const BASE_MS: u64 = 200;
@@ -515,5 +678,499 @@ impl KiroProvider {
         let jitter_max = (backoff / 4).max(1);
         let jitter = fastrand::u64(0..=jitter_max);
         Duration::from_millis(backoff.saturating_add(jitter))
+    }
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+    use crate::model::config::Config;
+    use futures::{StreamExt, stream};
+
+    async fn response(pending: bool) -> (MultiTokenManager, UpstreamResponse) {
+        response_with_limit(pending, 64).await
+    }
+
+    async fn response_with_limit(
+        pending: bool,
+        max_in_flight: usize,
+    ) -> (MultiTokenManager, UpstreamResponse) {
+        let manager = MultiTokenManager::new(
+            serde_json::from_value::<Config>(serde_json::json!({
+                "loadBalancingMode":"balanced",
+                "concurrency":{"maxInFlight":max_in_flight,"maxWaiting":0}
+            }))
+            .unwrap(),
+            (1..=2)
+                .map(|id| KiroCredentials {
+                    id: Some(id),
+                    kiro_api_key: Some(format!("test-{id}")),
+                    ..Default::default()
+                })
+                .collect(),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let context = manager.acquire_context(None).await.unwrap();
+        assert_eq!(context.id, 1);
+        // Prefer #1 on historical usage alone; while its response is active #2 must win.
+        manager.report_success(2);
+        let body = if pending {
+            reqwest::Body::wrap_stream(
+                stream::once(async { Ok::<_, std::io::Error>("hello") })
+                    .chain(stream::pending::<Result<&str, std::io::Error>>()),
+            )
+        } else {
+            reqwest::Body::from("hello")
+        };
+        let response = reqwest::Response::from(http::Response::new(body));
+        (manager, UpstreamResponse { response, context })
+    }
+
+    #[tokio::test]
+    async fn global_limit_is_held_until_stream_eof_drop_or_read_cancellation() {
+        for mode in [
+            "drop_response",
+            "text",
+            "stream",
+            "drop_stream",
+            "cancel_read",
+        ] {
+            let (manager, response) = response_with_limit(mode == "cancel_read", 1).await;
+            assert!(
+                manager
+                    .acquire_context(None)
+                    .await
+                    .err()
+                    .unwrap()
+                    .is::<CapacityError>()
+            );
+            match mode {
+                "text" => {
+                    response.text().await.unwrap();
+                }
+                "stream" | "drop_stream" => {
+                    let mut chunks = response.bytes_stream();
+                    assert_eq!(chunks.next().await.unwrap().unwrap(), "hello");
+                    assert!(
+                        manager
+                            .acquire_context(None)
+                            .await
+                            .err()
+                            .unwrap()
+                            .is::<CapacityError>()
+                    );
+                    if mode == "stream" {
+                        assert!(chunks.next().await.is_none());
+                        // EOF must release even while the completed stream is still held.
+                        drop(manager.acquire_context(None).await.unwrap());
+                    }
+                    drop(chunks);
+                }
+                "cancel_read" => {
+                    let task = tokio::spawn(response.text());
+                    tokio::task::yield_now().await;
+                    task.abort();
+                    assert!(task.await.err().unwrap().is_cancelled());
+                }
+                _ => drop(response),
+            }
+            drop(manager.acquire_context(None).await.unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn response_reservation_lasts_until_body_consumption_or_drop() {
+        for mode in ["drop_response", "text", "stream", "drop_stream"] {
+            let (manager, response) = response(false).await;
+            assert_eq!(manager.acquire_context(None).await.unwrap().id, 2);
+            match mode {
+                "text" => assert_eq!(response.text().await.unwrap(), "hello"),
+                "stream" => {
+                    let mut chunks = response.bytes_stream();
+                    assert_eq!(chunks.next().await.unwrap().unwrap(), "hello");
+                    assert_eq!(manager.acquire_context(None).await.unwrap().id, 2);
+                    assert!(chunks.next().await.is_none());
+                }
+                "drop_stream" => {
+                    let mut chunks = response.bytes_stream();
+                    chunks.next().await.unwrap().unwrap();
+                    assert_eq!(manager.acquire_context(None).await.unwrap().id, 2);
+                    drop(chunks);
+                }
+                _ => drop(response),
+            }
+            assert_eq!(manager.acquire_context(None).await.unwrap().id, 1, "{mode}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_body_read_releases_reservation() {
+        let (manager, response) = response(true).await;
+        let task = tokio::spawn(response.text());
+        assert_eq!(manager.acquire_context(None).await.unwrap().id, 2);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(manager.acquire_context(None).await.unwrap().id, 1);
+    }
+
+    #[tokio::test]
+    async fn body_error_releases_reservation_before_stream_is_dropped() {
+        let (manager, mut response) = response(false).await;
+        response.response =
+            reqwest::Response::from(http::Response::new(reqwest::Body::wrap_stream(
+                stream::once(async { Err::<&str, _>(std::io::Error::other("broken body")) }),
+            )));
+        let mut chunks = response.bytes_stream();
+        assert!(chunks.next().await.unwrap().is_err());
+        assert_eq!(manager.acquire_context(None).await.unwrap().id, 1);
+        assert!(chunks.next().await.is_none());
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use crate::model::config::Config;
+    use reqwest::{
+        StatusCode,
+        header::{HeaderMap, HeaderValue, RETRY_AFTER},
+    };
+    use tokio::time::{Instant, timeout};
+
+    fn headers(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_str(value).unwrap());
+        headers
+    }
+
+    #[test]
+    fn retry_after_supports_seconds_and_all_http_date_formats() {
+        let now = httpdate::parse_http_date("Sun, 06 Nov 1994 08:49:00 GMT").unwrap();
+        for value in [
+            "37",
+            " 37 ",
+            "Sun, 06 Nov 1994 08:49:37 GMT",
+            "Sunday, 06-Nov-94 08:49:37 GMT",
+            "Sun Nov  6 08:49:37 1994",
+        ] {
+            assert_eq!(
+                KiroProvider::retry_after(&headers(value), now),
+                Some(Duration::from_secs(37)),
+                "{value}"
+            );
+        }
+        assert_eq!(
+            KiroProvider::retry_after(&headers("Sun, 06 Nov 1994 08:48:00 GMT"), now),
+            Some(Duration::ZERO)
+        );
+        for value in ["", "-1", "+1", "1.5", "tomorrow", "1, 2"] {
+            assert_eq!(
+                KiroProvider::retry_after(&headers(value), now),
+                None,
+                "{value}"
+            );
+        }
+        assert_eq!(KiroProvider::retry_after(&HeaderMap::new(), now), None);
+    }
+
+    #[test]
+    fn retry_waits_keep_backoff_and_do_not_shorten_long_server_delays() {
+        for value in ["0", "invalid"] {
+            let delay = KiroProvider::response_retry_delay(
+                0,
+                KiroProvider::retry_after(&headers(value), SystemTime::now()),
+            )
+            .unwrap();
+            assert!((Duration::from_millis(200)..=Duration::from_millis(250)).contains(&delay));
+        }
+        assert_eq!(
+            KiroProvider::response_retry_delay(8, Some(Duration::from_secs(60))),
+            Some(Duration::from_secs(60))
+        );
+        for value in [
+            "61",
+            "18446744073709551615",
+            "99999999999999999999999999999999999999",
+        ] {
+            assert!(
+                KiroProvider::response_retry_delay(
+                    0,
+                    KiroProvider::retry_after(&headers(value), SystemTime::now())
+                )
+                .is_none(),
+                "{value}"
+            );
+        }
+    }
+
+    struct MockEndpoint(String);
+
+    impl KiroEndpoint for MockEndpoint {
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+        fn api_url(&self, _: &RequestContext<'_>) -> String {
+            self.0.clone()
+        }
+        fn mcp_url(&self, _: &RequestContext<'_>) -> String {
+            self.0.clone()
+        }
+        fn decorate_api(
+            &self,
+            req: reqwest::RequestBuilder,
+            _: &RequestContext<'_>,
+        ) -> reqwest::RequestBuilder {
+            req
+        }
+        fn decorate_mcp(
+            &self,
+            req: reqwest::RequestBuilder,
+            _: &RequestContext<'_>,
+        ) -> reqwest::RequestBuilder {
+            req
+        }
+        fn transform_api_body(&self, body: &str, _: &RequestContext<'_>) -> String {
+            body.to_string()
+        }
+    }
+
+    struct Mock {
+        provider: Arc<KiroProvider>,
+        calls: Arc<Mutex<Vec<Instant>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for Mock {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn mock(status: StatusCode, retry_after: Option<&'static str>, recover: bool) -> Mock {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let captured = calls.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::post(move || {
+                let captured = captured.clone();
+                async move {
+                    let mut calls = captured.lock();
+                    calls.push(Instant::now());
+                    if recover && calls.len() > 1 {
+                        return (StatusCode::OK, HeaderMap::new(), "success");
+                    }
+                    (
+                        status,
+                        retry_after.map(headers).unwrap_or_default(),
+                        "upstream busy",
+                    )
+                }
+            }),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let manager = MultiTokenManager::new(
+            serde_json::from_value::<Config>(serde_json::json!({"loadBalancingMode":"balanced", "concurrency":{"maxInFlight":1}}))
+                .unwrap(),
+            (1..=2)
+                .map(|id| KiroCredentials {
+                    id: Some(id),
+                    kiro_api_key: Some(format!("test-{id}")),
+                    proxy_url: Some("direct".into()),
+                    ..Default::default()
+                })
+                .collect(),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        // #1 should be preferred whenever no request is actively using it.
+        manager.report_success(2);
+        let endpoints: HashMap<String, Arc<dyn KiroEndpoint>> = HashMap::from([(
+            "mock".into(),
+            Arc::new(MockEndpoint(format!("http://{address}/"))) as Arc<dyn KiroEndpoint>,
+        )]);
+        let provider = Arc::new(KiroProvider::with_proxy(
+            Arc::new(manager),
+            None,
+            endpoints,
+            "mock".into(),
+        ));
+        Mock {
+            provider,
+            calls,
+            task,
+        }
+    }
+
+    async fn call(provider: &KiroProvider, kind: &str) -> anyhow::Result<UpstreamResponse> {
+        match kind {
+            "stream" => provider.call_api_stream("{}").await,
+            "mcp" => provider.call_mcp("{}").await,
+            _ => provider.call_api("{}").await,
+        }
+    }
+
+    #[tokio::test]
+    async fn capacity_rejections_do_not_retry_or_reach_the_upstream() {
+        let mock = mock(StatusCode::OK, None, true).await;
+        for max_waiting in [0, 1] {
+            let manager = Arc::new(MultiTokenManager::new(
+                serde_json::from_value::<Config>(serde_json::json!({
+                    "concurrency":{"maxInFlight":1,"maxWaiting":max_waiting,"waitTimeoutSeconds":1}
+                })).unwrap(),
+                vec![KiroCredentials {
+                    kiro_api_key: Some("capacity-test".into()),
+                    ..Default::default()
+                }],
+                None, None, false,
+            ).unwrap());
+            let _active = manager.acquire_context(None).await.unwrap();
+            let provider = KiroProvider::with_proxy(
+                manager,
+                None,
+                mock.provider.endpoints.clone(),
+                "mock".into(),
+            );
+            for kind in ["api", "stream", "mcp"] {
+                let error = timeout(Duration::from_secs(2), call(&provider, kind))
+                    .await
+                    .expect("capacity errors must bypass HTTP retries")
+                    .err()
+                    .unwrap();
+                let expected = if max_waiting == 0 {
+                    CapacityError::QueueFull
+                } else {
+                    CapacityError::WaitTimeout
+                };
+                assert_eq!(error.downcast_ref::<CapacityError>(), Some(&expected));
+            }
+        }
+        assert!(mock.calls.lock().is_empty());
+    }
+
+    async fn wait_for_backoff(mock: &Mock) {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if mock.calls.lock().len() == 1 {
+                    let context = mock
+                        .provider
+                        .token_manager
+                        .acquire_context(None)
+                        .await
+                        .unwrap();
+                    // 全局上限为 1，能够获取任何账号就证明退避已释放名额。
+                    drop(context);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("backoff must release the credential reservation");
+    }
+
+    #[tokio::test]
+    async fn api_and_mcp_respect_retry_after_and_release_reservations_during_backoff() {
+        let cases = [
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ]
+        .into_iter()
+        .flat_map(|status| {
+            ["api", "stream", "mcp"]
+                .into_iter()
+                .map(move |kind| (status, kind))
+        });
+        futures::future::join_all(cases.map(|(status, kind)| async move {
+            let mock = mock(status, Some("3"), true).await;
+            let provider = mock.provider.clone();
+            let task =
+                tokio::spawn(
+                    async move { call(&provider, kind).await.unwrap().text().await.unwrap() },
+                );
+            wait_for_backoff(&mock).await;
+            assert_eq!(
+                timeout(Duration::from_secs(5), task)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                "success"
+            );
+            let calls = mock.calls.lock();
+            assert_eq!(calls.len(), 2);
+            assert!(calls[1].duration_since(calls[0]) >= Duration::from_secs(3));
+            let snapshot = mock.provider.token_manager.snapshot();
+            assert_eq!(snapshot.available, 2);
+            assert!(
+                snapshot
+                    .entries
+                    .iter()
+                    .all(|entry| entry.failure_count == 0)
+            );
+        }))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn excessive_retry_after_returns_without_early_retry_or_disabling_credentials() {
+        for kind in ["api", "stream", "mcp"] {
+            let mock = mock(
+                StatusCode::TOO_MANY_REQUESTS,
+                Some("9999999999999999999999999"),
+                false,
+            )
+            .await;
+            let result = timeout(Duration::from_secs(2), call(&mock.provider, kind))
+                .await
+                .unwrap();
+            let error = match result {
+                Ok(_) => panic!("expected upstream rejection"),
+                Err(error) => error,
+            };
+            let upstream = error.downcast_ref::<UpstreamApiError>().unwrap();
+            assert_eq!(upstream.status, StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(upstream.body, "upstream busy");
+            assert_eq!(mock.calls.lock().len(), 1);
+            assert_eq!(mock.provider.token_manager.snapshot().available, 2);
+            assert_eq!(
+                mock.provider
+                    .token_manager
+                    .acquire_context(None)
+                    .await
+                    .unwrap()
+                    .id,
+                2
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_retry_wait_keeps_credentials_available() {
+        for kind in ["api", "stream", "mcp"] {
+            let mock = mock(StatusCode::SERVICE_UNAVAILABLE, Some("60"), false).await;
+            let provider = mock.provider.clone();
+            let task = tokio::spawn(async move { call(&provider, kind).await });
+            wait_for_backoff(&mock).await;
+            task.abort();
+            assert!(task.await.is_err_and(|error| error.is_cancelled()));
+            assert_eq!(mock.calls.lock().len(), 1);
+            assert_eq!(
+                mock.provider
+                    .token_manager
+                    .acquire_context(None)
+                    .await
+                    .unwrap()
+                    .id,
+                1
+            );
+        }
     }
 }

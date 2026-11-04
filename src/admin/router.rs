@@ -34,6 +34,8 @@ use super::{
 /// - `Authorization: Bearer <token>` header
 pub fn create_admin_router(state: AdminState) -> Router {
     Router::new()
+        .route("/logs", get(crate::request_log::list))
+        .route("/logs/{id}", get(crate::request_log::detail))
         .route(
             "/credentials",
             get(get_all_credentials).post(add_credential),

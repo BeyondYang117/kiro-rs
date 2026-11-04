@@ -135,15 +135,14 @@ pub fn parse_headers(data: &[u8], header_length: usize) -> ParseResult<Headers> 
             available: data.len(),
         });
     }
+    // 后续所有边界检查必须限制在头部区域，不能借用 payload 的字节。
+    let data = &data[..header_length];
 
     let mut headers = Headers::new();
     let mut offset = 0;
 
     while offset < header_length {
         // 读取头部名称长度 (1 byte)
-        if offset >= data.len() {
-            break;
-        }
         let name_len = data[offset] as usize;
         offset += 1;
 
@@ -161,8 +160,13 @@ pub fn parse_headers(data: &[u8], header_length: usize) -> ParseResult<Headers> 
                 available: data.len() - offset,
             });
         }
-        let name = String::from_utf8_lossy(&data[offset..offset + name_len]).to_string();
+        let name = std::str::from_utf8(&data[offset..offset + name_len])
+            .map_err(|_| ParseError::HeaderParseFailed("头部名称不是有效 UTF-8".to_string()))?
+            .to_string();
         offset += name_len;
+        if headers.get(&name).is_some() {
+            return Err(ParseError::HeaderParseFailed("头部名称重复".to_string()));
+        }
 
         // 读取值类型 (1 byte)
         if offset >= data.len() {
@@ -239,7 +243,9 @@ fn parse_header_value(
             ensure_bytes(data, 2)?;
             let len = u16::from_be_bytes([data[0], data[1]]) as usize;
             ensure_bytes(data, 2 + len)?;
-            let v = String::from_utf8_lossy(&data[2..2 + len]).to_string();
+            let v = std::str::from_utf8(&data[2..2 + len])
+                .map_err(|_| ParseError::HeaderParseFailed("头部字符串不是有效 UTF-8".to_string()))?
+                .to_string();
             local_offset = 2 + len;
             Ok(HeaderValue::String(v))
         }
@@ -313,5 +319,61 @@ mod tests {
         let data = [1u8, b'x', 7, 0, 2, b'a', b'b'];
         let headers = parse_headers(&data, data.len()).unwrap();
         assert_eq!(headers.get_string("x"), Some("ab"));
+    }
+
+    #[test]
+    fn headers_cannot_read_past_declared_boundary() {
+        // The suffix represents payload bytes, not additional header data.
+        for data in [
+            vec![2, b'x', b'y', 0],
+            vec![1, b'x', 0],
+            vec![1, b'x', 7, 0, 2, b'a', b'b'],
+            vec![1, b'x', 6, 0, 2, 0xff, 0xfe],
+            vec![1, b'x', 5, 0, 0, 0, 0, 0, 0, 0, 1],
+        ] {
+            for boundary in 1..data.len() {
+                assert!(
+                    parse_headers(&data, boundary).is_err(),
+                    "accepted header crossing boundary {boundary}: {data:?}"
+                );
+            }
+            assert!(parse_headers(&data, data.len()).is_ok());
+        }
+        assert!(parse_headers(&[0xff], 0).is_ok());
+    }
+
+    #[test]
+    fn headers_reject_duplicate_names() {
+        for second in [vec![1, b'x', 0], vec![1, b'x', 1]] {
+            let mut data = vec![1, b'x', 0];
+            data.extend(second);
+            assert!(matches!(
+                parse_headers(&data, data.len()),
+                Err(ParseError::HeaderParseFailed(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn headers_require_utf8_names_and_string_values() {
+        for data in [vec![1, 0xff, 0], vec![1, b'x', 7, 0, 1, 0xff]] {
+            assert!(matches!(
+                parse_headers(&data, data.len()),
+                Err(ParseError::HeaderParseFailed(_))
+            ));
+        }
+        let name = "名称";
+        let value = "值🙂";
+        let mut data = vec![name.len() as u8];
+        data.extend_from_slice(name.as_bytes());
+        data.push(7);
+        data.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        data.extend_from_slice(value.as_bytes());
+        let headers = parse_headers(&data, data.len()).unwrap();
+        assert_eq!(headers.get_string(name), Some(value));
+        // Byte arrays remain arbitrary binary data.
+        let data = [1, b'x', 6, 0, 1, 0xff];
+        let headers = parse_headers(&data, data.len()).unwrap();
+        assert_eq!(headers.get("x"), Some(&HeaderValue::ByteArray(vec![0xff])));
     }
 }

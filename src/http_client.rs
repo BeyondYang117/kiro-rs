@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::model::config::TlsBackend;
 
 /// 代理配置
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Default, PartialEq, Eq, Hash)]
 pub struct ProxyConfig {
     /// 代理地址，支持 http/https/socks5
     pub url: String,
@@ -16,6 +16,18 @@ pub struct ProxyConfig {
     pub username: Option<String>,
     /// 代理认证密码
     pub password: Option<String>,
+}
+
+impl std::fmt::Debug for ProxyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyConfig")
+            .field("url", &"[REDACTED]")
+            .field(
+                "has_auth",
+                &(self.username.is_some() || self.password.is_some()),
+            )
+            .finish()
+    }
 }
 
 impl ProxyConfig {
@@ -76,7 +88,7 @@ pub fn build_client(
         }
 
         builder = builder.proxy(proxy);
-        tracing::debug!("HTTP Client 使用代理: {}", proxy_config.url);
+        tracing::debug!("HTTP Client 已启用代理");
     }
 
     Ok(builder.build()?)
@@ -113,5 +125,14 @@ mod tests {
         let config = ProxyConfig::new("http://127.0.0.1:7890");
         let client = build_client(Some(&config), 30, TlsBackend::Rustls);
         assert!(client.is_ok());
+    }
+
+    #[test]
+    fn proxy_debug_omits_url_credentials_and_password() {
+        let proxy = ProxyConfig::new("http://hidden-user:hidden-password@localhost:8080")
+            .with_auth("hidden-user", "hidden-password");
+        let debug = format!("{proxy:?}");
+        assert!(!debug.contains("hidden-user"));
+        assert!(!debug.contains("hidden-password"));
     }
 }

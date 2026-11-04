@@ -55,6 +55,21 @@
   }
   body {
     @apply bg-background text-foreground;
-    font-feature-settings: "rlig" 1, "calt" 1;
+    font-feature-settings:
+      'rlig' 1,
+      'calt' 1;
+  }
+}
+
+@layer components {
+  .credential-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  @media (min-width: 1024px) {
+    .credential-grid {
+      grid-template-columns: minmax(0, 1.8fr) 90px 72px minmax(0, 1fr) minmax(0, 1.1fr) 132px;
+    }
   }
 }

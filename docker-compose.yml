@@ -1,13 +1,22 @@
 services:
   kiro-rs:
-    # 使用国内镜像
-    # image: ghcr.nju.edu.cn/${IMAGE_OWNER:-hank9999}/kiro-rs:${IMAGE_TAG:-latest}
-    image: ghcr.io/${IMAGE_OWNER:-hank9999}/kiro-rs:${IMAGE_TAG:-latest}
+    # 与 docker-push.sh 的推送地址一致；可通过 IMAGE_NAME、IMAGE_TAG 覆盖。
+    image: ${IMAGE_NAME:-abu116/kiro-rs}:${IMAGE_TAG:-latest}
+    # 使用当前源码（包含调用日志页面）：docker compose up -d --build
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: kiro-rs
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
       - "8990:8990"
     volumes:
+      # 配置、凭据、统计及 kiro_requests.sqlite3（含 WAL/SHM）均在此持久保存。
       - ./config/:/app/config/
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped

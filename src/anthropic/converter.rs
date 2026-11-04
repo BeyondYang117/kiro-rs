@@ -32,14 +32,26 @@ fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
     };
 
     // type（必须是字符串）
-    if !obj.get("type").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()) {
-        obj.insert("type".to_string(), serde_json::Value::String("object".to_string()));
+    if !obj
+        .get("type")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
+    {
+        obj.insert(
+            "type".to_string(),
+            serde_json::Value::String("object".to_string()),
+        );
     }
 
     // properties（必须是 object）
     match obj.get("properties") {
         Some(serde_json::Value::Object(_)) => {}
-        _ => { obj.insert("properties".to_string(), serde_json::Value::Object(serde_json::Map::new())); }
+        _ => {
+            obj.insert(
+                "properties".to_string(),
+                serde_json::Value::Object(serde_json::Map::new()),
+            );
+        }
     }
 
     // required（必须是 string 数组）
@@ -56,7 +68,12 @@ fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
     // additionalProperties（允许 bool 或 object，其他按 true 处理）
     match obj.get("additionalProperties") {
         Some(serde_json::Value::Bool(_)) | Some(serde_json::Value::Object(_)) => {}
-        _ => { obj.insert("additionalProperties".to_string(), serde_json::Value::Bool(true)); }
+        _ => {
+            obj.insert(
+                "additionalProperties".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
     }
 
     serde_json::Value::Object(obj)
@@ -85,7 +102,9 @@ pub fn map_model(model: &str) -> Option<String> {
         // 目前 Kiro 仅上线 5.1 一个 Fable 版本，故与 haiku 分支一致采用无条件映射
         Some("claude-fable-5.1".to_string())
     } else if model_lower.contains("sonnet") {
-        if model_lower.contains("sonnet-5") {
+        if model_lower.contains("sonnet-5-5") || model_lower.contains("sonnet-5.5") {
+            Some("claude-sonnet-5.5".to_string())
+        } else if model_lower.contains("sonnet-5") {
             Some("claude-sonnet-5".to_string())
         } else if model_lower.contains("4-6") || model_lower.contains("4.6") {
             Some("claude-sonnet-4.6".to_string())
@@ -112,9 +131,23 @@ pub fn map_model(model: &str) -> Option<String> {
             None
         }
     } else if model_lower.contains("haiku") {
-        Some("claude-haiku-4.5".to_string())
+        if model_lower.contains("haiku-5-5") || model_lower.contains("haiku-5.5") {
+            Some("claude-haiku-5.5".to_string())
+        } else {
+            Some("claude-haiku-4.5".to_string())
+        }
     } else {
         None
+    }
+}
+
+pub fn default_effort(model: &str) -> &'static str {
+    match map_model(model).as_deref() {
+        Some("claude-opus-5.5" | "claude-haiku-5.5") => "medium",
+        Some("claude-fable-5.1" | "claude-opus-5" | "claude-sonnet-5" | "claude-sonnet-5.5") => {
+            "high"
+        }
+        _ => "high",
     }
 }
 
@@ -128,6 +161,8 @@ pub fn get_context_window_size(model: &str) -> i32 {
         Some(mapped)
             if mapped == "claude-fable-5.1"
                 || mapped == "claude-sonnet-5"
+                || mapped == "claude-sonnet-5.5"
+                || mapped == "claude-haiku-5.5"
                 || mapped == "claude-opus-5.5"
                 || mapped == "claude-opus-5"
                 || mapped == "claude-sonnet-4.6"
@@ -139,6 +174,27 @@ pub fn get_context_window_size(model: &str) -> i32 {
         }
         _ => 200_000,
     }
+}
+
+/// Builds the native Kiro controls documented by its model request schema.
+pub fn additional_model_request_fields(req: &MessagesRequest) -> Option<serde_json::Value> {
+    let mut fields = serde_json::Map::new();
+    if let Some(thinking) = &req.thinking {
+        let mut config = serde_json::json!({"type":thinking.thinking_type});
+        if thinking.thinking_type == "enabled" {
+            config["budget_tokens"] = thinking.budget_tokens.into();
+        }
+        fields.insert("thinking".into(), config);
+    }
+    if let Some(output_config) = &req.output_config
+        && !output_config.effort.is_empty()
+    {
+        fields.insert(
+            "output_config".into(),
+            serde_json::json!({ "effort": output_config.effort }),
+        );
+    }
+    (!fields.is_empty()).then_some(serde_json::Value::Object(fields))
 }
 
 /// 转换结果
@@ -177,30 +233,28 @@ impl std::error::Error for ConversionError {}
 /// 提取 session UUID 作为 conversationId
 fn extract_session_id(user_id: &str) -> Option<String> {
     // 先尝试 JSON 解析
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(user_id) {
-        if let Some(session_id) = json.get("session_id").and_then(|v| v.as_str()) {
-            if is_valid_uuid(session_id) {
-                return Some(session_id.to_string());
-            }
-        }
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(user_id)
+        && let Some(session_id) = json.get("session_id").and_then(|v| v.as_str())
+        && is_valid_uuid(session_id)
+    {
+        return Some(session_id.to_string());
     }
 
     // 回退到字符串格式: 查找 "session_" 后面的内容
     if let Some(pos) = user_id.find("session_") {
         let session_part = &user_id[pos + 8..]; // "session_" 长度为 8
-        if session_part.len() >= 36 {
-            let uuid_str = &session_part[..36];
-            if is_valid_uuid(uuid_str) {
-                return Some(uuid_str.to_string());
-            }
+        if let Some(uuid_str) = session_part.get(..36)
+            && is_valid_uuid(uuid_str)
+        {
+            return Some(uuid_str.to_string());
         }
     }
     None
 }
 
-/// 简单验证 UUID 格式（36 字符，包含 4 个连字符）
+/// 仅接受标准的 36 字节 UUID 格式，并验证十六进制字符与分隔符位置。
 fn is_valid_uuid(s: &str) -> bool {
-    s.len() == 36 && s.chars().filter(|c| *c == '-').count() == 4
+    s.len() == 36 && Uuid::parse_str(s).is_ok()
 }
 
 /// 收集历史消息中使用的所有工具名称
@@ -208,12 +262,12 @@ fn collect_history_tool_names(history: &[Message]) -> Vec<String> {
     let mut tool_names = Vec::new();
 
     for msg in history {
-        if let Message::Assistant(assistant_msg) = msg {
-            if let Some(ref tool_uses) = assistant_msg.assistant_response_message.tool_uses {
-                for tool_use in tool_uses {
-                    if !tool_names.contains(&tool_use.name) {
-                        tool_names.push(tool_use.name.clone());
-                    }
+        if let Message::Assistant(assistant_msg) = msg
+            && let Some(ref tool_uses) = assistant_msg.assistant_response_message.tool_uses
+        {
+            for tool_use in tool_uses {
+                if !tool_names.contains(&tool_use.name) {
+                    tool_names.push(tool_use.name.clone());
                 }
             }
         }
@@ -345,10 +399,7 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
         .with_history(history);
 
     if !tool_name_map.is_empty() {
-        tracing::info!(
-            "工具名称映射: {} 个超长名称已缩短",
-            tool_name_map.len()
-        );
+        tracing::info!("工具名称映射: {} 个超长名称已缩短", tool_name_map.len());
     }
 
     Ok(ConversionResult {
@@ -385,10 +436,10 @@ fn process_message_content(
                             }
                         }
                         "image" => {
-                            if let Some(source) = block.source {
-                                if let Some(format) = get_image_format(&source.media_type) {
-                                    images.push(KiroImage::from_base64(format, source.data));
-                                }
+                            if let Some(source) = block.source
+                                && let Some(format) = get_image_format(&source.media_type)
+                            {
+                                images.push(KiroImage::from_base64(format, source.data));
                             }
                         }
                         "tool_result" => {
@@ -444,9 +495,7 @@ fn get_image_format(media_type: &str) -> Option<String> {
 /// 例如读取图片文件、渲染 PDF 页、浏览器截图这类工具的返回。Kiro 的
 /// ToolResult 结构只承载文本，故此处把 image 块单独提出来，由调用方
 /// 合并进 UserInputMessage.images 一起上送，避免图片被静默丢弃。
-fn extract_tool_result_content(
-    content: &Option<serde_json::Value>,
-) -> (String, Vec<KiroImage>) {
+fn extract_tool_result_content(content: &Option<serde_json::Value>) -> (String, Vec<KiroImage>) {
     let mut images = Vec::new();
     let text = match content {
         Some(serde_json::Value::String(s)) => s.clone(),
@@ -458,18 +507,16 @@ fn extract_tool_result_content(
                     continue;
                 }
                 // 形如 {"type":"image","source":{"type":"base64","media_type":"image/png","data":"..."}}
-                if item.get("type").and_then(|v| v.as_str()) == Some("image") {
-                    if let Some(source) = item.get("source") {
-                        let media_type = source
-                            .get("media_type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default();
-                        let data = source.get("data").and_then(|v| v.as_str());
-                        if let (Some(format), Some(data)) =
-                            (get_image_format(media_type), data)
-                        {
-                            images.push(KiroImage::from_base64(format, data));
-                        }
+                if item.get("type").and_then(|v| v.as_str()) == Some("image")
+                    && let Some(source) = item.get("source")
+                {
+                    let media_type = source
+                        .get("media_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let data = source.get("data").and_then(|v| v.as_str());
+                    if let (Some(format), Some(data)) = (get_image_format(media_type), data) {
+                        images.push(KiroImage::from_base64(format, data));
                     }
                 }
             }
@@ -582,20 +629,20 @@ fn remove_orphaned_tool_uses(
     }
 
     for msg in history.iter_mut() {
-        if let Message::Assistant(assistant_msg) = msg {
-            if let Some(ref mut tool_uses) = assistant_msg.assistant_response_message.tool_uses {
-                let original_len = tool_uses.len();
-                tool_uses.retain(|tu| !orphaned_ids.contains(&tu.tool_use_id));
+        if let Message::Assistant(assistant_msg) = msg
+            && let Some(ref mut tool_uses) = assistant_msg.assistant_response_message.tool_uses
+        {
+            let original_len = tool_uses.len();
+            tool_uses.retain(|tu| !orphaned_ids.contains(&tu.tool_use_id));
 
-                // 如果移除后为空，设置为 None
-                if tool_uses.is_empty() {
-                    assistant_msg.assistant_response_message.tool_uses = None;
-                } else if tool_uses.len() != original_len {
-                    tracing::debug!(
-                        "从 assistant 消息中移除了 {} 个孤立的 tool_use",
-                        original_len - tool_uses.len()
-                    );
-                }
+            // 如果移除后为空，设置为 None
+            if tool_uses.is_empty() {
+                assistant_msg.assistant_response_message.tool_uses = None;
+            } else if tool_uses.len() != original_len {
+                tracing::debug!(
+                    "从 assistant 消息中移除了 {} 个孤立的 tool_use",
+                    original_len - tool_uses.len()
+                );
             }
         }
     }
@@ -630,7 +677,10 @@ fn map_tool_name(name: &str, tool_name_map: &mut HashMap<String, String>) -> Str
 }
 
 /// 转换工具定义
-fn convert_tools(tools: &Option<Vec<super::types::Tool>>, tool_name_map: &mut HashMap<String, String>) -> Vec<Tool> {
+fn convert_tools(
+    tools: &Option<Vec<super::types::Tool>>,
+    tool_name_map: &mut HashMap<String, String>,
+) -> Vec<Tool> {
     let Some(tools) = tools else {
         return Vec::new();
     };
@@ -661,39 +711,13 @@ fn convert_tools(tools: &Option<Vec<super::types::Tool>>, tool_name_map: &mut Ha
                 tool_specification: ToolSpecification {
                     name: map_tool_name(&t.name, tool_name_map),
                     description,
-                    input_schema: InputSchema::from_json(normalize_json_schema(serde_json::json!(t.input_schema))),
+                    input_schema: InputSchema::from_json(normalize_json_schema(serde_json::json!(
+                        t.input_schema
+                    ))),
                 },
             }
         })
         .collect()
-}
-
-/// 生成thinking标签前缀
-fn generate_thinking_prefix(req: &MessagesRequest) -> Option<String> {
-    if let Some(t) = &req.thinking {
-        if t.thinking_type == "enabled" {
-            return Some(format!(
-                "<thinking_mode>enabled</thinking_mode><max_thinking_length>{}</max_thinking_length>",
-                t.budget_tokens
-            ));
-        } else if t.thinking_type == "adaptive" {
-            let effort = req
-                .output_config
-                .as_ref()
-                .map(|c| c.effort.as_str())
-                .unwrap_or("high");
-            return Some(format!(
-                "<thinking_mode>adaptive</thinking_mode><thinking_effort>{}</thinking_effort>",
-                effort
-            ));
-        }
-    }
-    None
-}
-
-/// 检查内容是否已包含thinking标签
-fn has_thinking_tags(content: &str) -> bool {
-    content.contains("<thinking_mode>") || content.contains("<max_thinking_length>")
 }
 
 /// 构建历史消息
@@ -704,11 +728,13 @@ fn has_thinking_tags(content: &str) -> bool {
 ///   注意：该切片与 `req.messages` 可能不同（prefill 时会截断末尾的 assistant 消息），
 ///   调用方应始终使用此参数而非 `req.messages`。
 /// * `model_id` - 已映射的 Kiro 模型 ID
-fn build_history(req: &MessagesRequest, messages: &[super::types::Message], model_id: &str, tool_name_map: &mut HashMap<String, String>) -> Result<Vec<Message>, ConversionError> {
+fn build_history(
+    req: &MessagesRequest,
+    messages: &[super::types::Message],
+    model_id: &str,
+    tool_name_map: &mut HashMap<String, String>,
+) -> Result<Vec<Message>, ConversionError> {
     let mut history = Vec::new();
-
-    // 生成thinking前缀（如果需要）
-    let thinking_prefix = generate_thinking_prefix(req);
 
     // 1. 处理系统消息
     if let Some(ref system) = req.system {
@@ -722,31 +748,13 @@ fn build_history(req: &MessagesRequest, messages: &[super::types::Message], mode
             // 追加分块写入策略到系统消息
             let system_content = format!("{}\n{}", system_content, SYSTEM_CHUNKED_POLICY);
 
-            // 注入thinking标签到系统消息最前面（如果需要且不存在）
-            let final_content = if let Some(ref prefix) = thinking_prefix {
-                if !has_thinking_tags(&system_content) {
-                    format!("{}\n{}", prefix, system_content)
-                } else {
-                    system_content
-                }
-            } else {
-                system_content
-            };
-
             // 系统消息作为 user + assistant 配对
-            let user_msg = HistoryUserMessage::new(final_content, model_id);
+            let user_msg = HistoryUserMessage::new(system_content, model_id);
             history.push(Message::User(user_msg));
 
             let assistant_msg = HistoryAssistantMessage::new("I will follow these instructions.");
             history.push(Message::Assistant(assistant_msg));
         }
-    } else if let Some(ref prefix) = thinking_prefix {
-        // 没有系统消息但有thinking配置，插入新的系统消息
-        let user_msg = HistoryUserMessage::new(prefix.clone(), model_id);
-        history.push(Message::User(user_msg));
-
-        let assistant_msg = HistoryAssistantMessage::new("I will follow these instructions.");
-        history.push(Message::Assistant(assistant_msg));
     }
 
     // 2. 处理常规消息历史
@@ -758,9 +766,7 @@ fn build_history(req: &MessagesRequest, messages: &[super::types::Message], mode
     let mut user_buffer: Vec<&super::types::Message> = Vec::new();
     let mut assistant_buffer: Vec<&super::types::Message> = Vec::new();
 
-    for i in 0..history_end_index {
-        let msg = &messages[i];
-
+    for msg in messages.iter().take(history_end_index) {
         if msg.role == "user" {
             // 先处理累积的 assistant 消息
             if !assistant_buffer.is_empty() {
@@ -843,6 +849,8 @@ fn convert_assistant_message(
     tool_name_map: &mut HashMap<String, String>,
 ) -> Result<HistoryAssistantMessage, ConversionError> {
     let mut thinking_content = String::new();
+    let mut thinking_signature = None;
+    let mut redacted_thinking = None;
     let mut text_content = String::new();
     let mut tool_uses = Vec::new();
 
@@ -858,6 +866,10 @@ fn convert_assistant_message(
                             if let Some(thinking) = block.thinking {
                                 thinking_content.push_str(&thinking);
                             }
+                            thinking_signature = block.signature;
+                        }
+                        "redacted_thinking" => {
+                            redacted_thinking = block.data;
                         }
                         "text" => {
                             if let Some(text) = block.text {
@@ -868,7 +880,8 @@ fn convert_assistant_message(
                             if let (Some(id), Some(name)) = (block.id, block.name) {
                                 let input = block.input.unwrap_or(serde_json::json!({}));
                                 let mapped_name = map_tool_name(&name, tool_name_map);
-                                tool_uses.push(ToolUseEntry::new(id, mapped_name).with_input(input));
+                                tool_uses
+                                    .push(ToolUseEntry::new(id, mapped_name).with_input(input));
                             }
                         }
                         _ => {}
@@ -879,25 +892,20 @@ fn convert_assistant_message(
         _ => {}
     }
 
-    // 组合 thinking 和 text 内容
-    // 格式: <thinking>思考内容</thinking>\n\ntext内容
-    // 注意: Kiro API 要求 content 字段不能为空，当只有 tool_use 时需要占位符
-    let final_content = if !thinking_content.is_empty() {
-        if !text_content.is_empty() {
-            format!(
-                "<thinking>{}</thinking>\n\n{}",
-                thinking_content, text_content
-            )
-        } else {
-            format!("<thinking>{}</thinking>", thinking_content)
-        }
-    } else if text_content.is_empty() && !tool_uses.is_empty() {
+    // Kiro stores native reasoning separately from assistant text.
+    let final_content = if text_content.is_empty() && !tool_uses.is_empty() {
         " ".to_string()
     } else {
         text_content
     };
 
     let mut assistant = AssistantMessage::new(final_content);
+    if !thinking_content.is_empty() || thinking_signature.is_some() {
+        assistant = assistant.with_reasoning(thinking_content, thinking_signature);
+    }
+    if let Some(redacted) = redacted_thinking {
+        assistant.reasoning_content = Some(serde_json::json!({"redactedContent": redacted}));
+    }
     if !tool_uses.is_empty() {
         assistant = assistant.with_tool_uses(tool_uses);
     }
@@ -920,6 +928,7 @@ fn merge_assistant_messages(
 
     let mut all_tool_uses: Vec<ToolUseEntry> = Vec::new();
     let mut content_parts: Vec<String> = Vec::new();
+    let mut reasoning_content = None;
 
     for msg in messages {
         let converted = convert_assistant_message(msg, tool_name_map)?;
@@ -930,6 +939,10 @@ fn merge_assistant_messages(
         if let Some(tus) = am.tool_uses {
             all_tool_uses.extend(tus);
         }
+        if am.reasoning_content.is_some() {
+            // A signature authenticates one reasoning block; never join signed blocks.
+            reasoning_content = am.reasoning_content;
+        }
     }
 
     let content = if content_parts.is_empty() && !all_tool_uses.is_empty() {
@@ -939,6 +952,7 @@ fn merge_assistant_messages(
     };
 
     let mut assistant = AssistantMessage::new(content);
+    assistant.reasoning_content = reasoning_content;
     if !all_tool_uses.is_empty() {
         assistant = assistant.with_tool_uses(all_tool_uses);
     }
@@ -1040,6 +1054,18 @@ mod tests {
     }
 
     #[test]
+    fn test_map_model_sonnet_5_5() {
+        for name in [
+            "claude-sonnet-5-5",
+            "claude-sonnet-5.5",
+            "claude-sonnet-5-5-thinking",
+        ] {
+            assert_eq!(map_model(name), Some("claude-sonnet-5.5".into()));
+            assert_eq!(get_context_window_size(name), 1_000_000);
+        }
+    }
+
+    #[test]
     fn test_map_model_fable_5_1() {
         // Anthropic 侧连字符形式（客户端实际发送的名字）
         assert_eq!(
@@ -1138,8 +1164,45 @@ mod tests {
             thinking: None,
             output_config: None,
             metadata: None,
+            compaction: None,
+            context_management: None,
         };
         assert_eq!(determine_chat_trigger_type(&req), "MANUAL");
+    }
+
+    #[test]
+    fn native_model_controls_are_serialized_without_prompt_injection() {
+        let req = MessagesRequest {
+            model: "claude-sonnet-5-thinking".into(),
+            max_tokens: 1000,
+            messages: vec![super::super::types::Message {
+                role: "user".into(),
+                content: serde_json::json!("hi"),
+            }],
+            stream: false,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            thinking: Some(super::super::types::Thinking {
+                thinking_type: "adaptive".into(),
+                budget_tokens: 1000,
+            }),
+            output_config: Some(super::super::types::OutputConfig {
+                effort: "xhigh".into(),
+            }),
+            metadata: None,
+            compaction: None,
+            context_management: None,
+        };
+        let converted = convert_request(&req).unwrap();
+        let body = additional_model_request_fields(&req).unwrap();
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "xhigh");
+        assert!(
+            !serde_json::to_string(&converted.conversation_state)
+                .unwrap()
+                .contains("thinking_mode")
+        );
     }
 
     #[test]
@@ -1185,13 +1248,18 @@ mod tests {
 
     #[test]
     fn test_shorten_tool_name_deterministic() {
-        let long_name = "mcp__some_very_long_server_name__some_very_long_tool_name_that_exceeds_limit";
+        let long_name =
+            "mcp__some_very_long_server_name__some_very_long_tool_name_that_exceeds_limit";
         assert!(long_name.len() > TOOL_NAME_MAX_LEN);
 
         let short1 = shorten_tool_name(long_name);
         let short2 = shorten_tool_name(long_name);
         assert_eq!(short1, short2, "相同输入应产生相同的短名称");
-        assert!(short1.len() <= TOOL_NAME_MAX_LEN, "短名称长度应 <= 63，实际 {}", short1.len());
+        assert!(
+            short1.len() <= TOOL_NAME_MAX_LEN,
+            "短名称长度应 <= 63，实际 {}",
+            short1.len()
+        );
     }
 
     #[test]
@@ -1224,7 +1292,8 @@ mod tests {
     fn test_tool_name_mapping_in_convert_request() {
         use super::super::types::{Message as AnthropicMessage, Tool as AnthropicTool};
 
-        let long_tool_name = "mcp__plugin_very_long_server_name__extremely_long_tool_name_exceeds_63";
+        let long_tool_name =
+            "mcp__plugin_very_long_server_name__extremely_long_tool_name_exceeds_63";
         assert!(long_tool_name.len() > TOOL_NAME_MAX_LEN);
 
         let mut schema = std::collections::HashMap::new();
@@ -1234,12 +1303,10 @@ mod tests {
         let req = MessagesRequest {
             model: "claude-sonnet-4-5-20250929".to_string(),
             max_tokens: 1024,
-            messages: vec![
-                AnthropicMessage {
-                    role: "user".to_string(),
-                    content: serde_json::json!("test"),
-                },
-            ],
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: serde_json::json!("test"),
+            }],
             system: None,
             stream: false,
             tools: Some(vec![AnthropicTool {
@@ -1253,6 +1320,8 @@ mod tests {
             tool_choice: None,
             output_config: None,
             metadata: None,
+            compaction: None,
+            context_management: None,
         };
 
         let result = convert_request(&req).unwrap();
@@ -1266,8 +1335,12 @@ mod tests {
         assert!(short.len() <= TOOL_NAME_MAX_LEN);
 
         // Kiro 请求中的工具名应该是短名称
-        let tools = &result.conversation_state.current_message.user_input_message
-            .user_input_message_context.tools;
+        let tools = &result
+            .conversation_state
+            .current_message
+            .user_input_message
+            .user_input_message_context
+            .tools;
         assert_eq!(tools[0].tool_specification.name, *short);
     }
 
@@ -1275,7 +1348,8 @@ mod tests {
     fn test_tool_name_mapping_in_history() {
         use super::super::types::{Message as AnthropicMessage, Tool as AnthropicTool};
 
-        let long_tool_name = "mcp__plugin_very_long_server_name__extremely_long_tool_name_exceeds_63";
+        let long_tool_name =
+            "mcp__plugin_very_long_server_name__extremely_long_tool_name_exceeds_63";
 
         let mut schema = std::collections::HashMap::new();
         schema.insert("type".to_string(), serde_json::json!("object"));
@@ -1316,6 +1390,8 @@ mod tests {
             tool_choice: None,
             output_config: None,
             metadata: None,
+            compaction: None,
+            context_management: None,
         };
 
         let result = convert_request(&req).unwrap();
@@ -1325,13 +1401,13 @@ mod tests {
         let history = &result.conversation_state.history;
         let mut found = false;
         for msg in history {
-            if let Message::Assistant(a) = msg {
-                if let Some(ref tool_uses) = a.assistant_response_message.tool_uses {
-                    for tu in tool_uses {
-                        if tu.tool_use_id == "toolu_01" {
-                            assert_eq!(tu.name, short_name, "历史中的 tool_use name 应该是短名称");
-                            found = true;
-                        }
+            if let Message::Assistant(a) = msg
+                && let Some(ref tool_uses) = a.assistant_response_message.tool_uses
+            {
+                for tu in tool_uses {
+                    if tu.tool_use_id == "toolu_01" {
+                        assert_eq!(tu.name, short_name, "历史中的 tool_use name 应该是短名称");
+                        found = true;
                     }
                 }
             }
@@ -1373,6 +1449,8 @@ mod tests {
             thinking: None,
             output_config: None,
             metadata: None,
+            compaction: None,
+            context_management: None,
         };
 
         let result = convert_request(&req).unwrap();
@@ -1439,6 +1517,29 @@ mod tests {
     }
 
     #[test]
+    fn session_metadata_rejects_unicode_and_malformed_uuids_without_panicking() {
+        for candidate in [
+            format!("{}🦀", "a".repeat(35)),
+            "🦀".repeat(12),
+            "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz".into(),
+            "12345678-1234-1234-123456789012-1234".into(),
+            "short".into(),
+        ] {
+            assert_eq!(
+                extract_session_id(&format!("user_session_{candidate}")),
+                None
+            );
+            let metadata = serde_json::json!({"session_id":candidate}).to_string();
+            assert_eq!(extract_session_id(&metadata), None);
+        }
+        let valid = "A0662283-7FD3-4399-A7EB-52B9A717AE88";
+        assert_eq!(
+            extract_session_id(&format!("用户_session_{valid}_后缀")),
+            Some(valid.into())
+        );
+    }
+
+    #[test]
     fn test_convert_request_with_session_metadata() {
         use super::super::types::{Message as AnthropicMessage, Metadata};
 
@@ -1461,6 +1562,8 @@ mod tests {
                     "user_0dede55c6dcc4a11a30bbb5e7f22e6fdf86cdeba3820019cc27612af4e1243cd_account__session_a0662283-7fd3-4399-a7eb-52b9a717ae88".to_string(),
                 ),
             }),
+            compaction: None,
+            context_management: None,
         };
 
         let result = convert_request(&req).unwrap();
@@ -1489,6 +1592,8 @@ mod tests {
             thinking: None,
             output_config: None,
             metadata: None,
+            compaction: None,
+            context_management: None,
         };
 
         let result = convert_request(&req).unwrap();
@@ -1869,10 +1974,29 @@ mod tests {
         let result = merge_assistant_messages(&messages, &mut HashMap::new()).expect("合并应成功");
 
         let content = &result.assistant_response_message.content;
-        assert!(content.contains("<thinking>"), "应包含 thinking 标签");
-        assert!(content.contains("Let me read that file"), "应包含第二条消息的 text 内容");
+        assert!(
+            !content.contains("<thinking>"),
+            "推理应与 assistant 文本分开保存"
+        );
+        assert!(
+            result
+                .assistant_response_message
+                .reasoning_content
+                .as_ref()
+                .and_then(|value| value.pointer("/reasoningText/text"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|text| text.contains("I should read")),
+            "签名不能对应拼接后的推理文本；保留最后一个原生推理块"
+        );
+        assert!(
+            content.contains("Let me read that file"),
+            "应包含第二条消息的 text 内容"
+        );
 
-        let tool_uses = result.assistant_response_message.tool_uses.expect("应有 tool_uses");
+        let tool_uses = result
+            .assistant_response_message
+            .tool_uses
+            .expect("应有 tool_uses");
         assert_eq!(tool_uses.len(), 1);
         assert_eq!(tool_uses[0].tool_use_id, "toolu_01ABC");
     }
@@ -1919,21 +2043,26 @@ mod tests {
             thinking: None,
             output_config: None,
             metadata: None,
+            compaction: None,
+            context_management: None,
         };
 
         let result = convert_request(&req);
-        assert!(result.is_ok(), "连续 assistant 消息场景不应报错: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "连续 assistant 消息场景不应报错: {:?}",
+            result.err()
+        );
 
         let state = result.unwrap().conversation_state;
         let mut found_tool_use = false;
         for msg in &state.history {
-            if let Message::Assistant(assistant_msg) = msg {
-                if let Some(ref tool_uses) = assistant_msg.assistant_response_message.tool_uses {
-                    if tool_uses.iter().any(|t| t.tool_use_id == "toolu_01XYZ") {
-                        found_tool_use = true;
-                        break;
-                    }
-                }
+            if let Message::Assistant(assistant_msg) = msg
+                && let Some(ref tool_uses) = assistant_msg.assistant_response_message.tool_uses
+                && tool_uses.iter().any(|t| t.tool_use_id == "toolu_01XYZ")
+            {
+                found_tool_use = true;
+                break;
             }
         }
         assert!(found_tool_use, "合并后的 assistant 消息应包含 tool_use");

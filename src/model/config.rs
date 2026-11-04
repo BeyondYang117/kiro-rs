@@ -4,21 +4,66 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum TlsBackend {
+    #[default]
     Rustls,
     NativeTls,
 }
 
-impl Default for TlsBackend {
+/// 单进程内上游调用的容量与等待策略。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ConcurrencyConfig {
+    pub max_in_flight: usize,
+    pub max_in_flight_per_credential: u64,
+    pub max_waiting: usize,
+    pub wait_timeout_seconds: u64,
+    pub rate_limit_cooldown_seconds: u64,
+}
+
+impl Default for ConcurrencyConfig {
     fn default() -> Self {
-        Self::Rustls
+        Self {
+            max_in_flight: 64,
+            max_in_flight_per_credential: 4,
+            max_waiting: 128,
+            wait_timeout_seconds: 30,
+            rate_limit_cooldown_seconds: 30,
+        }
+    }
+}
+
+impl ConcurrencyConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (1..=tokio::sync::Semaphore::MAX_PERMITS).contains(&self.max_in_flight),
+            "concurrency.maxInFlight 必须在 1..={} 之间",
+            tokio::sync::Semaphore::MAX_PERMITS
+        );
+        anyhow::ensure!(
+            self.max_in_flight_per_credential > 0,
+            "concurrency.maxInFlightPerCredential 必须大于 0"
+        );
+        anyhow::ensure!(
+            self.max_waiting <= tokio::sync::Semaphore::MAX_PERMITS,
+            "concurrency.maxWaiting 超过允许上限"
+        );
+        anyhow::ensure!(
+            (1..=86_400).contains(&self.wait_timeout_seconds),
+            "concurrency.waitTimeoutSeconds 必须在 1..=86400 之间"
+        );
+        anyhow::ensure!(
+            (1..=86_400).contains(&self.rate_limit_cooldown_seconds),
+            "concurrency.rateLimitCooldownSeconds 必须在 1..=86400 之间"
+        );
+        Ok(())
     }
 }
 
 /// KNA 应用配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
     #[serde(default = "default_host")]
@@ -70,6 +115,14 @@ pub struct Config {
     #[serde(default = "default_count_tokens_auth_type")]
     pub count_tokens_auth_type: String,
 
+    /// 远程 token 计数超时（秒），失败后回退本地估算。
+    #[serde(default = "default_count_tokens_timeout_seconds")]
+    pub count_tokens_timeout_seconds: u64,
+
+    /// Claude Code 端点是否缓冲完整响应以更正初始 usage。
+    #[serde(default = "default_cc_buffered_stream")]
+    pub cc_buffered_stream: bool,
+
     /// HTTP 代理地址（可选）
     /// 支持格式: http://host:port, https://host:port, socks5://host:port
     #[serde(default)]
@@ -87,9 +140,20 @@ pub struct Config {
     #[serde(default)]
     pub admin_api_key: Option<String>,
 
+    /// 调用日志数据库；默认在 credentials.json 同目录。
+    #[serde(default)]
+    pub request_log_path: Option<String>,
+
+    /// 调用日志保留天数（至少 1 天），同时最多保留 100000 条。
+    #[serde(default = "default_request_log_retention_days")]
+    pub request_log_retention_days: u32,
+
     /// 负载均衡模式（"priority" 或 "balanced"）
     #[serde(default = "default_load_balancing_mode")]
     pub load_balancing_mode: String,
+
+    #[serde(default)]
+    pub concurrency: ConcurrencyConfig,
 
     /// 是否开启非流式响应的 thinking 块提取（默认 true）
     ///
@@ -109,13 +173,36 @@ pub struct Config {
     #[serde(default)]
     pub endpoints: HashMap<String, serde_json::Value>,
 
+    /// 保留扩展配置，管理 API 更新配置时避免丢失未知字段。
+    #[serde(flatten)]
+    extra_fields: HashMap<String, serde_json::Value>,
+
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
     config_path: Option<PathBuf>,
 }
 
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("region", &self.region)
+            .field("tls_backend", &self.tls_backend)
+            .field("load_balancing_mode", &self.load_balancing_mode)
+            .field("concurrency", &self.concurrency)
+            .field("cc_buffered_stream", &self.cc_buffered_stream)
+            .field("default_endpoint", &self.default_endpoint)
+            .finish_non_exhaustive()
+    }
+}
+
 fn default_host() -> String {
     "127.0.0.1".to_string()
+}
+
+fn default_request_log_retention_days() -> u32 {
+    30
 }
 
 fn default_port() -> u16 {
@@ -143,12 +230,20 @@ fn default_count_tokens_auth_type() -> String {
     "x-api-key".to_string()
 }
 
+fn default_count_tokens_timeout_seconds() -> u64 {
+    10
+}
+
+fn default_cc_buffered_stream() -> bool {
+    true
+}
+
 fn default_tls_backend() -> TlsBackend {
     TlsBackend::Rustls
 }
 
 fn default_load_balancing_mode() -> String {
-    "priority".to_string()
+    "balanced".to_string()
 }
 
 fn default_extract_thinking() -> bool {
@@ -176,14 +271,20 @@ impl Default for Config {
             count_tokens_api_url: None,
             count_tokens_api_key: None,
             count_tokens_auth_type: default_count_tokens_auth_type(),
+            count_tokens_timeout_seconds: default_count_tokens_timeout_seconds(),
+            cc_buffered_stream: default_cc_buffered_stream(),
             proxy_url: None,
             proxy_username: None,
             proxy_password: None,
             admin_api_key: None,
+            request_log_path: None,
+            request_log_retention_days: default_request_log_retention_days(),
             load_balancing_mode: default_load_balancing_mode(),
+            concurrency: ConcurrencyConfig::default(),
             extract_thinking: default_extract_thinking(),
             default_endpoint: default_endpoint(),
             endpoints: HashMap::new(),
+            extra_fields: HashMap::new(),
             config_path: None,
         }
     }
@@ -210,14 +311,16 @@ impl Config {
     /// 从文件加载配置
     pub fn load<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
         let path = path.as_ref();
-        if !path.exists() {
-            // 配置文件不存在，返回默认配置
-            let mut config = Self::default();
-            config.config_path = Some(path.to_path_buf());
-            return Ok(config);
-        }
-
-        let content = fs::read_to_string(path)?;
+        let content = match fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    config_path: Some(path.to_path_buf()),
+                    ..Default::default()
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
         let mut config: Config = serde_json::from_str(&content)?;
         config.config_path = Some(path.to_path_buf());
         Ok(config)
@@ -236,7 +339,94 @@ impl Config {
             .ok_or_else(|| anyhow::anyhow!("配置文件路径未知，无法保存配置"))?;
 
         let content = serde_json::to_string_pretty(self).context("序列化配置失败")?;
-        fs::write(path, content).with_context(|| format!("写入配置文件失败: {}", path.display()))?;
+        crate::common::persistence::atomic_write(path, content.as_bytes())
+            .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concurrency_defaults_partial_settings_and_roundtrip() {
+        let defaults: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.load_balancing_mode, "balanced");
+        assert_eq!(defaults.concurrency.max_in_flight, 64);
+        assert_eq!(defaults.concurrency.max_in_flight_per_credential, 4);
+        assert_eq!(defaults.concurrency.max_waiting, 128);
+        let config: Config = serde_json::from_str(
+            r#"{"loadBalancingMode":"priority","concurrency":{"maxWaiting":0,"maxInFlight":2}}"#,
+        )
+        .unwrap();
+        config.concurrency.validate().unwrap();
+        assert_eq!(config.load_balancing_mode, "priority");
+        assert_eq!(config.concurrency.max_waiting, 0);
+        assert_eq!(config.concurrency.wait_timeout_seconds, 30);
+        let encoded = serde_json::to_value(config).unwrap();
+        assert_eq!(encoded["concurrency"]["maxInFlight"], 2);
+        assert_eq!(encoded["concurrency"]["maxWaiting"], 0);
+    }
+
+    #[test]
+    fn invalid_concurrency_settings_fail_validation_instead_of_panicking_or_hanging() {
+        for settings in [
+            serde_json::json!({"maxInFlight":0}),
+            serde_json::json!({"maxInFlight":usize::MAX}),
+            serde_json::json!({"maxInFlightPerCredential":0}),
+            serde_json::json!({"maxWaiting":usize::MAX}),
+            serde_json::json!({"waitTimeoutSeconds":0}),
+            serde_json::json!({"waitTimeoutSeconds":u64::MAX}),
+            serde_json::json!({"rateLimitCooldownSeconds":0}),
+            serde_json::json!({"rateLimitCooldownSeconds":u64::MAX}),
+        ] {
+            let config: ConcurrencyConfig = serde_json::from_value(settings).unwrap();
+            assert!(config.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn streaming_and_token_timeout_settings_preserve_legacy_defaults_and_roundtrip() {
+        let defaults: Config = serde_json::from_str("{}").unwrap();
+        assert!(defaults.cc_buffered_stream);
+        assert_eq!(defaults.count_tokens_timeout_seconds, 10);
+        let config: Config =
+            serde_json::from_str(r#"{"ccBufferedStream":false,"countTokensTimeoutSeconds":3}"#)
+                .unwrap();
+        assert!(!config.cc_buffered_stream);
+        assert_eq!(config.count_tokens_timeout_seconds, 3);
+        let encoded = serde_json::to_value(config).unwrap();
+        assert_eq!(encoded["ccBufferedStream"], false);
+        assert_eq!(encoded["countTokensTimeoutSeconds"], 3);
+    }
+
+    #[test]
+    fn config_debug_omits_keys_proxy_auth_and_custom_endpoint_secrets() {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "apiKey":"sensitive-sentinel", "adminApiKey":"sensitive-sentinel",
+            "countTokensApiKey":"sensitive-sentinel",
+            "proxyUrl":"http://user:sensitive-sentinel@localhost",
+            "proxyPassword":"sensitive-sentinel", "endpoints":{"test":{"key":"sensitive-sentinel"}}
+        }))
+        .unwrap();
+        assert!(!format!("{config:?}").contains("sensitive-sentinel"));
+    }
+
+    #[test]
+    fn missing_config_can_be_created_with_private_permissions() {
+        let path = std::env::temp_dir().join(format!("kiro-config-{}.json", uuid::Uuid::new_v4()));
+        let config = Config::load(&path).unwrap();
+        config.save().unwrap();
+        assert_eq!(Config::load(&path).unwrap().port, config.port);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        std::fs::remove_file(path).unwrap();
     }
 }

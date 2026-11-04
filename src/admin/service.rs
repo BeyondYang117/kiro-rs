@@ -23,10 +23,20 @@ const BALANCE_CACHE_TTL_SECS: i64 = 300;
 /// 缓存的余额条目（含时间戳）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedBalance {
+    /// 旧缓存没有身份信息时不复用，下一次查询会重新获取。
+    #[serde(default)]
+    credential_key: Option<String>,
     /// 缓存时间（Unix 秒）
     cached_at: f64,
     /// 缓存的余额数据
     data: BalanceResponse,
+}
+
+impl CachedBalance {
+    fn is_fresh(&self, now: f64) -> bool {
+        let age = now - self.cached_at;
+        (0.0..BALANCE_CACHE_TTL_SECS as f64).contains(&age)
+    }
 }
 
 /// Admin 服务
@@ -134,12 +144,19 @@ impl AdminService {
 
     /// 获取凭据余额（带缓存）
     pub async fn get_balance(&self, id: u64) -> Result<BalanceResponse, AdminServiceError> {
+        let credential_key = self
+            .token_manager
+            .credential_cache_key(id)
+            .ok_or(AdminServiceError::NotFound { id })?;
         // 先查缓存
         {
             let cache = self.balance_cache.lock();
             if let Some(cached) = cache.get(&id) {
                 let now = Utc::now().timestamp() as f64;
-                if (now - cached.cached_at) < BALANCE_CACHE_TTL_SECS as f64 {
+                if cached.is_fresh(now)
+                    && cached.data.id == id
+                    && cached.credential_key.as_deref() == Some(credential_key.as_str())
+                {
                     tracing::debug!("凭据 #{} 余额命中缓存", id);
                     return Ok(cached.data.clone());
                 }
@@ -148,6 +165,11 @@ impl AdminService {
 
         // 缓存未命中或已过期，从上游获取
         let balance = self.fetch_balance(id).await?;
+        // 刷新可能轮换 refreshToken；使用查询完成后的身份，并重新检查凭据存在。
+        let credential_key = self
+            .token_manager
+            .credential_cache_key(id)
+            .ok_or(AdminServiceError::NotFound { id })?;
 
         // 更新缓存
         {
@@ -155,6 +177,7 @@ impl AdminService {
             cache.insert(
                 id,
                 CachedBalance {
+                    credential_key: Some(credential_key),
                     cached_at: Utc::now().timestamp() as f64,
                     data: balance.clone(),
                 },
@@ -199,16 +222,15 @@ impl AdminService {
         req: AddCredentialRequest,
     ) -> Result<AddCredentialResponse, AdminServiceError> {
         // 校验端点名：未指定则默认合法，指定则必须已注册
-        if let Some(ref name) = req.endpoint {
-            if !self.known_endpoints.contains(name) {
-                let mut known: Vec<&str> =
-                    self.known_endpoints.iter().map(|s| s.as_str()).collect();
-                known.sort();
-                return Err(AdminServiceError::InvalidCredential(format!(
-                    "未知端点 \"{}\"，已注册端点: {:?}",
-                    name, known
-                )));
-            }
+        if let Some(ref name) = req.endpoint
+            && !self.known_endpoints.contains(name)
+        {
+            let mut known: Vec<&str> = self.known_endpoints.iter().map(|s| s.as_str()).collect();
+            known.sort();
+            return Err(AdminServiceError::InvalidCredential(format!(
+                "未知端点 \"{}\"，已注册端点: {:?}",
+                name, known
+            )));
         }
 
         // 构建凭据对象
@@ -334,7 +356,7 @@ impl AdminService {
             .filter_map(|(k, v)| {
                 let id = k.parse::<u64>().ok()?;
                 // 丢弃超过 TTL 的条目
-                if (now - v.cached_at) < BALANCE_CACHE_TTL_SECS as f64 {
+                if v.is_fresh(now) && v.data.id == id && v.credential_key.is_some() {
                     Some((id, v))
                 } else {
                     None
@@ -356,7 +378,7 @@ impl AdminService {
 
         match serde_json::to_string_pretty(&map) {
             Ok(json) => {
-                if let Err(e) = std::fs::write(path, json) {
+                if let Err(e) = crate::common::persistence::atomic_write(path, json.as_bytes()) {
                     tracing::warn!("保存余额缓存失败: {}", e);
                 }
             }
@@ -448,10 +470,161 @@ impl AdminService {
         let msg = e.to_string();
         if msg.contains("不存在") {
             AdminServiceError::NotFound { id }
-        } else if msg.contains("只能删除已禁用的凭据") || msg.contains("请先禁用凭据") {
+        } else if msg.contains("只能删除已禁用的凭据") || msg.contains("请先禁用凭据")
+        {
             AdminServiceError::InvalidCredential(msg)
         } else {
             AdminServiceError::InternalError(msg)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::config::Config;
+
+    struct CacheTestDirectory(PathBuf);
+
+    impl CacheTestDirectory {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("kiro-balance-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn service(&self, refresh_token: &str) -> AdminService {
+            let manager = MultiTokenManager::new(
+                Config::default(),
+                vec![KiroCredentials {
+                    id: Some(1),
+                    refresh_token: Some(refresh_token.into()),
+                    ..Default::default()
+                }],
+                None,
+                Some(self.0.join("credentials.json")),
+                false,
+            )
+            .unwrap();
+            AdminService::new(Arc::new(manager), ["ide".into()])
+        }
+    }
+
+    impl Drop for CacheTestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn cached_balance(service: &AdminService) -> CachedBalance {
+        CachedBalance {
+            credential_key: service.token_manager.credential_cache_key(1),
+            cached_at: Utc::now().timestamp() as f64,
+            data: BalanceResponse {
+                id: 1,
+                subscription_title: Some("cached-account".into()),
+                current_usage: 10.0,
+                usage_limit: 100.0,
+                remaining: 90.0,
+                usage_percentage: 10.0,
+                next_reset_at: None,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn balance_cache_survives_restart_but_rejects_reused_ids_and_deleted_credentials() {
+        let directory = CacheTestDirectory::new();
+        // 使用短 refreshToken，缓存未命中时会在本地校验失败，不访问外网。
+        let service = directory.service("old-account-secret");
+        service
+            .balance_cache
+            .lock()
+            .insert(1, cached_balance(&service));
+        service.save_balance_cache();
+        let content = std::fs::read_to_string(service.cache_path.as_ref().unwrap()).unwrap();
+        assert!(!content.contains("old-account-secret"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(service.cache_path.as_ref().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        drop(service);
+        let same_account = directory.service("old-account-secret");
+        assert_eq!(same_account.get_balance(1).await.unwrap().remaining, 90.0);
+        drop(same_account);
+        let changed_account = directory.service("new-account-secret");
+        let error = changed_account.get_balance(1).await.unwrap_err();
+        assert!(error.to_string().contains("refreshToken 已被截断"));
+        changed_account.token_manager.set_disabled(1, true).unwrap();
+        // 模拟已删除账户仍有缓存的情况（例如删除落盘失败）。
+        changed_account.token_manager.delete_credential(1).unwrap();
+        assert!(matches!(
+            changed_account.get_balance(1).await,
+            Err(AdminServiceError::NotFound { id: 1 })
+        ));
+    }
+
+    #[test]
+    fn balance_cache_rejects_expired_future_legacy_and_mismatched_entries() {
+        let directory = CacheTestDirectory::new();
+        let service = directory.service("account-secret");
+        let now = Utc::now().timestamp() as f64;
+        let mut valid = cached_balance(&service);
+        valid.cached_at = now - 10.0;
+        let mut entries = serde_json::Map::new();
+        entries.insert("1".into(), serde_json::to_value(&valid).unwrap());
+        for (id, age) in [(2, 301.0), (3, -60.0)] {
+            let mut invalid = valid.clone();
+            invalid.data.id = id;
+            invalid.cached_at = now - age;
+            entries.insert(id.to_string(), serde_json::to_value(invalid).unwrap());
+        }
+        let mut legacy = serde_json::to_value(&valid).unwrap();
+        legacy.as_object_mut().unwrap().remove("credential_key");
+        legacy["data"]["id"] = 4.into();
+        entries.insert("4".into(), legacy);
+        entries.insert("5".into(), serde_json::to_value(&valid).unwrap());
+        entries.insert("invalid-id".into(), serde_json::to_value(&valid).unwrap());
+        std::fs::write(
+            service.cache_path.as_ref().unwrap(),
+            serde_json::to_vec(&entries).unwrap(),
+        )
+        .unwrap();
+        let loaded = AdminService::load_balance_cache_from(&service.cache_path);
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded.contains_key(&1));
+        assert!(!valid.is_fresh(f64::NAN));
+        assert!(!valid.is_fresh(f64::INFINITY));
+        assert!(!valid.is_fresh(valid.cached_at + BALANCE_CACHE_TTL_SECS as f64));
+    }
+
+    #[test]
+    fn failed_balance_save_preserves_original_and_recovers() {
+        let directory = CacheTestDirectory::new();
+        let service = directory.service("account-secret");
+        let path = service.cache_path.as_ref().unwrap();
+        std::fs::create_dir(path).unwrap();
+        std::fs::write(path.join("keep"), b"original").unwrap();
+        service
+            .balance_cache
+            .lock()
+            .insert(1, cached_balance(&service));
+        service.save_balance_cache();
+        assert_eq!(std::fs::read(path.join("keep")).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(&directory.0).unwrap().count(), 2);
+        std::fs::remove_dir_all(path).unwrap();
+        service.save_balance_cache();
+        assert_eq!(
+            AdminService::load_balance_cache_from(&service.cache_path).len(),
+            1
+        );
     }
 }

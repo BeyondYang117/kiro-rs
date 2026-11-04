@@ -49,6 +49,7 @@ pub struct Model {
     #[serde(rename = "type")]
     pub model_type: String,
     pub max_tokens: i32,
+    pub max_input_tokens: i32,
 }
 
 /// 模型列表响应
@@ -58,20 +59,28 @@ pub struct ModelsResponse {
     pub data: Vec<Model>,
 }
 
-// === Messages 端点类型 ===
+#[derive(Debug, Serialize)]
+pub struct ModelDetail {
+    pub id: String,
+    pub object: String,
+    pub created_at: String,
+    pub display_name: String,
+    #[serde(rename = "type")]
+    pub type_name: String,
+    pub max_input_tokens: i32,
+    pub max_tokens: i32,
+    pub capabilities: serde_json::Value,
+}
 
-/// 最大思考预算 tokens
-const MAX_BUDGET_TOKENS: i32 = 24576;
+// === Messages 端点类型 ===
 
 /// Thinking 配置
 #[derive(Debug, Deserialize, Clone)]
 pub struct Thinking {
     #[serde(rename = "type")]
     pub thinking_type: String,
-    #[serde(
-        default = "default_budget_tokens",
-        deserialize_with = "deserialize_budget_tokens"
-    )]
+    #[serde(default = "default_budget_tokens")]
+    #[allow(dead_code)]
     pub budget_tokens: i32,
 }
 
@@ -85,23 +94,11 @@ impl Thinking {
 fn default_budget_tokens() -> i32 {
     20000
 }
-fn deserialize_budget_tokens<'de, D>(deserializer: D) -> Result<i32, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = i32::deserialize(deserializer)?;
-    Ok(value.min(MAX_BUDGET_TOKENS))
-}
-
 /// OutputConfig 配置
 #[derive(Debug, Deserialize, Clone)]
 pub struct OutputConfig {
-    #[serde(default = "default_effort")]
+    #[serde(default)]
     pub effort: String,
-}
-
-fn default_effort() -> String {
-    "high".to_string()
 }
 
 /// Claude Code 请求中的 metadata
@@ -128,6 +125,8 @@ pub struct MessagesRequest {
     pub output_config: Option<OutputConfig>,
     /// Claude Code 请求中的 metadata，包含 session 信息
     pub metadata: Option<Metadata>,
+    pub compaction: Option<serde_json::Value>,
+    pub context_management: Option<serde_json::Value>,
 }
 
 /// 反序列化 system 字段，支持字符串或数组格式
@@ -142,7 +141,7 @@ where
         type Value = Option<Vec<SystemMessage>>;
 
         fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-            formatter.write_str("a string or an array of system messages")
+            formatter.write_str("null, a string, or an array of system messages")
         }
 
         fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
@@ -170,6 +169,13 @@ where
         }
 
         fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
         where
             E: serde::de::Error,
         {
@@ -235,6 +241,10 @@ pub struct ContentBlock {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<serde_json::Value>,
@@ -280,4 +290,50 @@ pub struct CountTokensRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CountTokensResponse {
     pub input_tokens: i32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn system_accepts_null_strings_and_arrays_for_both_request_types() {
+        for (system, expected) in [
+            (json!(null), None),
+            (json!([]), None),
+            (json!("instructions"), Some("instructions")),
+            (
+                json!([{"type":"text", "text":"instructions"}]),
+                Some("instructions"),
+            ),
+        ] {
+            let payload = json!({
+                "model":"claude-sonnet-5", "max_tokens":1024,
+                "messages":[{"role":"user", "content":"hi"}], "system":system
+            });
+            let messages: MessagesRequest = serde_json::from_value(payload.clone()).unwrap();
+            let count: CountTokensRequest = serde_json::from_value(payload).unwrap();
+            for actual in [messages.system, count.system] {
+                assert_eq!(
+                    actual.as_ref().map(|parts| parts[0].text.as_str()),
+                    expected
+                );
+            }
+        }
+        for system in [
+            json!(1),
+            json!(true),
+            json!({}),
+            json!([null]),
+            json!([{"text":1}]),
+        ] {
+            let payload = json!({
+                "model":"claude-sonnet-5", "max_tokens":1024,
+                "messages":[{"role":"user", "content":"hi"}], "system":system
+            });
+            assert!(serde_json::from_value::<MessagesRequest>(payload.clone()).is_err());
+            assert!(serde_json::from_value::<CountTokensRequest>(payload).is_err());
+        }
+    }
 }

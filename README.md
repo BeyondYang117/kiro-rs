@@ -35,14 +35,16 @@
 - **流式响应**: 支持 SSE (Server-Sent Events) 流式输出
 - **Token 自动刷新**: 自动管理和刷新 OAuth Token
 - **多凭据支持**: 支持配置多个凭据，按优先级自动故障转移
-- **负载均衡**: 支持 `priority`（按优先级）和 `balanced`（均衡分配）两种模式
-- **智能重试**: 单凭据最多重试 3 次，单请求最多重试 9 次
-- **凭据回写**: 多凭据格式下自动回写刷新后的 Token
+- **负载均衡**: 默认 `balanced`（按在途请求数、历史成功次数、优先级依次选择），支持 `priority`（优先复用当前账号，满载/冷却时分流）模式
+- **并发保护**: 全局/单账号在途上限、有界等待及账号级 429 冷却，取消和流结束自动释放名额
+- **智能重试**: 每轮上游 HTTP 尝试最多 `min(凭据数 × 3, 9)` 次；空回复另有最多 2 次重试
+- **凭据回写**: 自动原子回写刷新后的 Token 和管理变更，支持单凭据与多凭据格式
 - **Thinking 模式**: 支持 Claude 的 extended thinking 功能
 - **工具调用**: 完整支持 function calling / tool use
 - **WebSearch**: 内置 WebSearch 工具转换逻辑
 - **多模型支持**: 支持 Sonnet、Opus、Haiku 系列模型
 - **Admin 管理**: 可选的 Web 管理界面和 API，支持凭据管理、余额查询等
+- **调用日志**: SQLite 持久化逐次调用，管理页可查询用量、耗时、错误原因与重试记录
 - **多级 Region 配置**: 支持全局和凭据级别的 Auth Region / API Region 配置
 - **凭据级代理**: 支持为每个凭据单独配置 HTTP/SOCKS5 代理，优先级：凭据代理 > 全局代理 > 无代理
 
@@ -158,13 +160,34 @@ curl http://127.0.0.1:8990/v1/messages \
 
 ### Docker
 
-也可以通过 Docker 启动：
+通过 Docker 从当前源码构建并启动（包含本地修改的管理页面和日志功能）：
 
 ```bash
-docker-compose up
+docker compose up -d --build
 ```
 
-需要将 `config.json` 和 `credentials.json` 挂载到容器中，具体参见 `docker-compose.yml`。
+将 `config.json` 和 `credentials.json` 放在宿主机 `./config/` 目录，Compose 将整个目录挂载至 `/app/config/`。调用日志数据库和统计缓存也保存在这个目录，重建容器不会丢失。访问 `http://localhost:8990/admin` 需要在配置中设置 `adminApiKey`，配置的监听地址应为 `0.0.0.0`、端口为 `8990`。
+
+Compose 默认镜像名为 `abu116/kiro-rs:latest`，与 `docker-push.sh` 一致；可通过 `IMAGE_NAME`、`IMAGE_TAG` 覆盖。若使用已推送的镜像，在发布新版本后执行 `docker compose pull && docker compose up -d --no-build`。尚未推送的本地修改使用上面的 `--build` 命令。
+
+终端运行日志通过 `docker compose logs -f --tail 200 kiro-rs` 查看；Compose 为其配置了每份 10 MB、最多 3 份的轮转限制。数据库中的逐次调用日志通过管理页面查询，保留时间由 `requestLogRetentionDays` 控制。
+
+#### 构建并推送到 Docker Hub
+
+使用项目根目录的脚本，一次构建并推送 `linux/amd64`、`linux/arm64` 多架构镜像到 `abu116/kiro-rs`，拉取时 Docker 会自动选择对应架构。
+
+```bash
+# 首次使用先登录具有仓库推送权限的 Docker Hub 账号
+docker login -u abu116
+
+# 默认推送 abu116/kiro-rs:latest
+./docker-push.sh
+
+# 同一次构建推送版本标签和 latest
+./docker-push.sh 2026.10.1 latest
+```
+
+需要启动 Docker 并安装 Buildx（Docker Desktop 已包含）。脚本会自动创建并复用 `kiro-rs-multiarch` builder，也可通过 `BUILDER_NAME` 指定已配置的多架构 builder。Docker Desktop 默认支持跨架构模拟；Linux 主机若尚未配置 QEMU/binfmt，可先执行 `docker run --privileged --rm tonistiigi/binfmt --install amd64,arm64`。跨架构模拟编译 Rust 可能耗时较长。
 
 ## 配置详解
 
@@ -186,13 +209,30 @@ docker-compose up
 | `countTokensApiUrl` | string | - | 外部 count_tokens API 地址 |
 | `countTokensApiKey` | string | - | 外部 count_tokens API 密钥 |
 | `countTokensAuthType` | string | `x-api-key` | 外部 API 认证类型：`x-api-key` 或 `bearer` |
+| `countTokensTimeoutSeconds` | integer | `10` | 远程 token 计数总超时（秒，最小 1），失败时回退本地估算 |
 | `proxyUrl` | string | - | HTTP/SOCKS5 代理地址 |
 | `proxyUsername` | string | - | 代理用户名 |
 | `proxyPassword` | string | - | 代理密码 |
 | `adminApiKey` | string | - | Admin API 密钥，配置后启用凭据管理 API 和 Web 管理界面 |
-| `loadBalancingMode` | string | `priority` | 负载均衡模式：`priority`（按优先级）或 `balanced`（均衡分配） |
+| `requestLogPath` | string | 凭据文件同目录下的 `kiro_requests.sqlite3` | 调用日志 SQLite 数据库路径；相对路径基于进程工作目录 |
+| `requestLogRetentionDays` | integer | `30` | 日志保留天数，最小 1；同时定期清理至最近 100000 条 |
+| `loadBalancingMode` | string | `balanced` | `balanced` 按在途请求数、累计成功次数、优先级依次选择；`priority` 优先复用当前账号 |
+| `concurrency.maxInFlight` | integer | `64` | 全局上游在途调用上限，必须大于 0 |
+| `concurrency.maxInFlightPerCredential` | integer | `4` | 单账号在途调用上限，必须大于 0 |
+| `concurrency.maxWaiting` | integer | `128` | 等待名额的调用上限；`0` 表示满载/冷却时立即拒绝 |
+| `concurrency.waitTimeoutSeconds` | integer | `30` | 每次获取调用名额的最长等待秒数，范围 1～86400 |
+| `concurrency.rateLimitCooldownSeconds` | integer | `30` | 账号收到 429 后的最短冷却秒数，范围 1～86400；与 `Retry-After` 取较长者 |
+| `ccBufferedStream` | boolean | `true` | `/cc/v1/messages` 是否缓冲完整流；设为 `false` 可实时返回内容 |
 | `extractThinking` | boolean | `true` | 非流式响应的 thinking 块提取。启用后 `<thinking>` 标签会被解析为独立的 `thinking` 内容块 |
 | `defaultEndpoint` | string | `ide` | 默认 Kiro 端点。凭据未显式指定 `endpoint` 时使用。当前支持：`ide` |
+
+通过管理 API 切换负载均衡模式时，会先原子保存配置再更新运行模式；保存失败则保留原模式。配置回写保留未知扩展字段和已有文件权限，新建配置文件在 Unix 上使用 `0600` 权限。
+
+并发保护在单进程内生效，普通对话、流式对话、压缩摘要和 WebSearch 共用名额。名额从选择账号开始持有，覆盖 Token 获取与上游响应体读取，流结束、丢弃响应或取消调用时释放；HTTP 重试退避期间不占名额。两种模式都会跳过满载或冷却中的账号，同时保留模型资格检查。Token 刷新按账号互斥，同账号自动刷新在获取锁后复查 Token，不同账号可并行刷新。
+
+等待者在名额释放、账号管理变更或冷却到期后重新参与调度，不保证 FIFO。队列满或等待超时会返回 `503 overloaded_error` 和 `Retry-After: 1`，不消耗 Provider 的 HTTP 重试预算；已经开始的 SSE 通过错误事件报告失败。等待上限针对每次获取上游名额，既不是整个客户端请求的总超时，也不限制处于退避中的客户端请求数。并发限制不等同于每分钟请求数或 token 配额限制。
+
+未指定 `loadBalancingMode` 的配置现在默认使用 `balanced`；显式设置的 `priority` 保留。并发参数修改后重启生效，冷却状态仅保存在内存中。多实例共享账号池时仍需额外的跨实例协调。
 
 完整配置示例：
 
@@ -216,14 +256,21 @@ docker-compose up
    "proxyUsername": "user",
    "proxyPassword": "pass",
    "adminApiKey": "sk-admin-your-secret-key",
-   "loadBalancingMode": "priority",
+   "loadBalancingMode": "balanced",
+   "concurrency": {
+      "maxInFlight": 64,
+      "maxInFlightPerCredential": 4,
+      "maxWaiting": 128,
+      "waitTimeoutSeconds": 30,
+      "rateLimitCooldownSeconds": 30
+   },
    "extractThinking": true
 }
 ```
 
 ### credentials.json
 
-支持单对象格式（向后兼容）或数组格式（多凭据）。
+支持单对象格式（向后兼容）或数组格式（多凭据）。两种格式都会保存 Token 刷新和管理变更；单对象文件添加第二个凭据或删除最后一个凭据时，会自动转为数组格式。回写使用同目录临时文件和原子替换，保留已有文件权限。
 
 #### 字段说明
 
@@ -300,9 +347,9 @@ docker-compose up
 
 多凭据特性：
 - 按 `priority` 字段排序，数字越小优先级越高（默认为 0）
-- 单凭据最多重试 3 次，单请求最多重试 9 次
+- 每轮上游 HTTP 尝试预算为 `min(凭据数 × 3, 9)`；空回复最多额外重试 2 次，每次使用独立 HTTP 尝试预算
 - 自动故障转移到下一个可用凭据
-- 多凭据格式下 Token 刷新后自动回写到源文件
+- Token 刷新和管理变更自动回写到源文件，支持单对象与数组格式
 
 ### Region 配置
 
@@ -393,9 +440,34 @@ RUST_LOG=debug ./target/release/kiro-rs
 > - `/cc/v1/messages`：缓冲模式，等待上游流完成后，用从 `contextUsageEvent` 计算的准确 `input_tokens` 更正 `message_start`，然后一次性返回所有事件
 > - 等待期间会每 25 秒发送 `ping` 事件保活
 
+设置 `"ccBufferedStream": false` 后，`/cc/v1/messages` 会与 `/v1/messages` 一样实时返回内容：首个 `message_start` 使用估算值，结束时的 `message_delta.usage.input_tokens` 使用上游上下文使用量计算的值（上游未提供时保留估算值）。默认仍为缓冲模式。代理侧上下文压缩仍会等待摘要及后续调用完成。
+
+远程 token 计数通过异步请求共享连接池，`countTokensTimeoutSeconds` 同时限制连接和响应体读取时间。超时、HTTP 错误或无效计数会自动回退本地估算。
+
+### 上下文压缩
+
+`/v1/messages` 和 `/cc/v1/messages` 支持代理侧压缩：
+
+- Claude Code 的传统 `/compact` 总结请求仍返回普通文本摘要。
+- 按需压缩：传入 `"compaction": {"type": "summarize"}`，返回单个 `compaction` 内容块，`stop_reason` 为 `compaction`。
+- 阈值压缩：传入 `"context_management": {"edits": [{"type": "compact_20260112", "trigger": {"type": "input_tokens", "value": 150000}, "pause_after_compaction": true}]}`。省略 trigger 时默认 150000，最小值 50000；省略 pause_after_compaction 时会生成摘要后继续回答。
+- 支持自定义 `instructions`、JSON / SSE 响应，以及后续请求中的摘要历史替换。压缩请求不能同时携带 `compaction` 和 `context_management`。
+
+Kiro 没有原生 Anthropic 压缩接口，摘要由代理额外调用当前模型生成，会消耗额度。阈值依赖 token 估算；应在上下文满之前压缩。图片在摘要输入中用占位文本表示；按需摘要的 `kiro-rs:` 签名是代理内容校验值，不能用于 Anthropic 官方接口。无论是否启用压缩，都不会静默截断历史。
+
+协议参考：[按需压缩](https://platform.claude.com/docs/en/build-with-claude/compaction-on-demand)、[阈值压缩](https://platform.claude.com/docs/en/build-with-claude/compaction-threshold)。
+
 ### Thinking 模式
 
-支持 Claude 的 extended thinking 功能：
+默认 `ide` 端点沿用旧版提示词标签实现 thinking，恢复升级前的请求协议；这属于提示词引导，不保证精确的推理强度或预算。用户显式传入的设置优先于模型名中的 `-thinking` 别名。普通请求不会附加原生 thinking/effort 字段，历史推理也不会以新版字段发送给旧端点。
+
+只有验证过当前 Kiro 账号、区域支持原生参数后，才设置 `"endpoints":{"ide":{"nativeThinking":true}}`。此模式通过 `additionalModelRequestFields` 传递 thinking/effort；`enabled` 会同时传递 `budget_tokens`，是否接受由上游模型 schema 决定。历史签名按 `reasoningContent.reasoningText.{text,signature}` 传递，加密块按 `reasoningContent.redactedContent` 传递；不拼接多个签名对应的文本。该模式尚未经过真实 Kiro 调用验证。
+
+上下文窗口使用项目内维护的模型映射：已确认的 1M 模型会在 `GET /v1/models` 的 `max_input_tokens` 和 `GET /v1/models/{model_id}` 中声明 1,000,000。运行时 Kiro `contextUsageEvent` 只提供百分比，响应 `input_tokens` 是按窗口换算的估值；未收到事件时回退到本地 token 估算。上游拒绝 1M 请求时，代理无法扩展 Kiro 账号或模型本身的限制。
+
+当前 `max_tokens` 仅用于本地响应/压缩处理，没有映射到 Kiro 的原生生成上限字段；输出仍由 Kiro 模型策略决定，达到上游长度限制时会返回 `max_tokens` stop reason。`tool_choice`、temperature、top_p、stop_sequences 和 JSON schema 输出也尚未映射到已确认的 Kiro 原生字段。
+
+原生 Claude 请求示例：
 
 ```json
 {
@@ -440,6 +512,7 @@ RUST_LOG=debug ./target/release/kiro-rs
 |----------------|-----------|
 | `*fable*` | `claude-fable-5.1` |
 | `*sonnet-5*` | `claude-sonnet-5` |
+| `*sonnet-5-5*` / `*sonnet-5.5*` | `claude-sonnet-5.5` |
 | `*sonnet*`（含 4.6/4-6） | `claude-sonnet-4.6` |
 | `*sonnet*`（含 4.5/4-5） | `claude-sonnet-4.5` |
 | `*opus-5-5*` / `*opus-5.5*` | `claude-opus-5.5` |
@@ -449,6 +522,7 @@ RUST_LOG=debug ./target/release/kiro-rs
 | `*opus*`（含 4.6/4-6） | `claude-opus-4.6` |
 | `*opus*`（含 4.5/4-5） | `claude-opus-4.5` |
 | `*haiku*` | `claude-haiku-4.5` |
+| `*haiku-5-5*` / `*haiku-5.5*` | `claude-haiku-5.5` |
 
 Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/claude-sonnet-5.md)。
 
@@ -468,11 +542,46 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
 - **Admin UI**
   - `GET /admin` - 访问管理页面（需要在编译前构建 `admin-ui/dist`）
 
+余额缓存有效期为 5 分钟，同时校验凭据 ID 和认证信息的哈希；更换账户、缓存时间异常或旧缓存缺少身份信息时重新查询。统计和余额缓存均使用同目录临时文件原子替换，新文件在 Unix 上使用 `0600` 权限。统计保存会串行处理并保留写入期间的新更新，保存失败后仍会重试。
+
+### 调用日志与错误查询
+
+进入 `/admin`，登录后点击右上角 **调用日志**。页面提供时间范围、完整模型名、调用状态、凭据 ID、HTTP 状态码和关键字查询，支持分页、每 10 秒刷新及单条详情 JSON 导出。关键字可搜索请求 ID、接口路径、上游错误和诊断信息；凭据 ID 匹配任一上游尝试，包括故障转移前使用的凭据。列表展示最后使用的凭据。统计卡片按全部查询结果汇总，而不是只计算当前页。
+
+- **原有运行日志**：输出到服务标准输出，可在启动终端查看；Docker 使用 `docker logs --tail 200 kiro-rs` 或 `docker logs -f kiro-rs`。`RUST_LOG` 控制终端日志级别。
+- **原有凭据统计**：凭据目录下的 `kiro_stats.json` 只保存成功次数和最后使用时间，不是调用明细。
+- **新增调用明细**：默认写入凭据文件同目录的 `kiro_requests.sqlite3`（伴随 SQLite 的 `-wal`、`-shm` 文件）。Docker 默认位于 `/app/config/kiro_requests.sqlite3`，随现有 `./config/` 挂载持久保存。可通过 `requestLogPath` 改路径；自定义到容器其他目录时也应挂载该目录。
+
+记录覆盖 `/v1/*`、`/cc/v1/*` API，包括认证失败、请求校验失败、普通对话、WebSearch、压缩、模型查询和 Token 计数。响应中的 `x-request-id` 对应日志详情 ID。管理 API 与静态资源访问不进入调用日志。
+
+每条记录包含时间、请求 ID、接口、模型、是否流式、HTTP 状态、总耗时、首个响应数据块耗时、输入/输出 Token、凭据 ID、上游调用次数、上游请求 ID及错误详情。详情展示各次调用的上游 HTTP 状态和错误响应，以及该请求中的警告、错误和底层错误链（如 DNS、连接、TLS、超时、帧校验失败）。`RUST_LOG=off` 不影响调用明细和诊断的采集。
+
+普通对话和压缩请求的每次上游响应还会保存 `upstreamAttempts[].responseDiagnostics`：响应类型和声明长度、实际接收字节数、数据块数、事件类型计数、各类事件首帧的字段路径、文本/非空白文本/推理/工具参数的字节数，以及不完整帧和未完成工具调用数量。可据此区分零字节、仅元数据、空白文本、未知事件、解码失败和传输中断。HTTP 200 后的响应体错误也会回填到对应调用的 `error`，每次重试单独保留；失败诊断同时输出到终端。字段路径只采样对象结构，最多 32 类事件（另有溢出汇总项）、每类 32 个字段路径、深度 3 层，不保存字段值。更新后的新调用才有这些数据，历史记录仍可读取。
+
+调用状态分为成功、失败、中断、进行中。SSE 返回 HTTP 200 后收到 `error` 事件仍记为失败；流未完整结束、客户端取消或断开记为中断。服务重启后，未结束的记录标为中断、结果未知，避免把未完成请求算作成功。流式调用的用量仅包含已收到的 usage；未取得用量时显示 `—`，不会编造为零。Token 使用服务已有计数/估算；压缩请求累计 `usage.iterations`，`count_tokens` 的计数结果也纳入输入统计，这些数字不等同于上游账单。
+
+只保存调用元数据、错误及诊断，不保存对话正文、正常回答正文或认证请求头；常见令牌格式、错误里的密钥字段和带认证的代理 URL 会脱敏。原始上游错误可能包含其回显的业务信息，查询和导出接口均要求 Admin API Key。每次调用最多采集 256 条诊断，超出时会显示省略提示；上游错误响应和最终错误单独保留。普通 HTTP 错误正文采集上限为 1 MiB，上游错误正文通过 Provider 独立记录。
+
+默认保留 30 天，启动及每 128 次日志写入清理过期记录并裁剪到最近 100000 条；清理间隔内可能短暂超过数量上限。查询会立即排除过期记录。旧版本没有保存的调用无法补录。日志数据库初始化失败时启动会明确报错；运行期间写入失败也会输出到终端。
+
+管理查询 API（沿用 Admin Key 认证）：
+
+```text
+GET /api/admin/logs?page=1&pageSize=20&status=error&model=claude-sonnet-4-6
+GET /api/admin/logs/{request-id}
+```
+
+其他可选参数：`credentialId`、`httpStatus`、`search`、`from`、`to`。时间使用 Unix 毫秒，边界均包含；`pageSize` 最大 100。列表返回 `items`、`summary`、`page`、`pageSize`、`retentionDays`、`maxRows`，详情返回完整上游尝试和诊断记录。
+
 ## 注意事项
 
 1. **凭证安全**: 请妥善保管 `credentials.json` 文件，不要提交到版本控制
 2. **Token 刷新**: 服务会自动刷新过期的 Token，无需手动干预
-3. **WebSearch 工具**: 当 `tools` 列表仅包含一个 `web_search` 工具时，会走内置 WebSearch 转换逻辑
+3. **WebSearch 工具**: 当 `tools` 列表仅包含一个 `web_search` 工具时，会走内置 WebSearch 转换逻辑。使用最近一条用户消息中的文本作为查询；`stream: false` 返回 JSON，`stream: true` 返回 SSE，两者都包含关联的服务端工具调用和搜索次数。有效的零结果搜索正常返回；上游 HTTP、MCP 协议、工具执行及结果解析错误会返回错误响应，不再伪装为“没有结果”。
+4. **请求校验**: `/v1` 和 `/cc/v1` 在普通对话、WebSearch 和压缩分流之前统一检查非空模型、正数 `max_tokens`、非空消息列表，以及消息角色和内容的基本结构；错误返回 `400 invalid_request_error`。`count_tokens` 使用相同的消息结构校验。`system` 支持字符串、数组和 `null`。`metadata.user_id` 中的会话 ID 仅在符合标准 UUID 格式时复用，否则自动生成新 ID。
+5. **上游事件校验**: 收齐 12 字节帧前缀后立即校验 CRC 和头部长度，不等待损坏帧的剩余数据。头部解析严格遵守声明边界，拒绝重复名称和非法 UTF-8。普通响应与压缩摘要均会报告解析错误；JSON 返回 `502 api_error`，SSE 发送错误事件并结束，不发送正常完成事件。
+6. **瞬态错误重试**: 对话和 WebSearch 在重试 `408`、`429`、`5xx` 时识别上游 `Retry-After`（秒数或 HTTP 日期），等待时间至少满足该要求及原有指数退避。格式无效时沿用指数退避；要求等待超过 60 秒时停止本次重试并返回错误，不提前重试。退避等待期间释放凭据的并发预留，瞬态错误不计入凭据失败次数。429 还会让对应账号进入至少 `concurrency.rateLimitCooldownSeconds` 的冷却，存在有效 `Retry-After` 时取更长者；其他请求会跳过该账号，并发 429 不会缩短已有冷却。
+7. **空回复处理**: 普通 JSON、实时 SSE、`/cc` 缓冲 SSE 和压缩摘要统一检测空响应体、仅 usage/元数据事件及纯空白内容。未收到有效内容且没有明确长度限制时，额外尝试最多 2 次，分别等待 200/400 毫秒；重试时丢弃前一次的空白及 usage。持续为空时，JSON 返回 `502 api_error`，已开始的 SSE 发送 `error` 并结束，不发送正常完成事件。有效 thinking、工具调用及明确的长度/上下文限制不触发空回复重试；发送内容后发生解析、工具完整性或读取错误，也不会重放请求。空压缩摘要不会替换历史。对话成功次数在完整响应校验通过后记录，空回复不计为成功，也不会因此禁用凭据。每次尝试中的 HTTP/网络错误仍使用上一条的重试规则。
 
 ## 项目结构
 

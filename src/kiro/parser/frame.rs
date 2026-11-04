@@ -101,11 +101,6 @@ pub fn parse_frame(buffer: &[u8]) -> ParseResult<Option<(Frame, usize)>> {
     let total_length = total_length as usize;
     let header_length = header_length as usize;
 
-    // 检查是否有完整的消息
-    if buffer.len() < total_length {
-        return Ok(None);
-    }
-
     // 验证 Prelude CRC
     let actual_prelude_crc = crc32(&buffer[..8]);
     if actual_prelude_crc != prelude_crc {
@@ -113,6 +108,18 @@ pub fn parse_frame(buffer: &[u8]) -> ParseResult<Option<(Frame, usize)>> {
             expected: prelude_crc,
             actual: actual_prelude_crc,
         });
+    }
+
+    // 前缀已完整，立即验证头部长度，避免等待不可能合法的消息体。
+    if header_length > total_length - MIN_MESSAGE_SIZE {
+        return Err(ParseError::HeaderParseFailed(
+            "头部长度超出消息边界".to_string(),
+        ));
+    }
+
+    // 只为前缀合法的帧等待剩余数据。
+    if buffer.len() < total_length {
+        return Ok(None);
     }
 
     // 读取 Message CRC
@@ -135,13 +142,6 @@ pub fn parse_frame(buffer: &[u8]) -> ParseResult<Option<(Frame, usize)>> {
     // 解析头部
     let headers_start = PRELUDE_SIZE;
     let headers_end = headers_start + header_length;
-
-    // 验证头部边界
-    if headers_end > total_length - 4 {
-        return Err(ParseError::HeaderParseFailed(
-            "头部长度超出消息边界".to_string(),
-        ));
-    }
 
     let headers = parse_headers(&buffer[headers_start..headers_end], header_length)?;
 
@@ -174,5 +174,48 @@ mod tests {
 
         let result = parse_frame(&buffer);
         assert!(matches!(result, Err(ParseError::MessageTooSmall { .. })));
+    }
+
+    fn prelude(total_length: u32, header_length: u32) -> Vec<u8> {
+        let mut bytes = total_length.to_be_bytes().to_vec();
+        bytes.extend_from_slice(&header_length.to_be_bytes());
+        bytes.extend_from_slice(&crc32(&bytes).to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn rejects_corrupt_prelude_before_waiting_for_body() {
+        let mut bytes = prelude(MAX_MESSAGE_SIZE, 0);
+        bytes[8] ^= 1;
+        assert!(matches!(
+            parse_frame(&bytes),
+            Err(ParseError::PreludeCrcMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_impossible_header_length_before_waiting_for_body() {
+        for (total, headers) in [(32, 17), (MAX_MESSAGE_SIZE, u32::MAX)] {
+            assert!(matches!(
+                parse_frame(&prelude(total, headers)),
+                Err(ParseError::HeaderParseFailed(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn valid_frames_wait_for_all_bytes_and_ignore_following_data() {
+        let payload = "分片🙂".as_bytes();
+        let mut bytes = prelude((MIN_MESSAGE_SIZE + payload.len()) as u32, 0);
+        bytes.extend_from_slice(payload);
+        bytes.extend_from_slice(&crc32(&bytes).to_be_bytes());
+        for split in 0..bytes.len() {
+            assert!(matches!(parse_frame(&bytes[..split]), Ok(None)));
+        }
+        let length = bytes.len();
+        bytes.extend_from_slice(b"next frame");
+        let (frame, consumed) = parse_frame(&bytes).unwrap().unwrap();
+        assert_eq!(consumed, length);
+        assert_eq!(frame.payload, payload);
     }
 }

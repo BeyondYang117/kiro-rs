@@ -303,6 +303,8 @@ pub struct AssistantMessage {
     /// 工具使用列表
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_uses: Option<Vec<ToolUseEntry>>,
+    #[serde(rename = "reasoningContent", skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<serde_json::Value>,
 }
 
 impl AssistantMessage {
@@ -311,6 +313,7 @@ impl AssistantMessage {
         Self {
             content: content.into(),
             tool_uses: None,
+            reasoning_content: None,
         }
     }
 
@@ -319,11 +322,36 @@ impl AssistantMessage {
         self.tool_uses = Some(tool_uses);
         self
     }
+
+    pub fn with_reasoning(mut self, text: String, signature: Option<String>) -> Self {
+        let mut reasoning_text = serde_json::json!({"text": text});
+        if let Some(signature) = signature {
+            reasoning_text["signature"] = signature.into();
+        }
+        self.reasoning_content = Some(serde_json::json!({"reasoningText": reasoning_text}));
+        self
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_reasoning_uses_the_kiro_union_shape() {
+        let assistant = AssistantMessage::new("answer")
+            .with_reasoning("thought".into(), Some("signed-thought".into()));
+        let value = serde_json::to_value(assistant).unwrap();
+        assert_eq!(
+            value["reasoningContent"],
+            serde_json::json!({
+                "reasoningText":{"text":"thought", "signature":"signed-thought"}
+            })
+        );
+        assert!(value.get("reasoningSignature").is_none());
+        assert!(value.get("reasoningModelId").is_none());
+        assert!(value.get("reasoningRedactedContent").is_none());
+    }
 
     #[test]
     fn test_conversation_state_new() {

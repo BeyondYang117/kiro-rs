@@ -5,5 +5,14 @@
   "tlsBackend": "rustls",
   "region": "us-east-1",
   "adminApiKey": "sk-admin-your-secret-key",
-  "defaultEndpoint": "ide"
+  "defaultEndpoint": "ide",
+  "requestLogRetentionDays": 30,
+  "loadBalancingMode": "balanced",
+  "concurrency": {
+    "maxInFlight": 64,
+    "maxInFlightPerCredential": 4,
+    "maxWaiting": 128,
+    "waitTimeoutSeconds": 30,
+    "rateLimitCooldownSeconds": 30
+  }
 }
