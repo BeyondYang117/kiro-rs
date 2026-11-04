@@ -8,12 +8,14 @@ use tokio::sync::SemaphorePermit;
 pub struct ConcurrencySnapshot {
     pub adaptive_concurrency: bool,
     pub recovering_credentials: usize,
+    pub probing_credentials: usize,
     pub max_in_flight: usize,
     pub max_in_flight_per_credential: u64,
     pub max_waiting: usize,
     pub wait_timeout_seconds: u64,
     pub in_flight: usize,
     pub waiting: usize,
+    pub waiting_opus: usize,
     pub cooling_credentials: usize,
     pub saturated_credentials: usize,
     pub oldest_wait_ms: u64,
@@ -200,6 +202,12 @@ impl MultiTokenManager {
                             || entry.adaptive_limit.limit < settings.max_in_flight_per_credential)
                 })
                 .count(),
+            probing_credentials: entries
+                .iter()
+                .filter(|entry| {
+                    settings.adaptive_concurrency && !entry.disabled && entry.adaptive_limit.probing
+                })
+                .count(),
             max_in_flight: settings.max_in_flight,
             max_in_flight_per_credential: settings.max_in_flight_per_credential,
             max_waiting: settings.max_waiting,
@@ -207,6 +215,7 @@ impl MultiTokenManager {
             // 被删除但响应仍在消费的账号仍占用全局名额，不能用 entries 求和。
             in_flight: settings.max_in_flight - self.in_flight_slots.available_permits(),
             waiting: queue.len(),
+            waiting_opus: queue.iter().filter(|waiter| waiter.requires_opus).count(),
             cooling_credentials: entries
                 .iter()
                 .filter(|e| !e.disabled && cooldown_remaining_ms(e) > 0)

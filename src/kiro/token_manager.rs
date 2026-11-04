@@ -967,12 +967,11 @@ impl MultiTokenManager {
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
             if self.config.concurrency.adaptive_concurrency
                 && epoch.is_none_or(|epoch| Arc::ptr_eq(epoch, &entry.adaptive_limit.epoch))
+                && entry.adaptive_limit.rate_limited()
             {
-                if entry.adaptive_limit.rate_limited() {
-                    self.concurrency_metrics
-                        .adaptive_reduction_total
-                        .fetch_add(1, Ordering::Relaxed);
-                }
+                self.concurrency_metrics
+                    .adaptive_reduction_total
+                    .fetch_add(1, Ordering::Relaxed);
             }
             let remaining = entry
                 .cooldown

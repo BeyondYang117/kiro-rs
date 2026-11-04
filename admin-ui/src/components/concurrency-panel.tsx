@@ -35,13 +35,20 @@ export function ConcurrencyPanel({ metrics }: { metrics: ConcurrencySnapshot }) 
             <p className="mt-2 text-xs text-muted-foreground">
               {metrics.maxWaiting === 0 ? '满载立即拒绝' : `最长已等 ${(metrics.oldestWaitMs / 1000).toFixed(1)} 秒 · 超时 ${metrics.waitTimeoutSeconds} 秒`}
             </p>
+            {metrics.waitingOpus !== undefined && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Opus {metrics.waitingOpus} · 其他 {metrics.waiting - metrics.waitingOpus}
+              </p>
+            )}
           </div>
           <div>
             <dt className="text-xs text-muted-foreground">冷却 / 满载账号</dt>
             <dd className="mt-1 text-xl font-semibold tabular-nums">{metrics.coolingCredentials} / {metrics.saturatedCredentials}</dd>
             <p className="mt-2 text-xs text-muted-foreground">已启用账号中统计，可重叠</p>
             {metrics.adaptiveConcurrency && (
-              <p className="mt-1 text-xs text-muted-foreground">恢复中账号 {metrics.recoveringCredentials ?? 0}</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                恢复中 {metrics.recoveringCredentials ?? 0} · 单请求探测 {metrics.probingCredentials ?? 0}
+              </p>
             )}
           </div>
           <div>

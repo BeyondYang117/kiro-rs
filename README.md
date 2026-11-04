@@ -559,11 +559,11 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
 
 余额缓存有效期为 5 分钟，同时校验凭据 ID 和认证信息的哈希；更换账户、缓存时间异常或旧缓存缺少身份信息时重新查询。统计和余额缓存均使用同目录临时文件原子替换，新文件在 Unix 上使用 `0600` 权限。统计保存会串行处理并保留写入期间的新更新，保存失败后仍会重试。
 
-管理首页每 5 秒刷新并发状态：全局在途/等待数量及上限、账号冷却/满载数量、排队拒绝/超时次数、429 次数和排队耗时；账号列表展示各账号在途数量与剩余冷却时间。“已启用凭据”不等于此刻可调度，冷却与满载账号数可重叠。
+管理首页每 5 秒刷新并发状态：全局在途/等待数量及上限、等待中的 Opus/其他调用数量、账号冷却/满载数量、排队拒绝/超时次数、429 次数和排队耗时；账号列表展示各账号在途数量与剩余冷却时间。“已启用凭据”不等于此刻可调度，冷却与满载账号数可重叠。
 
-启用自适应并发后，管理首页同时显示恢复中的账号数和实际降档次数，账号列表显示当前生效上限及单请求探测成功后的目标上限。`concurrency.adaptiveConcurrency` 表示是否启用，`concurrency.recoveringCredentials` 统计已启用且尚在探测或尚未恢复配置上限的账号（包括冷却中的账号）；`concurrency.adaptiveReductionTotal` 只统计容量实际降低的次数，同批请求的迟到 429 不重复计数；`credentials[].effectiveConcurrencyLimit` 是各账号当前容量上限，探测中的账号还会返回 `adaptiveProbeTarget`，冷却仍会暂时阻止调度。
+启用自适应并发后，管理首页同时显示恢复中、单请求探测中的账号数和实际降档次数，账号列表显示当前生效上限及单请求探测成功后的目标上限。`concurrency.adaptiveConcurrency` 表示是否启用，`concurrency.recoveringCredentials` 统计已启用且尚在探测或尚未恢复配置上限的账号（包括冷却中的账号），`concurrency.probingCredentials` 是其中处于单请求探测的账号数；`concurrency.adaptiveReductionTotal` 只统计容量实际降低的次数，同批请求的迟到 429 不重复计数；`credentials[].effectiveConcurrencyLimit` 是各账号当前容量上限，探测中的账号还会返回 `adaptiveProbeTarget`，冷却仍会暂时阻止调度。
 
-`GET /api/admin/credentials` 同时返回 `concurrency` 对象，包含 `inFlight`、`waiting`、`maxInFlight`、`maxInFlightPerCredential`、`maxWaiting`、`waitTimeoutSeconds`、`coolingCredentials`、`saturatedCredentials`、`oldestWaitMs`；累计指标为 `admittedTotal`、`queuedTotal`、`queueFullTotal`、`waitTimeoutTotal`、`cancelledWaitTotal`、`rateLimitedTotal`、`adaptiveReductionTotal`、`finishedWaitTotal`、`totalWaitMs`、`maxWaitMs`。`credentials[]` 新增 `inFlight` 和 `cooldownRemainingMs`。这些指标只针对当前进程，自启动起累计且不持久化；获准/入队次数按上游名额获取计数，不代表客户端请求数或成功次数。排队耗时包含已离队的成功、错误、超时和取消等待，不包含仍在队列中的调用；均值用 `totalWaitMs / finishedWaitTotal` 计算。全局在途数包含已删除账号尚未结束的调用。
+`GET /api/admin/credentials` 同时返回 `concurrency` 对象，包含 `inFlight`、`waiting`、`waitingOpus`、`maxInFlight`、`maxInFlightPerCredential`、`maxWaiting`、`waitTimeoutSeconds`、`coolingCredentials`、`saturatedCredentials`、`probingCredentials`、`oldestWaitMs`；累计指标为 `admittedTotal`、`queuedTotal`、`queueFullTotal`、`waitTimeoutTotal`、`cancelledWaitTotal`、`rateLimitedTotal`、`adaptiveReductionTotal`、`finishedWaitTotal`、`totalWaitMs`、`maxWaitMs`。`waitingOpus` 仅统计当前等待中的 Opus 请求，其他等待数为 `waiting - waitingOpus`。`credentials[]` 新增 `inFlight` 和 `cooldownRemainingMs`。这些指标只针对当前进程，自启动起累计且不持久化；获准/入队次数按上游名额获取计数，不代表客户端请求数或成功次数。排队耗时包含已离队的成功、错误、超时和取消等待，不包含仍在队列中的调用；均值用 `totalWaitMs / finishedWaitTotal` 计算。全局在途数包含已删除账号尚未结束的调用。
 
 ### 调用日志与错误查询
 

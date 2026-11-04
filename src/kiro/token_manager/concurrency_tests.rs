@@ -258,6 +258,34 @@ async fn cancelling_head_wakes_queued_successor_without_another_capacity_release
 }
 
 #[tokio::test]
+async fn waiting_opus_snapshot_tracks_live_queue_after_cancellation() {
+    let manager = manager(
+        serde_json::json!({"concurrency":{"maxInFlight":1,"maxInFlightPerCredential":1}}),
+        1,
+    );
+    let active = manager.acquire_context(None).await.unwrap();
+    let mut opus = Box::pin(manager.acquire_context(Some("claude-opus-4.6")));
+    let mut general = Box::pin(manager.acquire_context(Some("claude-sonnet-4.6")));
+    assert!(futures::poll!(opus.as_mut()).is_pending());
+    assert!(futures::poll!(general.as_mut()).is_pending());
+    let snapshot = manager.snapshot().concurrency;
+    assert_eq!(snapshot.waiting, 2);
+    assert_eq!(snapshot.waiting_opus, 1);
+
+    drop(opus);
+    let snapshot = manager.snapshot().concurrency;
+    assert_eq!(snapshot.waiting, 1);
+    assert_eq!(snapshot.waiting_opus, 0);
+    assert_eq!(snapshot.cancelled_wait_total, 1);
+
+    drop(active);
+    drop(general.await.unwrap());
+    let snapshot = manager.snapshot().concurrency;
+    assert_eq!(snapshot.waiting, 0);
+    assert_eq!(snapshot.waiting_opus, 0);
+}
+
+#[tokio::test]
 async fn snapshot_distinguishes_enabled_cooling_saturated_and_deleted_active_accounts() {
     let manager = manager(
         serde_json::json!({"concurrency":{
@@ -451,6 +479,45 @@ fn expire_cooldown(manager: &MultiTokenManager, id: u64) {
         .find(|entry| entry.id == id)
         .unwrap()
         .cooldown = None;
+}
+
+#[tokio::test]
+async fn adaptive_monitoring_counts_only_real_reductions_and_exposes_probe_target() {
+    let manager = manager(
+        serde_json::json!({"concurrency": {
+            "adaptiveConcurrency": true, "maxInFlightPerCredential": 4
+        }}),
+        1,
+    );
+    let first = manager.acquire_context(None).await.unwrap();
+    let second = manager.acquire_context(None).await.unwrap();
+    manager.report_rate_limited_for_context(&first, None);
+    manager.report_rate_limited_for_context(&second, Some(StdDuration::from_secs(120)));
+    let snapshot = manager.snapshot();
+    assert_eq!(snapshot.concurrency.rate_limited_total, 2);
+    assert_eq!(snapshot.concurrency.adaptive_reduction_total, 1);
+    assert_eq!(snapshot.concurrency.probing_credentials, 1);
+    assert_eq!(snapshot.concurrency.recovering_credentials, 1);
+    assert_eq!(snapshot.entries[0].effective_concurrency_limit, 1);
+    assert_eq!(snapshot.entries[0].adaptive_probe_target, Some(2));
+    assert!(snapshot.entries[0].cooldown_remaining_ms > 119_000);
+
+    drop((first, second));
+    expire_cooldown(&manager, 1);
+    let probe = manager.acquire_context(None).await.unwrap();
+    manager.report_transport_success(&probe);
+    let snapshot = manager.snapshot();
+    assert_eq!(snapshot.concurrency.probing_credentials, 0);
+    assert_eq!(snapshot.concurrency.recovering_credentials, 1);
+    assert_eq!(snapshot.entries[0].adaptive_probe_target, None);
+    assert_eq!(snapshot.entries[0].effective_concurrency_limit, 2);
+    drop(probe);
+
+    let next = manager.acquire_context(None).await.unwrap();
+    manager.report_rate_limited_for_context(&next, None);
+    let snapshot = manager.snapshot();
+    assert_eq!(snapshot.concurrency.adaptive_reduction_total, 2);
+    assert_eq!(snapshot.entries[0].adaptive_probe_target, Some(1));
 }
 
 #[tokio::test]

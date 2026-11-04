@@ -126,13 +126,17 @@ mod tests {
         assert_eq!(value["concurrency"]["maxInFlight"], 2);
         assert_eq!(value["concurrency"]["inFlight"], 1);
         assert_eq!(value["concurrency"]["waiting"], 1);
+        assert_eq!(value["concurrency"]["waitingOpus"], 0);
         assert_eq!(value["concurrency"]["coolingCredentials"], 1);
         assert_eq!(value["concurrency"]["saturatedCredentials"], 1);
         assert_eq!(value["concurrency"]["rateLimitedTotal"], 1);
         assert_eq!(value["concurrency"]["adaptiveConcurrency"], false);
         assert_eq!(value["concurrency"]["recoveringCredentials"], 0);
+        assert_eq!(value["concurrency"]["probingCredentials"], 0);
+        assert_eq!(value["concurrency"]["adaptiveReductionTotal"], 0);
         assert_eq!(value["credentials"][0]["inFlight"], 1);
         assert_eq!(value["credentials"][0]["effectiveConcurrencyLimit"], 1);
+        assert!(value["credentials"][0].get("adaptiveProbeTarget").is_none());
         assert!(
             value["credentials"][1]["cooldownRemainingMs"]
                 .as_u64()
@@ -146,5 +150,48 @@ mod tests {
         );
         drop((pending, active));
         assert_eq!(manager.snapshot().concurrency.cancelled_wait_total, 1);
+    }
+
+    #[tokio::test]
+    async fn credential_status_exposes_adaptive_probe_and_reduction_metrics() {
+        let manager = Arc::new(
+            MultiTokenManager::new(
+                serde_json::from_value(serde_json::json!({"concurrency": {
+                    "adaptiveConcurrency": true, "maxInFlightPerCredential": 4
+                }}))
+                .unwrap(),
+                vec![KiroCredentials {
+                    id: Some(1),
+                    kiro_api_key: Some("adaptive-admin-test".into()),
+                    ..Default::default()
+                }],
+                None,
+                None,
+                true,
+            )
+            .unwrap(),
+        );
+        manager.report_rate_limited(1, None);
+        let app = create_admin_router(AdminState::new(
+            "admin-test-key",
+            AdminService::new(manager, ["ide".into()]),
+        ));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/credentials")
+                    .header("x-api-key", "admin-test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["concurrency"]["probingCredentials"], 1);
+        assert_eq!(value["concurrency"]["adaptiveReductionTotal"], 1);
+        assert_eq!(value["credentials"][0]["effectiveConcurrencyLimit"], 1);
+        assert_eq!(value["credentials"][0]["adaptiveProbeTarget"], 2);
     }
 }

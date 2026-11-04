@@ -37,12 +37,14 @@ export interface CredentialStatusItem {
 export interface ConcurrencySnapshot {
   adaptiveConcurrency?: boolean
   recoveringCredentials?: number
+  probingCredentials?: number
   maxInFlight: number
   maxInFlightPerCredential: number
   maxWaiting: number
   waitTimeoutSeconds: number
   inFlight: number
   waiting: number
+  waitingOpus?: number
   coolingCredentials: number
   saturatedCredentials: number
   oldestWaitMs: number
