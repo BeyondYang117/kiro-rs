@@ -47,6 +47,7 @@ interface CredentialCardProps {
   onToggleSelect: () => void
   balance: BalanceResponse | null
   loadingBalance: boolean
+  balanceError?: string
 }
 
 const disabledReasonLabels: Record<string, string> = {
@@ -82,6 +83,7 @@ export function CredentialCard({
   onToggleSelect,
   balance,
   loadingBalance,
+  balanceError,
 }: CredentialCardProps) {
   const [expanded, setExpanded] = useState(false)
   const [editingPriority, setEditingPriority] = useState(false)
@@ -310,7 +312,7 @@ export function CredentialCard({
 
           <div className="min-w-0 text-sm tabular-nums">
             <div className="mb-1 text-xs text-muted-foreground lg:hidden">剩余用量</div>
-            {loadingBalance ? (
+            {loadingBalance && !balance ? (
               <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
                 <Loader2 className="h-3 w-3 animate-spin" />
                 查询中…
@@ -348,9 +350,19 @@ export function CredentialCard({
                 >
                   {balance.subscriptionTitle || '未知订阅'} · {remainingPercentage.toFixed(0)}%
                 </p>
+                <p className="mt-1 text-xs text-muted-foreground" title={balance.updatedAt ? new Date(balance.updatedAt * 1000).toLocaleString('zh-CN') : undefined}>
+                  {loadingBalance ? '更新中…' : balance.updatedAt
+                    ? `更新于 ${formatLastUsed(new Date(balance.updatedAt * 1000).toISOString())}`
+                    : '更新时间未知'}
+                </p>
               </>
             ) : (
               <span className="text-xs text-muted-foreground">尚未查询</span>
+            )}
+            {balanceError && !loadingBalance && (
+              <p className="mt-1 text-xs text-destructive" title={balanceError}>
+                {balance ? '更新失败，显示上次记录' : '查询失败，请手动重试'}
+              </p>
             )}
           </div>
 

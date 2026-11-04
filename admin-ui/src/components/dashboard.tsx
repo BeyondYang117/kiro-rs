@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import {
   RefreshCw,
   LogOut,
@@ -46,9 +46,9 @@ import {
   useLoadBalancingMode,
   useSetLoadBalancingMode,
 } from '@/hooks/use-credentials'
-import { getCredentialBalance, forceRefreshToken } from '@/api/credentials'
+import { forceRefreshToken } from '@/api/credentials'
+import { usePageBalances } from '@/hooks/use-page-balances'
 import { extractErrorMessage } from '@/lib/utils'
-import type { BalanceResponse } from '@/types/api'
 
 interface DashboardProps {
   onLogout: () => void
@@ -66,8 +66,6 @@ export function Dashboard({ onLogout, onShowLogs }: DashboardProps) {
   const [verifying, setVerifying] = useState(false)
   const [verifyProgress, setVerifyProgress] = useState({ current: 0, total: 0 })
   const [verifyResults, setVerifyResults] = useState<Map<number, VerifyResult>>(new Map())
-  const [balanceMap, setBalanceMap] = useState<Map<number, BalanceResponse>>(new Map())
-  const [loadingBalanceIds, setLoadingBalanceIds] = useState<Set<number>>(new Set())
   const [queryingInfo, setQueryingInfo] = useState(false)
   const [queryInfoProgress, setQueryInfoProgress] = useState({ current: 0, total: 0 })
   const [batchRefreshing, setBatchRefreshing] = useState(false)
@@ -137,7 +135,13 @@ export function Dashboard({ onLogout, onShowLogs }: DashboardProps) {
   const totalPages = Math.max(1, Math.ceil(filteredCredentials.length / itemsPerPage))
   const page = Math.min(currentPage, totalPages)
   const startIndex = (page - 1) * itemsPerPage
-  const currentCredentials = filteredCredentials.slice(startIndex, startIndex + itemsPerPage)
+  const currentCredentials = useMemo(
+    () => filteredCredentials.slice(startIndex, startIndex + itemsPerPage),
+    [filteredCredentials, startIndex, itemsPerPage]
+  )
+  const { loadingIds: loadingBalanceIds, errors: balanceErrors, refreshBalance } = usePageBalances(
+    currentCredentials, queryingInfo || verifying
+  )
   const disabledCredentialCount =
     data?.credentials.filter((credential) => credential.disabled).length || 0
   const selectedCredentials =
@@ -183,11 +187,9 @@ export function Dashboard({ onLogout, onShowLogs }: DashboardProps) {
     })
   }
 
-  // 只保留当前仍存在的凭据缓存，避免删除后残留旧数据
+  // 删除凭据后清理选择状态
   useEffect(() => {
     if (!data?.credentials) {
-      setBalanceMap(new Map())
-      setLoadingBalanceIds(new Set())
       return
     }
 
@@ -196,29 +198,6 @@ export function Dashboard({ onLogout, onShowLogs }: DashboardProps) {
     setSelectedIds((previous) => {
       const next = new Set([...previous].filter((id) => validIds.has(id)))
       return next.size === previous.size ? previous : next
-    })
-
-    setBalanceMap((prev) => {
-      const next = new Map<number, BalanceResponse>()
-      prev.forEach((value, id) => {
-        if (validIds.has(id)) {
-          next.set(id, value)
-        }
-      })
-      return next.size === prev.size ? prev : next
-    })
-
-    setLoadingBalanceIds((prev) => {
-      if (prev.size === 0) {
-        return prev
-      }
-      const next = new Set<number>()
-      prev.forEach((id) => {
-        if (validIds.has(id)) {
-          next.add(id)
-        }
-      })
-      return next.size === prev.size ? prev : next
     })
   }, [data?.credentials])
 
@@ -231,10 +210,6 @@ export function Dashboard({ onLogout, onShowLogs }: DashboardProps) {
     setSelectedCredentialId(id)
     setBalanceDialogOpen(true)
   }
-
-  const handleBalanceLoaded = useCallback((balance: BalanceResponse) => {
-    setBalanceMap((previous) => new Map(previous).set(balance.id, balance))
-  }, [])
 
   const handleRefresh = async () => {
     const result = await refetch()
@@ -496,29 +471,11 @@ export function Dashboard({ onLogout, onShowLogs }: DashboardProps) {
     for (let i = 0; i < ids.length; i++) {
       const id = ids[i]
 
-      setLoadingBalanceIds((prev) => {
-        const next = new Set(prev)
-        next.add(id)
-        return next
-      })
-
       try {
-        const balance = await getCredentialBalance(id)
+        await refreshBalance(id, true)
         successCount++
-
-        setBalanceMap((prev) => {
-          const next = new Map(prev)
-          next.set(id, balance)
-          return next
-        })
-      } catch (error) {
+      } catch {
         failCount++
-      } finally {
-        setLoadingBalanceIds((prev) => {
-          const next = new Set(prev)
-          next.delete(id)
-          return next
-        })
       }
 
       setQueryInfoProgress({ current: i + 1, total: ids.length })
@@ -574,9 +531,8 @@ export function Dashboard({ onLogout, onShowLogs }: DashboardProps) {
       })
 
       try {
-        const balance = await getCredentialBalance(id)
+        const balance = await refreshBalance(id, true)
         successCount++
-        setBalanceMap((previous) => new Map(previous).set(id, balance))
 
         // 更新为成功状态
         setVerifyResults((prev) => {
@@ -906,7 +862,7 @@ export function Dashboard({ onLogout, onShowLogs }: DashboardProps) {
                   <RefreshCw className={queryingInfo ? 'animate-spin' : ''} />
                   {queryingInfo
                     ? `查询中 ${queryInfoProgress.current}/${queryInfoProgress.total}`
-                    : '查询本页用量'}
+                    : '刷新本页用量'}
                 </Button>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
@@ -1010,7 +966,8 @@ export function Dashboard({ onLogout, onShowLogs }: DashboardProps) {
                     onViewBalance={handleViewBalance}
                     selected={selectedIds.has(credential.id)}
                     onToggleSelect={() => toggleSelect(credential.id)}
-                    balance={balanceMap.get(credential.id) || null}
+                    balance={credential.balance || null}
+                    balanceError={balanceErrors.get(credential.id)}
                     loadingBalance={loadingBalanceIds.has(credential.id)}
                   />
                 ))}
@@ -1084,9 +1041,14 @@ export function Dashboard({ onLogout, onShowLogs }: DashboardProps) {
       {/* 余额对话框 */}
       <BalanceDialog
         credentialId={selectedCredentialId}
+        balance={data?.credentials.find((credential) => credential.id === selectedCredentialId)?.balance || null}
+        loading={selectedCredentialId !== null && loadingBalanceIds.has(selectedCredentialId)}
+        error={selectedCredentialId !== null ? balanceErrors.get(selectedCredentialId) : undefined}
+        onRefresh={() => {
+          if (selectedCredentialId !== null) void refreshBalance(selectedCredentialId, true).catch(() => {})
+        }}
         open={balanceDialogOpen}
         onOpenChange={setBalanceDialogOpen}
-        onBalanceLoaded={handleBalanceLoaded}
       />
 
       {/* 添加凭据对话框 */}

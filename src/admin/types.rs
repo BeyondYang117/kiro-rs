@@ -25,6 +25,8 @@ pub struct CredentialsStatusResponse {
 pub struct CredentialStatusItem {
     /// 凭据唯一 ID
     pub id: u64,
+    /// 上次成功查询的余额，可能已过期，仅用于展示。
+    pub balance: Option<BalanceResponse>,
     /// 优先级（数字越小优先级越高）
     pub priority: u32,
     /// 是否被禁用
@@ -182,6 +184,15 @@ pub struct BalanceResponse {
     pub usage_percentage: f64,
     /// 下次重置时间（Unix 时间戳）
     pub next_reset_at: Option<f64>,
+    /// 上次成功查询时间（Unix 秒）；兼容旧版缓存文件。
+    #[serde(default)]
+    pub updated_at: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct BalanceQuery {
+    #[serde(default)]
+    pub force: bool,
 }
 
 // ============ 负载均衡配置 ============

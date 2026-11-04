@@ -33,6 +33,16 @@ struct CachedBalance {
 }
 
 impl CachedBalance {
+    fn is_valid(&self, now: f64) -> bool {
+        self.cached_at.is_finite() && self.cached_at >= 0.0 && self.cached_at <= now
+    }
+
+    fn response(&self) -> BalanceResponse {
+        let mut data = self.data.clone();
+        data.updated_at = Some(self.cached_at);
+        data
+    }
+
     fn is_fresh(&self, now: f64) -> bool {
         let age = now - self.cached_at;
         (0.0..BALANCE_CACHE_TTL_SECS as f64).contains(&age)
@@ -79,6 +89,7 @@ impl AdminService {
             .into_iter()
             .map(|entry| CredentialStatusItem {
                 id: entry.id,
+                balance: self.cached_balance(entry.id),
                 priority: entry.priority,
                 disabled: entry.disabled,
                 failure_count: entry.failure_count,
@@ -147,8 +158,23 @@ impl AdminService {
             .map_err(|e| self.classify_error(e, id))
     }
 
-    /// 获取凭据余额（带缓存）
-    pub async fn get_balance(&self, id: u64) -> Result<BalanceResponse, AdminServiceError> {
+    /// 只读取本地缓存；过期记录仍可展示，但不能作为最新余额使用。
+    fn cached_balance(&self, id: u64) -> Option<BalanceResponse> {
+        let credential_key = self.token_manager.credential_cache_key(id)?;
+        let cache = self.balance_cache.lock();
+        let cached = cache.get(&id)?;
+        (cached.is_valid(Utc::now().timestamp() as f64)
+            && cached.data.id == id
+            && cached.credential_key.as_deref() == Some(credential_key.as_str()))
+        .then(|| cached.response())
+    }
+
+    /// 获取凭据余额；手动刷新可跳过缓存。
+    pub async fn get_balance(
+        &self,
+        id: u64,
+        force: bool,
+    ) -> Result<BalanceResponse, AdminServiceError> {
         let credential_key = self
             .token_manager
             .credential_cache_key(id)
@@ -158,18 +184,21 @@ impl AdminService {
             let cache = self.balance_cache.lock();
             if let Some(cached) = cache.get(&id) {
                 let now = Utc::now().timestamp() as f64;
-                if cached.is_fresh(now)
+                if !force
+                    && cached.is_fresh(now)
                     && cached.data.id == id
                     && cached.credential_key.as_deref() == Some(credential_key.as_str())
                 {
                     tracing::debug!("凭据 #{} 余额命中缓存", id);
-                    return Ok(cached.data.clone());
+                    return Ok(cached.response());
                 }
             }
         }
 
         // 缓存未命中或已过期，从上游获取
-        let balance = self.fetch_balance(id).await?;
+        let mut balance = self.fetch_balance(id).await?;
+        let updated_at = Utc::now().timestamp() as f64;
+        balance.updated_at = Some(updated_at);
         // 刷新可能轮换 refreshToken；使用查询完成后的身份，并重新检查凭据存在。
         let credential_key = self
             .token_manager
@@ -183,7 +212,7 @@ impl AdminService {
                 id,
                 CachedBalance {
                     credential_key: Some(credential_key),
-                    cached_at: Utc::now().timestamp() as f64,
+                    cached_at: updated_at,
                     data: balance.clone(),
                 },
             );
@@ -218,6 +247,7 @@ impl AdminService {
             remaining,
             usage_percentage,
             next_reset_at: usage.next_date_reset,
+            updated_at: None,
         })
     }
 
@@ -360,8 +390,8 @@ impl AdminService {
         map.into_iter()
             .filter_map(|(k, v)| {
                 let id = k.parse::<u64>().ok()?;
-                // 丢弃超过 TTL 的条目
-                if v.is_fresh(now) && v.data.id == id && v.credential_key.is_some() {
+                // 过期记录保留作展示，仍拒绝未来时间和无身份信息的旧缓存。
+                if v.is_valid(now) && v.data.id == id && v.credential_key.is_some() {
                     Some((id, v))
                 } else {
                     None
@@ -533,7 +563,65 @@ mod tests {
                 remaining: 90.0,
                 usage_percentage: 10.0,
                 next_reset_at: None,
+                updated_at: None,
             },
+        }
+    }
+
+    #[tokio::test]
+    async fn balance_api_exposes_cached_timestamp_and_force_bypasses_fresh_cache() {
+        use axum::{
+            body::{Body, to_bytes},
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+
+        let directory = CacheTestDirectory::new();
+        let service = directory.service("account-secret");
+        let cached = cached_balance(&service);
+        let updated_at = cached.cached_at;
+        service.balance_cache.lock().insert(1, cached);
+        let app = crate::admin::router::create_admin_router(
+            crate::admin::middleware::AdminState::new("test-admin-key", service),
+        );
+        for (uri, expected) in [
+            ("/credentials/1/balance", StatusCode::OK),
+            (
+                "/credentials/1/balance?force=true",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            ("/credentials", StatusCode::OK),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header("x-api-key", "test-admin-key")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{uri}");
+            let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            if expected == StatusCode::OK {
+                let balance = if uri == "/credentials" {
+                    &value["credentials"][0]["balance"]
+                } else {
+                    &value
+                };
+                assert_eq!(balance["remaining"], 90.0);
+                assert_eq!(balance["updatedAt"], updated_at);
+            } else {
+                assert!(
+                    value["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("refreshToken 已被截断")
+                );
+            }
         }
     }
 
@@ -563,22 +651,66 @@ mod tests {
         }
         drop(service);
         let same_account = directory.service("old-account-secret");
-        assert_eq!(same_account.get_balance(1).await.unwrap().remaining, 90.0);
+        assert_eq!(
+            same_account.get_balance(1, false).await.unwrap().remaining,
+            90.0
+        );
+        assert!(
+            same_account.get_all_credentials().credentials[0]
+                .balance
+                .is_some()
+        );
+        // 强制刷新必须访问上游，即使缓存新鲜；本地校验失败后保留旧值。
+        assert!(same_account.get_balance(1, true).await.is_err());
+        assert_eq!(same_account.cached_balance(1).unwrap().remaining, 90.0);
         drop(same_account);
         let changed_account = directory.service("new-account-secret");
-        let error = changed_account.get_balance(1).await.unwrap_err();
+        assert!(
+            changed_account.get_all_credentials().credentials[0]
+                .balance
+                .is_none()
+        );
+        let error = changed_account.get_balance(1, false).await.unwrap_err();
         assert!(error.to_string().contains("refreshToken 已被截断"));
         changed_account.token_manager.set_disabled(1, true).unwrap();
         // 模拟已删除账户仍有缓存的情况（例如删除落盘失败）。
         changed_account.token_manager.delete_credential(1).unwrap();
         assert!(matches!(
-            changed_account.get_balance(1).await,
+            changed_account.get_balance(1, false).await,
             Err(AdminServiceError::NotFound { id: 1 })
         ));
     }
 
+    #[tokio::test]
+    async fn stale_balance_survives_restart_and_failed_refresh_with_original_timestamp() {
+        let directory = CacheTestDirectory::new();
+        let service = directory.service("account-secret");
+        let mut stale = cached_balance(&service);
+        stale.cached_at -= 3600.0;
+        let updated_at = stale.cached_at;
+        service.balance_cache.lock().insert(1, stale);
+        service.save_balance_cache();
+        drop(service);
+
+        let service = directory.service("account-secret");
+        let status = service.get_all_credentials();
+        let balance = status.credentials[0].balance.as_ref().unwrap();
+        assert_eq!(balance.remaining, 90.0);
+        assert_eq!(balance.updated_at, Some(updated_at));
+        // 默认查询过期缓存时必须更新，失败后仍能展示旧记录。
+        assert!(service.get_balance(1, false).await.is_err());
+        assert_eq!(
+            service.cached_balance(1).unwrap().updated_at,
+            Some(updated_at)
+        );
+        service.token_manager.set_disabled(1, true).unwrap();
+        service.delete_credential(1).unwrap();
+        assert!(service.cached_balance(1).is_none());
+        assert!(service.get_all_credentials().credentials.is_empty());
+    }
+
     #[test]
-    fn balance_cache_rejects_expired_future_legacy_and_mismatched_entries() {
+    fn balance_cache_keeps_stale_but_rejects_future_legacy_and_mismatched_entries() {
         let directory = CacheTestDirectory::new();
         let service = directory.service("account-secret");
         let now = Utc::now().timestamp() as f64;
@@ -604,8 +736,9 @@ mod tests {
         )
         .unwrap();
         let loaded = AdminService::load_balance_cache_from(&service.cache_path);
-        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded.len(), 2);
         assert!(loaded.contains_key(&1));
+        assert!(loaded.contains_key(&2));
         assert!(!valid.is_fresh(f64::NAN));
         assert!(!valid.is_fresh(f64::INFINITY));
         assert!(!valid.is_fresh(valid.cached_at + BALANCE_CACHE_TTL_SECS as f64));

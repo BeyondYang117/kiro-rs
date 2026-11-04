@@ -10,6 +10,7 @@ export interface CredentialsStatusResponse {
 // 单个凭据状态
 export interface CredentialStatusItem {
   id: number
+  balance?: BalanceResponse | null
   priority: number
   disabled: boolean
   failureCount: number
@@ -69,6 +70,7 @@ export interface BalanceResponse {
   remaining: number
   usagePercentage: number
   nextResetAt: number | null
+  updatedAt: number | null
 }
 
 // 成功响应
