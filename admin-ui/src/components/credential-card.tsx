@@ -288,7 +288,10 @@ export function CredentialCard({
               失败 {credential.failureCount} · 刷新失败 {credential.refreshFailureCount}
             </div>
             {credential.inFlight !== undefined && (
-              <div className="mt-1 text-xs text-muted-foreground">在途 {credential.inFlight}</div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                在途 {credential.inFlight}
+                {credential.effectiveConcurrencyLimit !== undefined && ` / 当前上限 ${credential.effectiveConcurrencyLimit}`}
+              </div>
             )}
             <div
               className="mt-1 text-xs text-muted-foreground"

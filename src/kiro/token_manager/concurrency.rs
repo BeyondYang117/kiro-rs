@@ -6,6 +6,8 @@ use tokio::sync::SemaphorePermit;
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConcurrencySnapshot {
+    pub adaptive_concurrency: bool,
+    pub recovering_credentials: usize,
     pub max_in_flight: usize,
     pub max_in_flight_per_credential: u64,
     pub max_waiting: usize,
@@ -25,6 +27,49 @@ pub struct ConcurrencySnapshot {
     pub finished_wait_total: u64,
     pub total_wait_ms: u64,
     pub max_wait_ms: u64,
+}
+
+/// 账号级 AIMD：429 后减半、冷却后单请求探测，每个成功窗口增加一个名额。
+pub(super) struct AdaptiveLimit {
+    limit: u64,
+    probing: bool,
+    successes: u64,
+    pub(super) epoch: Arc<()>,
+}
+
+impl AdaptiveLimit {
+    pub(super) fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            probing: false,
+            successes: 0,
+            epoch: Arc::new(()),
+        }
+    }
+
+    pub(super) fn rate_limited(&mut self) {
+        self.limit = (self.limit / 2).max(1);
+        self.probing = true;
+        self.successes = 0;
+        // 限流前已在途请求的迟到成功不能推动本轮恢复。
+        self.epoch = Arc::new(());
+    }
+
+    fn effective_limit(&self) -> u64 {
+        if self.probing { 1 } else { self.limit }
+    }
+
+    fn succeeded(&mut self, maximum: u64) {
+        if self.probing {
+            self.probing = false;
+        } else if self.limit < maximum {
+            self.successes += 1;
+            if self.successes >= self.limit {
+                self.limit += 1;
+                self.successes = 0;
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -87,6 +132,48 @@ pub(super) fn cooldown_remaining_ms(entry: &CredentialEntry) -> u64 {
 }
 
 impl MultiTokenManager {
+    pub(super) fn effective_concurrency_limit(&self, entry: &CredentialEntry) -> u64 {
+        if self.config.concurrency.adaptive_concurrency {
+            entry.adaptive_limit.effective_limit()
+        } else {
+            self.config.concurrency.max_in_flight_per_credential
+        }
+    }
+
+    /// 完整消费 2xx 响应体才恢复容量；丢弃、取消或读取错误不计成功。
+    /// 与业务响应校验/成功统计分开，不把传输完成视为业务成功。
+    pub(crate) fn report_transport_success(&self, context: &CallContext) {
+        if !self.config.concurrency.adaptive_concurrency {
+            return;
+        }
+        let Some(reservation) = &context.reservation else {
+            return;
+        };
+        if reservation
+            .transport_success_reported
+            .swap(true, Ordering::Relaxed)
+        {
+            return;
+        }
+        let mut entries = self.entries.lock();
+        let Some(entry) = entries.iter_mut().find(|entry| entry.id == context.id) else {
+            return;
+        };
+        if entry.disabled || !Arc::ptr_eq(&entry.adaptive_limit.epoch, &reservation.adaptive_epoch)
+        {
+            return;
+        }
+        let before = self.effective_concurrency_limit(entry);
+        entry
+            .adaptive_limit
+            .succeeded(self.config.concurrency.max_in_flight_per_credential);
+        let increased = self.effective_concurrency_limit(entry) > before;
+        drop(entries);
+        if increased {
+            self.capacity_changed.notify_waiters();
+        }
+    }
+
     pub(super) fn concurrency_snapshot(
         &self,
         queue: &[Waiter],
@@ -95,6 +182,16 @@ impl MultiTokenManager {
         let settings = &self.config.concurrency;
         let metrics = &self.concurrency_metrics;
         ConcurrencySnapshot {
+            adaptive_concurrency: settings.adaptive_concurrency,
+            recovering_credentials: entries
+                .iter()
+                .filter(|entry| {
+                    settings.adaptive_concurrency
+                        && !entry.disabled
+                        && (entry.adaptive_limit.probing
+                            || entry.adaptive_limit.limit < settings.max_in_flight_per_credential)
+                })
+                .count(),
             max_in_flight: settings.max_in_flight,
             max_in_flight_per_credential: settings.max_in_flight_per_credential,
             max_waiting: settings.max_waiting,
@@ -111,7 +208,7 @@ impl MultiTokenManager {
                 .filter(|e| {
                     !e.disabled
                         && e.in_flight.load(Ordering::Relaxed)
-                            >= settings.max_in_flight_per_credential
+                            >= self.effective_concurrency_limit(e)
                 })
                 .count(),
             oldest_wait_ms: queue

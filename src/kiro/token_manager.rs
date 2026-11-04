@@ -419,6 +419,7 @@ struct CredentialEntry {
     in_flight: Arc<AtomicU64>,
     refresh_lock: Arc<TokioMutex<()>>,
     cooldown: Option<(Instant, StdDuration)>,
+    adaptive_limit: concurrency::AdaptiveLimit,
     /// 最后一次 API 调用时间（RFC3339 格式）
     last_used_at: Option<String>,
 }
@@ -481,6 +482,7 @@ pub struct CredentialEntrySnapshot {
     pub success_count: u64,
     pub in_flight: u64,
     pub cooldown_remaining_ms: u64,
+    pub effective_concurrency_limit: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     pub last_used_at: Option<String>,
     /// 是否配置了凭据级代理
@@ -560,6 +562,8 @@ struct InFlightReservation {
     in_flight: Arc<AtomicU64>,
     global_slot: Option<OwnedSemaphorePermit>,
     capacity_changed: Arc<Notify>,
+    adaptive_epoch: Arc<()>,
+    transport_success_reported: AtomicBool,
 }
 
 impl InFlightReservation {
@@ -573,6 +577,8 @@ impl InFlightReservation {
             in_flight: Arc::clone(&entry.in_flight),
             global_slot: Some(global_slot),
             capacity_changed,
+            adaptive_epoch: entry.adaptive_limit.epoch.clone(),
+            transport_success_reported: AtomicBool::new(false),
         })
     }
 }
@@ -683,6 +689,9 @@ impl MultiTokenManager {
                     in_flight: Arc::new(AtomicU64::new(0)),
                     refresh_lock: Arc::new(TokioMutex::new(())),
                     cooldown: None,
+                    adaptive_limit: concurrency::AdaptiveLimit::new(
+                        config.concurrency.max_in_flight_per_credential,
+                    ),
                     last_used_at: None,
                 })
             })
@@ -816,8 +825,7 @@ impl MultiTokenManager {
 
     fn dispatchable(&self, entry: &CredentialEntry, model: Option<&str>, now: Instant) -> bool {
         Self::eligible_for_model(entry, model)
-            && entry.in_flight.load(Ordering::Relaxed)
-                < self.config.concurrency.max_in_flight_per_credential
+            && entry.in_flight.load(Ordering::Relaxed) < self.effective_concurrency_limit(entry)
             && entry.cooldown.is_none_or(|(started, duration)| {
                 now.saturating_duration_since(started) >= duration
             })
@@ -928,6 +936,9 @@ impl MultiTokenManager {
             .fetch_add(1, Ordering::Relaxed);
         let mut entries = self.entries.lock();
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+            if self.config.concurrency.adaptive_concurrency {
+                entry.adaptive_limit.rate_limited();
+            }
             let remaining = entry
                 .cooldown
                 .map(|(started, duration)| duration.saturating_sub(started.elapsed()))
@@ -1598,6 +1609,7 @@ impl MultiTokenManager {
                     success_count: e.success_count,
                     in_flight: e.in_flight.load(Ordering::Relaxed),
                     cooldown_remaining_ms: concurrency::cooldown_remaining_ms(e),
+                    effective_concurrency_limit: self.effective_concurrency_limit(e),
                     last_used_at: e.last_used_at.clone(),
                     has_proxy: e.credentials.proxy_url.is_some(),
                     proxy_url: e.credentials.proxy_url.clone(),
@@ -1928,6 +1940,9 @@ impl MultiTokenManager {
                 in_flight: Arc::new(AtomicU64::new(0)),
                 refresh_lock: Arc::new(TokioMutex::new(())),
                 cooldown: None,
+                adaptive_limit: concurrency::AdaptiveLimit::new(
+                    self.config.concurrency.max_in_flight_per_credential,
+                ),
                 last_used_at: None,
             });
             new_id

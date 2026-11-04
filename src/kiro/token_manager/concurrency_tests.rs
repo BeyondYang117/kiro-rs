@@ -442,3 +442,175 @@ async fn refreshes_recheck_latest_tokens_and_other_accounts_progress_independent
         assert_eq!(task.await.unwrap().token, "new-token-1");
     }
 }
+
+fn expire_cooldown(manager: &MultiTokenManager, id: u64) {
+    manager
+        .entries
+        .lock()
+        .iter_mut()
+        .find(|entry| entry.id == id)
+        .unwrap()
+        .cooldown = None;
+}
+
+#[tokio::test]
+async fn adaptive_limits_probe_then_increase_by_success_windows_in_both_modes() {
+    for mode in ["balanced", "priority"] {
+        let manager = manager(
+            serde_json::json!({"loadBalancingMode": mode, "concurrency": {
+                "adaptiveConcurrency": true, "maxInFlightPerCredential": 4, "maxWaiting": 0
+            }}),
+            1,
+        );
+        manager.report_rate_limited(1, None);
+        assert_eq!(manager.snapshot().concurrency.recovering_credentials, 1);
+        expire_cooldown(&manager, 1);
+        let probe = manager.acquire_context(None).await.unwrap();
+        assert!(
+            manager
+                .acquire_context(None)
+                .await
+                .err()
+                .unwrap()
+                .is::<CapacityError>()
+        );
+        assert_eq!(manager.snapshot().concurrency.saturated_credentials, 1);
+        manager.report_transport_success(&probe);
+        // 4 -> 减半至 2；探测成功后恢复至 2，而非直接恢复至 4。
+        assert_eq!(manager.snapshot().entries[0].effective_concurrency_limit, 2);
+        let second = manager.acquire_context(None).await.unwrap();
+        assert!(
+            manager
+                .acquire_context(None)
+                .await
+                .err()
+                .unwrap()
+                .is::<CapacityError>()
+        );
+        manager.report_transport_success(&second);
+        assert_eq!(manager.snapshot().entries[0].effective_concurrency_limit, 2);
+        // 克隆上下文也只能上报一次，不能将一次响应算成多次成功。
+        manager.report_transport_success(&second.clone());
+        drop((probe, second));
+        for expected in [3, 3, 3, 4, 4] {
+            let context = manager.acquire_context(None).await.unwrap();
+            manager.report_transport_success(&context);
+            assert_eq!(
+                manager.snapshot().entries[0].effective_concurrency_limit,
+                expected
+            );
+        }
+        assert_eq!(manager.snapshot().concurrency.recovering_credentials, 0);
+    }
+}
+
+#[tokio::test]
+async fn adaptive_recovery_ignores_old_successes_and_abandoned_probes() {
+    let manager = manager(
+        serde_json::json!({"concurrency": {
+            "adaptiveConcurrency": true, "maxInFlightPerCredential": 8
+        }}),
+        2,
+    );
+    let old = manager.acquire_context(None).await.unwrap();
+    manager.report_rate_limited(old.id, None);
+    manager.report_transport_success(&old);
+    assert_eq!(manager.snapshot().entries[0].effective_concurrency_limit, 1);
+    drop(old);
+    expire_cooldown(&manager, 1);
+    // 其他账号不受影响；取消探测会释放名额，但不会提高上限。
+    assert_eq!(manager.snapshot().entries[1].effective_concurrency_limit, 8);
+    let probe = manager.acquire_context(None).await.unwrap();
+    assert_eq!(probe.id, 1);
+    drop(probe);
+    assert_eq!(manager.snapshot().entries[0].effective_concurrency_limit, 1);
+    let probe = manager.acquire_context(None).await.unwrap();
+    manager.report_rate_limited(1, None);
+    manager.report_transport_success(&probe);
+    assert_eq!(manager.snapshot().entries[0].effective_concurrency_limit, 1);
+    drop(probe);
+    expire_cooldown(&manager, 1);
+    let probe = manager.acquire_context(None).await.unwrap();
+    manager.report_transport_success(&probe);
+    assert_eq!(manager.snapshot().entries[0].effective_concurrency_limit, 2);
+}
+
+#[tokio::test]
+async fn adaptive_recovery_wakes_waiters_before_the_successful_response_is_dropped() {
+    let manager = manager(
+        serde_json::json!({"concurrency": {
+            "adaptiveConcurrency": true, "maxInFlightPerCredential": 4
+        }}),
+        1,
+    );
+    manager.report_rate_limited(1, None);
+    expire_cooldown(&manager, 1);
+    let probe = manager.acquire_context(None).await.unwrap();
+    let pending = manager.clone();
+    let queued = tokio::spawn(async move { pending.acquire_context(None).await });
+    wait_for_waiters(&manager, 1).await;
+    manager.report_transport_success(&probe);
+    let next = timeout(StdDuration::from_secs(1), queued)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(manager.snapshot().concurrency.in_flight, 2);
+    drop((probe, next));
+}
+
+#[tokio::test]
+async fn adaptive_control_can_be_disabled_and_handles_a_single_slot() {
+    for enabled in [false, true] {
+        let manager = manager(
+            serde_json::json!({"concurrency": {
+                "adaptiveConcurrency": enabled, "maxInFlightPerCredential": 1
+            }}),
+            1,
+        );
+        manager.report_rate_limited(1, None);
+        expire_cooldown(&manager, 1);
+        let context = manager.acquire_context(None).await.unwrap();
+        manager.report_transport_success(&context);
+        assert_eq!(manager.snapshot().entries[0].effective_concurrency_limit, 1);
+        assert_eq!(manager.snapshot().concurrency.recovering_credentials, 0);
+    }
+    let manager = manager(serde_json::json!({}), 1);
+    manager.report_rate_limited(1, None);
+    assert_eq!(manager.snapshot().entries[0].effective_concurrency_limit, 4);
+    assert!(!manager.snapshot().concurrency.adaptive_concurrency);
+}
+
+#[tokio::test]
+async fn adaptive_reduction_drains_existing_calls_before_admitting_a_probe() {
+    let manager = manager(
+        serde_json::json!({"concurrency": {
+            "adaptiveConcurrency": true, "maxInFlightPerCredential": 4, "maxWaiting": 0
+        }}),
+        1,
+    );
+    let mut active = Vec::new();
+    for _ in 0..4 {
+        active.push(manager.acquire_context(None).await.unwrap());
+    }
+    manager.report_rate_limited(1, None);
+    expire_cooldown(&manager, 1);
+    assert_eq!(manager.snapshot().concurrency.in_flight, 4);
+    while let Some(context) = active.pop() {
+        // 旧请求的成功不会结束本轮探测，也不取消现有调用。
+        manager.report_transport_success(&context);
+        assert!(
+            manager
+                .acquire_context(None)
+                .await
+                .err()
+                .unwrap()
+                .is::<CapacityError>()
+        );
+        drop(context);
+    }
+    let probe = manager.acquire_context(None).await.unwrap();
+    assert_eq!(manager.snapshot().entries[0].effective_concurrency_limit, 1);
+    manager.report_transport_success(&probe);
+    assert_eq!(manager.snapshot().entries[0].effective_concurrency_limit, 2);
+}

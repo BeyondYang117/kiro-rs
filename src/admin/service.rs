@@ -93,6 +93,7 @@ impl AdminService {
                 success_count: entry.success_count,
                 in_flight: entry.in_flight,
                 cooldown_remaining_ms: entry.cooldown_remaining_ms,
+                effective_concurrency_limit: entry.effective_concurrency_limit,
                 last_used_at: entry.last_used_at.clone(),
                 has_proxy: entry.has_proxy,
                 proxy_url: entry.proxy_url,

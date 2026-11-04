@@ -21,7 +21,10 @@ export function ConcurrencyPanel({ metrics }: { metrics: ConcurrencySnapshot }) 
               {metrics.inFlight} <span className="text-sm font-normal text-muted-foreground">/ {metrics.maxInFlight}</span>
             </dd>
             <Progress value={metrics.inFlight} max={metrics.maxInFlight} className="mt-2 h-1.5" aria-label="在途调用占比" />
-            <p className="mt-2 text-xs text-muted-foreground">每账号上限 {metrics.maxInFlightPerCredential}</p>
+            <p className="mt-2 text-xs text-muted-foreground">
+              每账号上限 {metrics.maxInFlightPerCredential}
+              {metrics.adaptiveConcurrency && ' · 自适应已开启'}
+            </p>
           </div>
           <div>
             <dt className="text-xs text-muted-foreground">等待调用</dt>
@@ -37,6 +40,9 @@ export function ConcurrencyPanel({ metrics }: { metrics: ConcurrencySnapshot }) 
             <dt className="text-xs text-muted-foreground">冷却 / 满载账号</dt>
             <dd className="mt-1 text-xl font-semibold tabular-nums">{metrics.coolingCredentials} / {metrics.saturatedCredentials}</dd>
             <p className="mt-2 text-xs text-muted-foreground">已启用账号中统计，可重叠</p>
+            {metrics.adaptiveConcurrency && (
+              <p className="mt-1 text-xs text-muted-foreground">恢复中账号 {metrics.recoveringCredentials ?? 0}</p>
+            )}
           </div>
           <div>
             <dt className="text-xs text-muted-foreground">排队拒绝 / 等待超时</dt>

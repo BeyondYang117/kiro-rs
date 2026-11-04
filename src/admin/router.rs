@@ -129,7 +129,10 @@ mod tests {
         assert_eq!(value["concurrency"]["coolingCredentials"], 1);
         assert_eq!(value["concurrency"]["saturatedCredentials"], 1);
         assert_eq!(value["concurrency"]["rateLimitedTotal"], 1);
+        assert_eq!(value["concurrency"]["adaptiveConcurrency"], false);
+        assert_eq!(value["concurrency"]["recoveringCredentials"], 0);
         assert_eq!(value["credentials"][0]["inFlight"], 1);
+        assert_eq!(value["credentials"][0]["effectiveConcurrencyLimit"], 1);
         assert!(
             value["credentials"][1]["cooldownRemainingMs"]
                 .as_u64()

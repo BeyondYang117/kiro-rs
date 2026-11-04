@@ -24,6 +24,7 @@ export interface CredentialStatusItem {
   successCount: number
   inFlight?: number
   cooldownRemainingMs?: number
+  effectiveConcurrencyLimit?: number
   lastUsedAt: string | null
   hasProxy: boolean
   proxyUrl?: string
@@ -33,6 +34,8 @@ export interface CredentialStatusItem {
 }
 
 export interface ConcurrencySnapshot {
+  adaptiveConcurrency?: boolean
+  recoveringCredentials?: number
   maxInFlight: number
   maxInFlightPerCredential: number
   maxWaiting: number

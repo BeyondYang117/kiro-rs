@@ -51,6 +51,7 @@ impl std::error::Error for UpstreamApiError {}
 pub struct UpstreamResponse {
     response: reqwest::Response,
     context: CallContext,
+    token_manager: Arc<MultiTokenManager>,
 }
 
 impl UpstreamResponse {
@@ -67,15 +68,22 @@ impl UpstreamResponse {
     ) -> futures::stream::BoxStream<'static, Result<bytes::Bytes, reqwest::Error>> {
         use futures::StreamExt;
         futures::stream::unfold(
-            (self.response.bytes_stream(), Some(self.context)),
-            |(mut stream, mut context)| async move {
+            (
+                self.response.bytes_stream(),
+                Some(self.context),
+                self.token_manager,
+            ),
+            |(mut stream, mut context, manager)| async move {
                 context.as_ref()?;
-                let chunk = stream.next().await?;
+                let Some(chunk) = stream.next().await else {
+                    manager.report_transport_success(context.as_ref().unwrap());
+                    return None;
+                };
                 if chunk.is_err() {
                     // An errored body cannot make further progress; release immediately.
                     context.take();
                 }
-                Some((chunk, (stream, context)))
+                Some((chunk, (stream, context, manager)))
             },
         )
         .boxed()
@@ -83,6 +91,9 @@ impl UpstreamResponse {
 
     pub async fn text(self) -> reqwest::Result<String> {
         let result = self.response.text().await;
+        if result.is_ok() {
+            self.token_manager.report_transport_success(&self.context);
+        }
         drop(self.context);
         result
     }
@@ -283,6 +294,7 @@ impl KiroProvider {
                 return Ok(UpstreamResponse {
                     response,
                     context: ctx,
+                    token_manager: self.token_manager.clone(),
                 });
             }
 
@@ -482,6 +494,7 @@ impl KiroProvider {
                 return Ok(UpstreamResponse {
                     response,
                     context: ctx,
+                    token_manager: self.token_manager.clone(),
                 });
             }
 
@@ -687,32 +700,34 @@ mod response_tests {
     use crate::model::config::Config;
     use futures::{StreamExt, stream};
 
-    async fn response(pending: bool) -> (MultiTokenManager, UpstreamResponse) {
+    async fn response(pending: bool) -> (Arc<MultiTokenManager>, UpstreamResponse) {
         response_with_limit(pending, 64).await
     }
 
     async fn response_with_limit(
         pending: bool,
         max_in_flight: usize,
-    ) -> (MultiTokenManager, UpstreamResponse) {
-        let manager = MultiTokenManager::new(
-            serde_json::from_value::<Config>(serde_json::json!({
-                "loadBalancingMode":"balanced",
-                "concurrency":{"maxInFlight":max_in_flight,"maxWaiting":0}
-            }))
+    ) -> (Arc<MultiTokenManager>, UpstreamResponse) {
+        let manager = Arc::new(
+            MultiTokenManager::new(
+                serde_json::from_value::<Config>(serde_json::json!({
+                    "loadBalancingMode":"balanced",
+                    "concurrency":{"maxInFlight":max_in_flight,"maxWaiting":0}
+                }))
+                .unwrap(),
+                (1..=2)
+                    .map(|id| KiroCredentials {
+                        id: Some(id),
+                        kiro_api_key: Some(format!("test-{id}")),
+                        ..Default::default()
+                    })
+                    .collect(),
+                None,
+                None,
+                false,
+            )
             .unwrap(),
-            (1..=2)
-                .map(|id| KiroCredentials {
-                    id: Some(id),
-                    kiro_api_key: Some(format!("test-{id}")),
-                    ..Default::default()
-                })
-                .collect(),
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        );
         let context = manager.acquire_context(None).await.unwrap();
         assert_eq!(context.id, 1);
         // Prefer #1 on historical usage alone; while its response is active #2 must win.
@@ -726,7 +741,14 @@ mod response_tests {
             reqwest::Body::from("hello")
         };
         let response = reqwest::Response::from(http::Response::new(body));
-        (manager, UpstreamResponse { response, context })
+        (
+            manager.clone(),
+            UpstreamResponse {
+                response,
+                context,
+                token_manager: manager,
+            },
+        )
     }
 
     #[tokio::test]
@@ -827,6 +849,106 @@ mod response_tests {
         assert!(chunks.next().await.unwrap().is_err());
         assert_eq!(manager.acquire_context(None).await.unwrap().id, 1);
         assert!(chunks.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn adaptive_recovery_requires_complete_body_consumption() {
+        futures::future::join_all(
+            [
+                "text",
+                "stream",
+                "drop_response",
+                "drop_stream",
+                "text_error",
+                "stream_error",
+                "cancel_read",
+            ]
+            .into_iter()
+            .map(|mode| async move {
+                let manager = Arc::new(
+                    MultiTokenManager::new(
+                        serde_json::from_value(serde_json::json!({"concurrency": {
+                            "adaptiveConcurrency": true, "rateLimitCooldownSeconds": 1
+                        }}))
+                        .unwrap(),
+                        vec![KiroCredentials {
+                            id: Some(1),
+                            kiro_api_key: Some("adaptive-test".into()),
+                            ..Default::default()
+                        }],
+                        None,
+                        None,
+                        true,
+                    )
+                    .unwrap(),
+                );
+                manager.report_rate_limited(1, None);
+                // 调度器的冷却计时器负责放行探测，无需手动操作内部状态。
+                let context =
+                    tokio::time::timeout(Duration::from_secs(3), manager.acquire_context(None))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let body = if mode.ends_with("error") {
+                    reqwest::Body::wrap_stream(stream::once(async {
+                        Err::<&str, _>(std::io::Error::other("broken body"))
+                    }))
+                } else if mode == "cancel_read" {
+                    reqwest::Body::wrap_stream(stream::pending::<Result<&str, std::io::Error>>())
+                } else {
+                    reqwest::Body::from("hello")
+                };
+                let response = UpstreamResponse {
+                    response: reqwest::Response::from(http::Response::new(body)),
+                    context,
+                    token_manager: manager.clone(),
+                };
+                match mode {
+                    "text" => {
+                        response.text().await.unwrap();
+                    }
+                    "stream" => {
+                        let mut chunks = response.bytes_stream();
+                        assert!(chunks.next().await.unwrap().is_ok());
+                        assert_eq!(manager.snapshot().entries[0].effective_concurrency_limit, 1);
+                        assert!(chunks.next().await.is_none());
+                    }
+                    "drop_stream" => {
+                        let mut chunks = response.bytes_stream();
+                        chunks.next().await.unwrap().unwrap();
+                    }
+                    "text_error" => {
+                        assert!(response.text().await.is_err());
+                    }
+                    "stream_error" => {
+                        let mut chunks = response.bytes_stream();
+                        assert!(chunks.next().await.unwrap().is_err());
+                        assert!(chunks.next().await.is_none());
+                    }
+                    "cancel_read" => {
+                        assert!(
+                            tokio::time::timeout(Duration::from_millis(10), response.text())
+                                .await
+                                .is_err()
+                        );
+                    }
+                    _ => drop(response),
+                }
+                assert_eq!(
+                    manager.snapshot().entries[0].effective_concurrency_limit,
+                    if matches!(mode, "text" | "stream") {
+                        2
+                    } else {
+                        1
+                    },
+                    "{mode}"
+                );
+                assert_eq!(manager.snapshot().concurrency.in_flight, 0, "{mode}");
+                // 传输完成不计业务成功。
+                assert_eq!(manager.snapshot().entries[0].success_count, 0);
+            }),
+        )
+        .await;
     }
 }
 

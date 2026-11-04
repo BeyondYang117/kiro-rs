@@ -21,6 +21,8 @@ pub struct ConcurrencyConfig {
     pub max_waiting: usize,
     pub wait_timeout_seconds: u64,
     pub rate_limit_cooldown_seconds: u64,
+    /// 429 后减小账号并发，并在响应体完整读取后逐步恢复。
+    pub adaptive_concurrency: bool,
 }
 
 impl Default for ConcurrencyConfig {
@@ -31,6 +33,7 @@ impl Default for ConcurrencyConfig {
             max_waiting: 128,
             wait_timeout_seconds: 30,
             rate_limit_cooldown_seconds: 30,
+            adaptive_concurrency: false,
         }
     }
 }
@@ -356,6 +359,7 @@ mod tests {
         assert_eq!(defaults.concurrency.max_in_flight, 64);
         assert_eq!(defaults.concurrency.max_in_flight_per_credential, 4);
         assert_eq!(defaults.concurrency.max_waiting, 128);
+        assert!(!defaults.concurrency.adaptive_concurrency);
         let config: Config = serde_json::from_str(
             r#"{"loadBalancingMode":"priority","concurrency":{"maxWaiting":0,"maxInFlight":2}}"#,
         )
@@ -367,6 +371,12 @@ mod tests {
         let encoded = serde_json::to_value(config).unwrap();
         assert_eq!(encoded["concurrency"]["maxInFlight"], 2);
         assert_eq!(encoded["concurrency"]["maxWaiting"], 0);
+        assert_eq!(encoded["concurrency"]["adaptiveConcurrency"], false);
+        let enabled: Config = serde_json::from_value(serde_json::json!({
+            "concurrency": {"adaptiveConcurrency": true}
+        }))
+        .unwrap();
+        assert!(enabled.concurrency.adaptive_concurrency);
     }
 
     #[test]
