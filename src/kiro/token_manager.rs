@@ -647,6 +647,10 @@ impl MultiTokenManager {
         is_multiple_format: bool,
     ) -> anyhow::Result<Self> {
         config.concurrency.validate()?;
+        anyhow::ensure!(
+            config.tool_output_recovery_attempts <= 2,
+            "toolOutputRecoveryAttempts 必须在 0..=2 之间"
+        );
         // 计算当前最大 ID，为没有 ID 的凭据分配新 ID
         let max_existing_id = credentials.iter().filter_map(|c| c.id).max().unwrap_or(0);
         let mut last_assigned_id = max_existing_id;

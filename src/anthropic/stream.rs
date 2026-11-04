@@ -648,6 +648,10 @@ impl StreamContext {
                 );
                 Vec::new()
             }
+            Event::Metadata(metadata) if metadata.output_limited() => {
+                self.state_manager.set_stop_reason("max_tokens");
+                Vec::new()
+            }
             Event::Error {
                 error_code,
                 error_message,

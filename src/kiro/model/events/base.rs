@@ -18,6 +18,7 @@ pub enum EventType {
     ContextUsage,
     /// 原生推理内容
     ReasoningContent,
+    Metadata,
     /// 未知事件类型
     Unknown,
 }
@@ -31,6 +32,7 @@ impl EventType {
             "meteringEvent" => Self::Metering,
             "contextUsageEvent" => Self::ContextUsage,
             "reasoningContentEvent" => Self::ReasoningContent,
+            "metadataEvent" => Self::Metadata,
             _ => Self::Unknown,
         }
     }
@@ -43,6 +45,7 @@ impl EventType {
             Self::Metering => "meteringEvent",
             Self::ContextUsage => "contextUsageEvent",
             Self::ReasoningContent => "reasoningContentEvent",
+            Self::Metadata => "metadataEvent",
             Self::Unknown => "unknown",
         }
     }
@@ -77,6 +80,7 @@ pub enum Event {
     ContextUsage(super::ContextUsageEvent),
     /// 原生推理内容
     ReasoningContent(super::ReasoningContentEvent),
+    Metadata(super::MetadataEvent),
     /// 未知事件 (保留原始帧数据)
     Unknown {},
     /// 服务端错误
@@ -131,6 +135,7 @@ impl Event {
                 let payload = super::ReasoningContentEvent::from_frame(&frame)?;
                 Ok(Self::ReasoningContent(payload))
             }
+            EventType::Metadata => Ok(Self::Metadata(frame.payload_as_json()?)),
             EventType::Unknown => Ok(Self::Unknown {}),
         }
     }

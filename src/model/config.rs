@@ -126,6 +126,10 @@ pub struct Config {
     #[serde(default = "default_cc_buffered_stream")]
     pub cc_buffered_stream: bool,
 
+    /// 未发出响应内容时，截断工具调用的缩块恢复次数（0..=2）。
+    #[serde(default = "default_tool_output_recovery_attempts")]
+    pub tool_output_recovery_attempts: u8,
+
     /// HTTP 代理地址（可选）
     /// 支持格式: http://host:port, https://host:port, socks5://host:port
     #[serde(default)]
@@ -253,6 +257,10 @@ fn default_extract_thinking() -> bool {
     true
 }
 
+fn default_tool_output_recovery_attempts() -> u8 {
+    1
+}
+
 fn default_endpoint() -> String {
     crate::kiro::endpoint::ide::IDE_ENDPOINT_NAME.to_string()
 }
@@ -276,6 +284,7 @@ impl Default for Config {
             count_tokens_auth_type: default_count_tokens_auth_type(),
             count_tokens_timeout_seconds: default_count_tokens_timeout_seconds(),
             cc_buffered_stream: default_cc_buffered_stream(),
+            tool_output_recovery_attempts: default_tool_output_recovery_attempts(),
             proxy_url: None,
             proxy_username: None,
             proxy_password: None,
@@ -351,6 +360,31 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_output_recovery_defaults_and_roundtrip() {
+        let defaults: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.tool_output_recovery_attempts, 1);
+        for attempts in [0, 1, 2] {
+            let config: Config =
+                serde_json::from_value(serde_json::json!({"toolOutputRecoveryAttempts":attempts}))
+                    .unwrap();
+            assert_eq!(config.tool_output_recovery_attempts, attempts);
+            assert_eq!(
+                serde_json::to_value(config).unwrap()["toolOutputRecoveryAttempts"],
+                attempts
+            );
+        }
+        let invalid: Config = serde_json::from_str(r#"{"toolOutputRecoveryAttempts":3}"#).unwrap();
+        // Constructor validates settings before requiring any credentials.
+        assert!(
+            crate::kiro::token_manager::MultiTokenManager::new(invalid, vec![], None, None, false)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("toolOutputRecoveryAttempts")
+        );
+    }
 
     #[test]
     fn concurrency_defaults_partial_settings_and_roundtrip() {

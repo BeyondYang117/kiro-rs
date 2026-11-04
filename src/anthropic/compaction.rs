@@ -424,6 +424,9 @@ async fn summarize(
             match event {
                 Event::AssistantResponse(response) => text.push_str(&response.content),
                 Event::ToolUse(_) => stop_reason = "tool_use",
+                Event::Metadata(metadata) if metadata.output_limited() => {
+                    stop_reason = "max_tokens"
+                }
                 Event::ContextUsage(usage) => {
                     input_tokens = (usage.context_usage_percentage
                         * f64::from(get_context_window_size(&request.model))
@@ -793,6 +796,25 @@ mod tests {
         completion: Option<std::sync::Arc<tokio::sync::Notify>>,
         responses: Option<Vec<Vec<u8>>>,
     ) -> Mock {
+        mock_with_recovery(
+            summary,
+            status,
+            disconnect,
+            completion,
+            responses,
+            (1, None),
+        )
+        .await
+    }
+
+    async fn mock_with_recovery(
+        summary: Vec<u8>,
+        status: StatusCode,
+        disconnect: bool,
+        completion: Option<std::sync::Arc<tokio::sync::Notify>>,
+        responses: Option<Vec<Vec<u8>>>,
+        recovery: (u8, Option<Vec<u8>>),
+    ) -> Mock {
         use crate::kiro::{
             model::credentials::KiroCredentials, provider::KiroProvider,
             token_manager::MultiTokenManager,
@@ -802,6 +824,7 @@ mod tests {
             collections::HashMap,
             sync::{Arc, Mutex},
         };
+        let (recovery_attempts, tail) = recovery;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
@@ -813,6 +836,7 @@ mod tests {
                 let summary = summary.clone();
                 let completion = completion.clone();
                 let responses = responses.clone();
+                let tail = tail.clone();
                 async move {
                     let mut requests = captured.lock().unwrap();
                     let request_id = body.get("id").cloned();
@@ -840,10 +864,12 @@ mod tests {
                                 Err(std::io::Error::other("upstream disconnected"))
                             } else if let Some(completion) = completion {
                                 completion.notified().await;
-                                Ok(frame(
-                                    "contextUsageEvent",
-                                    json!({"contextUsagePercentage":10.0}),
-                                ))
+                                Ok(tail.unwrap_or_else(|| {
+                                    frame(
+                                        "contextUsageEvent",
+                                        json!({"contextUsagePercentage":10.0}),
+                                    )
+                                }))
                             } else {
                                 Ok(Vec::new())
                             }
@@ -856,8 +882,10 @@ mod tests {
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
+        let mut config = Config::default();
+        config.tool_output_recovery_attempts = recovery_attempts;
         let manager = MultiTokenManager::new(
-            Config::default(),
+            config,
             vec![KiroCredentials {
                 auth_method: Some("api_key".into()),
                 kiro_api_key: Some("test-key".into()),
@@ -1769,17 +1797,333 @@ mod tests {
 
     #[tokio::test]
     async fn normal_responses_reject_incomplete_and_invalid_tool_inputs() {
-        for (input, stop) in [("{\"path\":", false), ("{broken}", true)] {
-            assert_normal_response_failure(
-                frame(
-                    "toolUseEvent",
-                    json!({
-                        "name":"write_file", "toolUseId":"t1", "input":input, "stop":stop
-                    }),
-                ),
-                false,
-            )
-            .await;
+        for (input, stop) in [
+            ("{\"path\":", false),
+            ("{broken}", true),
+            ("null", true),
+            ("[]", true),
+        ] {
+            for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+                for streaming in [false, true] {
+                    let mut upstream = mock(frame(
+                        "toolUseEvent",
+                        json!({
+                            "name":"write_file", "toolUseId":"t1", "input":input, "stop":stop
+                        }),
+                    ))
+                    .await;
+                    upstream.state.cc_buffered_stream = buffered;
+                    let response = completion_response(&upstream, cc, streaming, false).await;
+                    assert_tool_call_failure(response, streaming).await;
+                    assert_eq!(upstream.requests.lock().unwrap().len(), 1);
+                    assert_eq!(upstream.manager.snapshot().entries[0].success_count, 0);
+                }
+            }
+        }
+    }
+
+    async fn assert_tool_call_failure(response: Response, streaming: bool) {
+        assert_eq!(
+            response.status(),
+            if streaming {
+                StatusCode::OK
+            } else {
+                StatusCode::BAD_REQUEST
+            }
+        );
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("invalid_request_error"), "{text}");
+        assert!(text.contains("smaller chunks"), "{text}");
+        assert!(
+            !text.contains("\"type\":\"tool_use\""),
+            "invalid tool leaked: {text}"
+        );
+        assert!(!text.contains("event: message_stop"), "{text}");
+        assert!(!text.contains("event: message_delta"), "{text}");
+    }
+
+    fn write_request(streaming: bool) -> MessagesRequest {
+        request(
+            json!({"model":"claude-sonnet-5", "max_tokens":16000, "stream":streaming,
+            "messages":[{"role":"user","content":"Write the full file"}],
+            "tools":[{"name":"write_file", "input_schema":{"type":"object",
+                "required":["path","content"], "properties":{"path":{"type":"string"},"content":{"type":"string"}}}}]}),
+        )
+    }
+
+    fn truncated_write() -> Vec<u8> {
+        frame(
+            "toolUseEvent",
+            json!({"name":"write_file", "toolUseId":"failed-tool",
+            "input":"{\"path\":\"large.txt\",\"content\":\"private-truncated-sentinel", "stop":false}),
+        )
+    }
+
+    fn recovered_write() -> Vec<u8> {
+        frame(
+            "toolUseEvent",
+            json!({"name":"write_file", "toolUseId":"recovered-tool",
+            "input":json!({"path":"large.txt","content":"small skeleton"}).to_string(), "stop":true}),
+        )
+    }
+
+    #[tokio::test]
+    async fn truncated_tools_recover_with_smaller_requests_before_emitting_content() {
+        for ending in ["eof", "exception", "metadata", "json_eof"] {
+            for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+                for streaming in [false, true] {
+                    let mut broken = truncated_write();
+                    match ending {
+                        "exception" => broken.extend(message_frame(
+                            &[
+                                (":message-type", "exception"),
+                                (":exception-type", "ContentLengthExceededException"),
+                            ],
+                            json!({"message":"limit"}),
+                        )),
+                        "metadata" => broken
+                            .extend(frame("metadataEvent", json!({"stopReason":"max_tokens"}))),
+                        "json_eof" => broken.extend(frame(
+                            "toolUseEvent",
+                            json!({"name":"write_file",
+                            "toolUseId":"failed-tool", "input":"", "stop":true}),
+                        )),
+                        _ => {}
+                    }
+                    let mut upstream = mock_scripted(vec![broken, recovered_write()]).await;
+                    upstream.state.cc_buffered_stream = buffered;
+                    let response =
+                        dispatch(upstream.state.clone(), write_request(streaming), cc).await;
+                    assert_eq!(response.status(), StatusCode::OK);
+                    let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                    let text = String::from_utf8_lossy(&body);
+                    assert!(text.contains("recovered-tool"), "{ending}: {text}");
+                    assert!(
+                        !text.contains("failed-tool")
+                            && !text.contains("private-truncated-sentinel"),
+                        "{text}"
+                    );
+                    assert!(!text.contains("event: error"), "{text}");
+                    if streaming {
+                        assert_eq!(text.matches("event: message_start\n").count(), 1);
+                        assert_eq!(text.matches("event: message_stop\n").count(), 1);
+                    }
+                    let requests = upstream.requests.lock().unwrap();
+                    assert_eq!(requests.len(), 2);
+                    let pointer = "/conversationState/currentMessage/userInputMessage/content";
+                    assert_eq!(requests[0].pointer(pointer).unwrap(), "Write the full file");
+                    assert!(
+                        requests[1]
+                            .pointer(pointer)
+                            .unwrap()
+                            .as_str()
+                            .unwrap()
+                            .contains("at most 20 lines and 4000 characters")
+                    );
+                    assert_eq!(
+                        requests[0]["conversationState"]["history"],
+                        requests[1]["conversationState"]["history"]
+                    );
+                    assert_eq!(requests[0].pointer("/conversationState/currentMessage/userInputMessage/userInputMessageContext"),
+                        requests[1].pointer("/conversationState/currentMessage/userInputMessage/userInputMessageContext"));
+                    assert_eq!(upstream.manager.snapshot().entries[0].success_count, 1);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_recovery_is_bounded_configurable_and_does_not_replay_emitted_content() {
+        for attempts in [0, 1, 2] {
+            for streaming in [false, true] {
+                let upstream = mock_with_recovery(
+                    Vec::new(),
+                    StatusCode::OK,
+                    false,
+                    None,
+                    Some(vec![truncated_write()]),
+                    (attempts, None),
+                )
+                .await;
+                let response =
+                    dispatch(upstream.state.clone(), write_request(streaming), false).await;
+                assert_tool_call_failure(response, streaming).await;
+                let requests = upstream.requests.lock().unwrap();
+                assert_eq!(requests.len(), usize::from(attempts) + 1);
+                if attempts == 2 {
+                    assert!(
+                        requests[2]
+                            .to_string()
+                            .contains("10 lines and 2000 characters")
+                    );
+                }
+            }
+        }
+        // Two actual network chunks, with visible text arriving before the tool.
+        // Neither JSON nor buffered callers may assume it is safe to replay it.
+        for cc in [false, true] {
+            for streaming in [false, true] {
+                let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+                let mut upstream = mock_with_recovery(
+                    frame(
+                        "assistantResponseEvent",
+                        json!({"content":"visible-prefix"}),
+                    ),
+                    StatusCode::OK,
+                    false,
+                    Some(gate.clone()),
+                    None,
+                    (1, Some(truncated_write())),
+                )
+                .await;
+                upstream.state.cc_buffered_stream = false;
+                // The controlled fixture releases its final chunk after a pause.
+                let release = tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                    gate.notify_one();
+                });
+                let response = dispatch(upstream.state.clone(), write_request(streaming), cc).await;
+                let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                let text = String::from_utf8_lossy(&body);
+                assert!(text.contains("invalid_request_error"), "{text}");
+                assert!(!text.contains("failed-tool"), "{text}");
+                if streaming {
+                    assert!(text.contains("visible-prefix"), "{text}");
+                }
+                release.await.unwrap();
+                assert_eq!(upstream.requests.lock().unwrap().len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_logs_preserve_failed_attempt_without_leaking_discarded_content() {
+        let upstream = mock_scripted(vec![truncated_write(), recovered_write()]).await;
+        let state = upstream.state.clone();
+        let app = axum::Router::new().route(
+            "/v1/messages",
+            axum::routing::post(move |Json(req): Json<MessagesRequest>| {
+                let state = state.clone();
+                async move { dispatch(state, req, false).await }
+            }),
+        );
+        let req = axum::http::Request::builder().method("POST").uri("/v1/messages")
+            .header("content-type","application/json")
+            .body(Body::from(json!({"model":"claude-sonnet-5", "max_tokens":16000,
+                "messages":[{"role":"user","content":"private-prompt-sentinel"}],
+                "tools":[{"name":"write_file","input_schema":{"type":"object","required":["path","content"]}}]
+            }).to_string())).unwrap();
+        let record = crate::request_log::tests::capture_request(app, req).await;
+        assert_eq!(record["status"], "success");
+        let attempts = record["upstreamAttempts"].as_array().unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0]["responseDiagnostics"]["outcome"], "incomplete");
+        assert!(
+            attempts[0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("Incomplete upstream tool call")
+        );
+        assert_eq!(attempts[1]["responseDiagnostics"]["outcome"], "success");
+        assert!(!record.to_string().contains("private-truncated-sentinel"));
+        assert!(!record.to_string().contains("private-prompt-sentinel"));
+    }
+
+    #[tokio::test]
+    async fn context_overflow_and_corrupt_frames_do_not_trigger_tool_recovery() {
+        let mut full = frame("contextUsageEvent", json!({"contextUsagePercentage":100.0}));
+        full.extend(truncated_write());
+        let mut corrupt = truncated_write();
+        let mut broken_frame = frame("assistantResponseEvent", json!({"content":"broken"}));
+        broken_frame.pop();
+        corrupt.extend(broken_frame);
+        for bytes in [full, corrupt] {
+            for streaming in [false, true] {
+                let upstream = mock_scripted(vec![bytes.clone(), recovered_write()]).await;
+                let response =
+                    dispatch(upstream.state.clone(), write_request(streaming), false).await;
+                let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                let text = String::from_utf8_lossy(&body);
+                assert!(
+                    !text.contains("recovered-tool") && !text.contains("failed-tool"),
+                    "{text}"
+                );
+                assert_eq!(upstream.requests.lock().unwrap().len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_or_missing_required_tool_arguments_never_reach_the_client() {
+        // Include a long MCP name to exercise schema lookup after name shortening.
+        let name = "mcp__very_long_server_name_with_many_characters__write_file_with_a_long_name";
+        for input in ["", "{}", "{\"path\":\"file.txt\"}"] {
+            for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+                for streaming in [false, true] {
+                    let req = request(json!({"model":"claude-sonnet-5", "max_tokens":1024,
+                        "stream":streaming, "messages":[{"role":"user","content":"write"}],
+                        "tools":[{"name":name,"input_schema":{"type":"object",
+                            "required":["path","content"], "properties":{"path":{"type":"string"},"content":{"type":"string"}}}}]}));
+                    let converted = convert_request(&req).unwrap();
+                    let upstream_name = &converted
+                        .conversation_state
+                        .current_message
+                        .user_input_message
+                        .user_input_message_context
+                        .tools[0]
+                        .tool_specification
+                        .name;
+                    let mut upstream = mock(frame(
+                        "toolUseEvent",
+                        json!({
+                            "name":upstream_name, "toolUseId":"t1", "input":input, "stop":true
+                        }),
+                    ))
+                    .await;
+                    upstream.state.cc_buffered_stream = buffered;
+                    let response = dispatch(upstream.state.clone(), req, cc).await;
+                    assert_tool_call_failure(response, streaming).await;
+                    assert_eq!(upstream.requests.lock().unwrap().len(), 1);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn truncated_tool_limit_fails_even_if_upstream_keeps_the_body_open() {
+        let mut bytes = frame(
+            "toolUseEvent",
+            json!({
+                "name":"Write", "toolUseId":"t1", "input":"{\"file_path\":", "stop":false
+            }),
+        );
+        bytes.extend(message_frame(
+            &[
+                (":message-type", "exception"),
+                (":exception-type", "ContentLengthExceededException"),
+            ],
+            json!({"message":"limit"}),
+        ));
+        for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+            for streaming in [false, true] {
+                let mut upstream = mock_controlled(
+                    bytes.clone(),
+                    StatusCode::OK,
+                    false,
+                    Some(std::sync::Arc::new(tokio::sync::Notify::new())),
+                )
+                .await;
+                upstream.state.cc_buffered_stream = buffered;
+                tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    let response = completion_response(&upstream, cc, streaming, false).await;
+                    assert_tool_call_failure(response, streaming).await;
+                })
+                .await
+                .expect("output limit should terminate the response immediately");
+                assert_eq!(upstream.requests.lock().unwrap().len(), 1);
+                assert_eq!(upstream.manager.snapshot().entries[0].success_count, 0);
+            }
         }
     }
 
@@ -1812,6 +2156,31 @@ mod tests {
                 assert!(!text.contains("api_error"));
                 if streaming {
                     assert!(text.contains("event: message_stop"));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_output_limit_preserves_max_tokens_for_text_and_complete_tools() {
+        for initial in [
+            frame("assistantResponseEvent", json!({"content":"partial text"})),
+            recovered_write(),
+        ] {
+            for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+                for streaming in [false, true] {
+                    let mut bytes = initial.clone();
+                    bytes.extend(frame("metadataEvent", json!({"stopReason":"max_tokens"})));
+                    let mut upstream = mock(bytes).await;
+                    upstream.state.cc_buffered_stream = buffered;
+                    let response =
+                        dispatch(upstream.state.clone(), write_request(streaming), cc).await;
+                    assert_eq!(response.status(), StatusCode::OK);
+                    let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                    let text = String::from_utf8_lossy(&body);
+                    assert!(text.contains("max_tokens"), "{text}");
+                    assert!(!text.contains("invalid_request_error"), "{text}");
+                    assert_eq!(upstream.requests.lock().unwrap().len(), 1);
                 }
             }
         }
@@ -1857,6 +2226,112 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn tool_arguments_are_withheld_across_frames_and_network_chunks() {
+        use super::super::upstream::UpstreamResponseDecoder;
+        let first = frame(
+            "toolUseEvent",
+            json!({
+                "name":"write_file", "toolUseId":"t1", "input":"{\"content\":", "stop":false
+            }),
+        );
+        let middle = frame(
+            "assistantResponseEvent",
+            json!({"content":"interleaved text"}),
+        );
+        let last = frame(
+            "toolUseEvent",
+            json!({
+                "name":"write_file", "toolUseId":"t1", "input":"\"你好\"}", "stop":true
+            }),
+        );
+        let mut decoder = UpstreamResponseDecoder::default();
+        for byte in first.iter().chain(middle.iter()) {
+            assert!(decoder.feed(&[*byte]).unwrap().is_empty());
+        }
+        let mut released = Vec::new();
+        for byte in last {
+            released.extend(decoder.feed(&[byte]).unwrap());
+        }
+        assert_eq!(released.len(), 3);
+        assert!(matches!(&released[0], Event::ToolUse(tool) if !tool.stop));
+        assert!(
+            matches!(&released[1], Event::AssistantResponse(text) if text.content == "interleaved text")
+        );
+        assert!(matches!(&released[2], Event::ToolUse(tool) if tool.stop));
+        decoder.finish().unwrap();
+    }
+
+    #[test]
+    fn interleaved_tools_are_released_only_when_all_arguments_are_complete() {
+        use super::super::upstream::UpstreamResponseDecoder;
+        let mut decoder = UpstreamResponseDecoder::default();
+        for (id, input, stop) in [("first", "{\"content\":", false), ("second", "{}", true)] {
+            assert!(
+                decoder
+                    .feed(&frame(
+                        "toolUseEvent",
+                        json!({
+                            "name":"write_file", "toolUseId":id, "input":input, "stop":stop
+                        })
+                    ))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        let released = decoder
+            .feed(&frame(
+                "toolUseEvent",
+                json!({
+                    "name":"write_file", "toolUseId":"first", "input":"\"done\"}", "stop":true
+                }),
+            ))
+            .unwrap();
+        let ids: Vec<_> = released
+            .iter()
+            .map(|event| match event {
+                Event::ToolUse(tool) => tool.tool_use_id.as_str(),
+                _ => panic!("unexpected event"),
+            })
+            .collect();
+        assert_eq!(ids, ["first", "second", "first"]);
+        decoder.finish().unwrap();
+    }
+
+    #[test]
+    fn pending_tools_have_a_memory_limit_and_reject_name_changes() {
+        use super::super::upstream::{ToolCallError, UpstreamResponseDecoder};
+        let mut decoder = UpstreamResponseDecoder::default();
+        let first = frame(
+            "toolUseEvent",
+            json!({
+                "name":"Write", "toolUseId":"t1", "input":"{", "stop":false
+            }),
+        );
+        assert!(decoder.feed(&first).unwrap().is_empty());
+        let error = decoder
+            .feed(&frame(
+                "toolUseEvent",
+                json!({
+                    "name":"Bash", "toolUseId":"t1", "input":"}", "stop":true
+                }),
+            ))
+            .unwrap_err();
+        assert!(error.is::<ToolCallError>());
+
+        let mut decoder = UpstreamResponseDecoder::default();
+        let bytes = frame(
+            "toolUseEvent",
+            json!({
+                "name":"Write", "toolUseId":"t1", "input":"x".repeat(1024 * 1024), "stop":false
+            }),
+        );
+        for _ in 0..3 {
+            assert!(decoder.feed(&bytes).unwrap().is_empty());
+        }
+        assert!(decoder.feed(&bytes).unwrap_err().is::<ToolCallError>());
     }
 
     #[tokio::test]

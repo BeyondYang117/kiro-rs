@@ -15,6 +15,34 @@ use crate::request_log::{UpstreamResponseDiagnostics, attempt_response_finished}
 /// Empty completions get two additional attempts. Never replay emitted content.
 const MAX_EMPTY_RESPONSE_RETRIES: usize = 2;
 const MAX_EMPTY_PREFIX_BYTES: usize = 1024 * 1024;
+// Bound memory while withholding tool calls until their arguments are valid.
+const MAX_TOOL_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug)]
+pub(super) enum ToolCallError {
+    Invalid(String),
+    Truncated(String),
+}
+
+impl std::fmt::Display for ToolCallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}. The invalid tool call was not forwarded for execution. Split file writes, edits, or shell commands into smaller chunks; do not retry the same oversized call unchanged.",
+            match self {
+                Self::Invalid(message) | Self::Truncated(message) => message,
+            }
+        )
+    }
+}
+
+impl std::error::Error for ToolCallError {}
+
+#[derive(Default)]
+struct PendingTool {
+    name: String,
+    input: String,
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum ResponsePolicy {
@@ -32,7 +60,9 @@ pub(super) fn response_events(
     response: UpstreamResponse,
     policy: ResponsePolicy,
 ) -> BoxStream<'static, anyhow::Result<Vec<Event>>> {
+    let required_fields = required_tool_fields(&request_body);
     struct State {
+        request_body: String,
         body: Option<BoxStream<'static, Result<bytes::Bytes, reqwest::Error>>>,
         credential_id: u64,
         decoder: UpstreamResponseDecoder,
@@ -43,11 +73,69 @@ pub(super) fn response_events(
         has_content: bool,
         limited: bool,
         retries: usize,
+        recoveries: u8,
+        emitted_content: bool,
         done: bool,
     }
+    impl State {
+        async fn recover_tool_output(
+            &mut self,
+            error: &anyhow::Error,
+            provider: &KiroProvider,
+            is_stream: bool,
+            policy: ResponsePolicy,
+        ) -> anyhow::Result<bool> {
+            if !matches!(
+                error.downcast_ref::<ToolCallError>(),
+                Some(ToolCallError::Truncated(_))
+            ) || !matches!(policy, ResponsePolicy::Conversation { .. })
+                || self.emitted_content
+                || self.decoder.context_full
+                || self.recoveries >= provider.tool_output_recovery_attempts()
+                || self.decoder.pending_tools.is_empty()
+                || !self.decoder.pending_tools.values().all(|tool| {
+                    self.decoder
+                        .required_fields
+                        .contains_key(&tool.name.to_ascii_lowercase())
+                })
+            {
+                return Ok(false);
+            }
+            let Some(body) = tool_recovery_request(&self.request_body, self.recoveries + 1) else {
+                return Ok(false);
+            };
+            // No response content has left the decoder. Release capacity before
+            // regenerating with a smaller chunk and discard the failed prefix.
+            self.body.take();
+            self.recoveries += 1;
+            tracing::warn!(
+                recovery = self.recoveries,
+                "Recovering truncated tool output with smaller chunks"
+            );
+            let response = if is_stream {
+                provider.call_api_stream(&body).await?
+            } else {
+                provider.call_api(&body).await?
+            };
+            self.request_body = body;
+            self.credential_id = response.credential_id();
+            let required_fields = std::mem::take(&mut self.decoder.required_fields);
+            self.decoder =
+                UpstreamResponseDecoder::for_response(&response, policy, required_fields);
+            self.body = Some(response.bytes_stream());
+            self.prefix.clear();
+            self.prefix_bytes = 0;
+            self.summary.clear();
+            self.text_prefix.clear();
+            self.has_content = false;
+            self.limited = false;
+            Ok(true)
+        }
+    }
     let state = State {
+        request_body,
         credential_id: response.credential_id(),
-        decoder: UpstreamResponseDecoder::for_response(&response, policy),
+        decoder: UpstreamResponseDecoder::for_response(&response, policy, required_fields),
         body: Some(response.bytes_stream()),
         prefix: Vec::new(),
         prefix_bytes: 0,
@@ -56,12 +144,12 @@ pub(super) fn response_events(
         has_content: false,
         limited: false,
         retries: 0,
+        recoveries: 0,
+        emitted_content: false,
         done: false,
     };
-    let request_body: Arc<str> = request_body.into();
     futures::stream::try_unfold(state, move |mut state| {
         let provider = provider.clone();
-        let request_body = request_body.clone();
         async move {
             if state.done {
                 return Ok(None);
@@ -71,7 +159,7 @@ pub(super) fn response_events(
                     let chunk = chunk.inspect_err(|error| {
                         state.decoder.record_failure(
                             state.credential_id,
-                            state.retries + 1,
+                            state.retries + usize::from(state.recoveries) + 1,
                             "read_error",
                             crate::request_log::error_chain(error),
                         );
@@ -81,13 +169,22 @@ pub(super) fn response_events(
                         Err(error) => {
                             state.decoder.record_failure(
                                 state.credential_id,
-                                state.retries + 1,
+                                state.retries + usize::from(state.recoveries) + 1,
                                 "decode_error",
                                 format!("{error:#}"),
                             );
+                            if state
+                                .recover_tool_output(&error, &provider, is_stream, policy)
+                                .await?
+                            {
+                                continue;
+                            }
                             return Err(error);
                         }
                     };
+                    // Pending tools count as generated content, but remain eligible
+                    // for bounded recovery until any response events are released.
+                    state.has_content |= !state.decoder.pending_tools.is_empty();
                     for event in &events {
                         match event {
                             Event::AssistantResponse(response) => match policy {
@@ -121,8 +218,6 @@ pub(super) fn response_events(
                                         .as_ref()
                                         .is_some_and(|s| !s.trim().is_empty());
                             }
-                            // Even partial tools commit the attempt: an incomplete tool
-                            // must fail validation, never be silently replayed.
                             Event::ToolUse(_) => state.has_content = true,
                             Event::ContextUsage(usage)
                                 if usage.context_usage_percentage >= 100.0 =>
@@ -134,11 +229,16 @@ pub(super) fn response_events(
                             {
                                 state.limited = true
                             }
+                            Event::Metadata(metadata) if metadata.output_limited() => {
+                                state.limited = true
+                            }
                             _ => {}
                         }
                     }
                     state.prefix.extend(events);
                     if state.has_content && matches!(policy, ResponsePolicy::Conversation { .. }) {
+                        // Empty batches contain only withheld tools, not client-visible content.
+                        state.emitted_content |= !state.prefix.is_empty();
                         return Ok(Some((std::mem::take(&mut state.prefix), state)));
                     }
                     state.prefix_bytes += chunk.len();
@@ -147,7 +247,7 @@ pub(super) fn response_events(
                     {
                         state.decoder.record_failure(
                             state.credential_id,
-                            state.retries + 1,
+                            state.retries + usize::from(state.recoveries) + 1,
                             "prefix_limit",
                             "Upstream response exceeded the empty prefix limit",
                         );
@@ -159,10 +259,16 @@ pub(super) fn response_events(
                 if let Err(error) = state.decoder.finish() {
                     state.decoder.record_failure(
                         state.credential_id,
-                        state.retries + 1,
+                        state.retries + usize::from(state.recoveries) + 1,
                         "incomplete",
                         format!("{error:#}"),
                     );
+                    if state
+                        .recover_tool_output(&error, &provider, is_stream, policy)
+                        .await?
+                    {
+                        continue;
+                    }
                     return Err(error);
                 }
                 // Release the credential reservation before any retry/backoff.
@@ -187,7 +293,7 @@ pub(super) fn response_events(
                 }
                 state.decoder.record_failure(
                     state.credential_id,
-                    state.retries + 1,
+                    state.retries + usize::from(state.recoveries) + 1,
                     "empty",
                     format!("Empty upstream response: {}", state.decoder.empty_reason()),
                 );
@@ -206,12 +312,14 @@ pub(super) fn response_events(
                 );
                 tokio::time::sleep(Duration::from_millis(200 * state.retries as u64)).await;
                 let response = if is_stream {
-                    provider.call_api_stream(&request_body).await?
+                    provider.call_api_stream(&state.request_body).await?
                 } else {
-                    provider.call_api(&request_body).await?
+                    provider.call_api(&state.request_body).await?
                 };
                 state.credential_id = response.credential_id();
-                state.decoder = UpstreamResponseDecoder::for_response(&response, policy);
+                let required_fields = std::mem::take(&mut state.decoder.required_fields);
+                state.decoder =
+                    UpstreamResponseDecoder::for_response(&response, policy, required_fields);
                 state.body = Some(response.bytes_stream());
                 state.prefix.clear();
                 state.prefix_bytes = 0;
@@ -223,6 +331,57 @@ pub(super) fn response_events(
         }
     })
     .boxed()
+}
+
+/// Keep history, tool results and schemas intact. Only strengthen the current
+/// user instruction; never manufacture a tool result for an unexecuted call.
+fn tool_recovery_request(request_body: &str, recovery: u8) -> Option<String> {
+    use crate::kiro::model::requests::kiro::KiroRequest;
+    let mut request: KiroRequest = serde_json::from_str(request_body).ok()?;
+    let message = &mut request
+        .conversation_state
+        .current_message
+        .user_input_message;
+    let (lines, characters) = if recovery == 1 {
+        (20, 4000)
+    } else {
+        (10, 2000)
+    };
+    message.content.push_str(&format!(
+        "\n\n[Proxy tool output recovery {recovery}] The previous tool arguments were truncated upstream and were discarded before any response content was sent to the client. No tools from that attempt were executed. Regenerate a smaller complete call, not a continuation of partial JSON. Make only ONE tool call in this response, with at most {lines} lines and {characters} characters of generated content. For a large file, create a small skeleton first; subsequent client turns can fill it in. Do not claim the whole file is complete. Do not move the large payload into shell commands or encoded strings. Include every required argument and close the JSON object."
+    ));
+    serde_json::to_string(&request).ok()
+}
+
+/// Use the actual upstream names (including shortened MCP names) and normalized
+/// schemas. Only check top-level required fields, not the full JSON Schema.
+fn required_tool_fields(request_body: &str) -> HashMap<String, Vec<String>> {
+    let Ok(request) =
+        serde_json::from_str::<crate::kiro::model::requests::kiro::KiroRequest>(request_body)
+    else {
+        return HashMap::new();
+    };
+    request
+        .conversation_state
+        .current_message
+        .user_input_message
+        .user_input_message_context
+        .tools
+        .into_iter()
+        .map(|tool| {
+            let spec = tool.tool_specification;
+            let required = spec
+                .input_schema
+                .json
+                .get("required")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect();
+            (spec.name.to_ascii_lowercase(), required)
+        })
+        .collect()
 }
 
 fn has_meaningful_text(text: &str, thinking_enabled: bool) -> bool {
@@ -246,7 +405,11 @@ fn has_meaningful_text(text: &str, thinking_enabled: bool) -> bool {
 #[derive(Default)]
 pub(super) struct UpstreamResponseDecoder {
     frames: EventStreamDecoder,
-    pending_tools: HashMap<String, String>,
+    pending_tools: HashMap<String, PendingTool>,
+    required_fields: HashMap<String, Vec<String>>,
+    tool_events: Vec<Event>,
+    tool_buffer_bytes: usize,
+    context_full: bool,
     diagnostics: UpstreamResponseDiagnostics,
 }
 
@@ -268,8 +431,13 @@ impl UpstreamResponseDecoder {
         }
     }
 
-    fn for_response(response: &UpstreamResponse, policy: ResponsePolicy) -> Self {
+    fn for_response(
+        response: &UpstreamResponse,
+        policy: ResponsePolicy,
+        required_fields: HashMap<String, Vec<String>>,
+    ) -> Self {
         Self {
+            required_fields,
             diagnostics: UpstreamResponseDiagnostics {
                 content_type: response
                     .headers()
@@ -357,6 +525,7 @@ impl UpstreamResponseDecoder {
                 }
                 entry.insert(fields);
             }
+            let payload_bytes = frame.payload.len();
             let event = Event::from_frame(frame)?;
             match &event {
                 Event::AssistantResponse(response) => {
@@ -382,6 +551,9 @@ impl UpstreamResponseDecoder {
                 _ => {}
             }
             match &event {
+                Event::ContextUsage(usage) if usage.context_usage_percentage >= 100.0 => {
+                    self.context_full = true;
+                }
                 Event::Error {
                     error_code,
                     error_message,
@@ -392,27 +564,109 @@ impl UpstreamResponseDecoder {
                 } if exception_type != "ContentLengthExceededException" => {
                     bail!("{exception_type}: {message}");
                 }
+                Event::Exception { exception_type, .. }
+                    if exception_type == "ContentLengthExceededException"
+                        && !self.pending_tools.is_empty() =>
+                {
+                    return Err(ToolCallError::Truncated(
+                        "Upstream output limit reached during tool generation".into(),
+                    )
+                    .into());
+                }
+                Event::Metadata(metadata)
+                    if metadata.output_limited() && !self.pending_tools.is_empty() =>
+                {
+                    return Err(ToolCallError::Truncated(
+                        "Upstream metadata reports max_tokens during tool generation".into(),
+                    )
+                    .into());
+                }
                 Event::ToolUse(tool) => {
-                    let input = self
+                    if tool.tool_use_id.is_empty() || tool.name.is_empty() {
+                        return Err(ToolCallError::Invalid(
+                            "Upstream tool call has an empty ID or name".into(),
+                        )
+                        .into());
+                    }
+                    let pending = self
                         .pending_tools
                         .entry(tool.tool_use_id.clone())
-                        .or_default();
-                    input.push_str(&tool.input);
+                        .or_insert_with(|| PendingTool {
+                            name: tool.name.clone(),
+                            input: String::new(),
+                        });
+                    if pending.name != tool.name {
+                        return Err(ToolCallError::Invalid(
+                            "Upstream tool name changed during generation".into(),
+                        )
+                        .into());
+                    }
+                    // Check before copying payloads into the tool buffers.
+                    if self.tool_buffer_bytes.saturating_add(payload_bytes) > MAX_TOOL_BUFFER_BYTES
+                    {
+                        return Err(ToolCallError::Invalid(
+                            "Upstream tool call exceeds the 4 MiB buffer limit".into(),
+                        )
+                        .into());
+                    }
+                    pending.input.push_str(&tool.input);
                     if tool.stop {
-                        if !input.is_empty() {
-                            serde_json::from_str::<serde_json::Value>(input).map_err(|error| {
-                                anyhow::anyhow!(
-                                    "Invalid input for upstream tool {}: {error}",
-                                    tool.tool_use_id
-                                )
-                            })?;
+                        let input = if pending.input.is_empty() {
+                            serde_json::json!({})
+                        } else {
+                            serde_json::from_str::<serde_json::Value>(&pending.input).map_err(
+                                |error| {
+                                    let message = format!(
+                                        "Invalid input for upstream tool {}: {error}",
+                                        tool.tool_use_id
+                                    );
+                                    if error.is_eof() {
+                                        ToolCallError::Truncated(message)
+                                    } else {
+                                        ToolCallError::Invalid(message)
+                                    }
+                                },
+                            )?
+                        };
+                        let Some(input) = input.as_object() else {
+                            return Err(ToolCallError::Invalid(
+                                "Upstream tool input must be a JSON object".into(),
+                            )
+                            .into());
+                        };
+                        if let Some(required) =
+                            self.required_fields.get(&pending.name.to_ascii_lowercase())
+                            && required.iter().any(|key| !input.contains_key(key))
+                        {
+                            return Err(ToolCallError::Invalid(format!(
+                                "Upstream tool {} is missing required arguments",
+                                pending.name
+                            ))
+                            .into());
                         }
                         self.pending_tools.remove(&tool.tool_use_id);
                     }
                 }
                 _ => {}
             }
-            events.push(event);
+            // Preserve event order, including text between tool fragments. Never
+            // expose an empty/partial tool_use that a client could try to execute.
+            if matches!(event, Event::ToolUse(_)) || !self.tool_events.is_empty() {
+                self.tool_buffer_bytes = self.tool_buffer_bytes.saturating_add(payload_bytes);
+                if self.tool_buffer_bytes > MAX_TOOL_BUFFER_BYTES {
+                    return Err(ToolCallError::Invalid(
+                        "Upstream tool call exceeds the 4 MiB buffer limit".into(),
+                    )
+                    .into());
+                }
+                self.tool_events.push(event);
+                if self.pending_tools.is_empty() {
+                    events.append(&mut self.tool_events);
+                    self.tool_buffer_bytes = 0;
+                }
+            } else {
+                events.push(event);
+            }
         }
         Ok(events)
     }
@@ -422,7 +676,10 @@ impl UpstreamResponseDecoder {
             bail!("Incomplete upstream response frame");
         }
         if !self.pending_tools.is_empty() {
-            bail!("Incomplete upstream tool call");
+            return Err(ToolCallError::Truncated(
+                "Incomplete upstream tool call (output truncated or missing stop event)".into(),
+            )
+            .into());
         }
         Ok(())
     }

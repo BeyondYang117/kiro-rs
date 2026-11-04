@@ -27,7 +27,7 @@
 因 TLS 默认从 native-tls 切换至 rustls，你可能需要专门安装证书后才能配置 HTTP 代理。可通过 `config.json` 的 `tlsBackend` 切回 `native-tls`。
 如果遇到请求报错, 尤其是无法刷新 token, 或者是直接返回 error request, 请尝试切换 tls 后端为 `native-tls`, 一般即可解决。
 
-**Write Failed/会话卡死**: 如果遇到持续的 Write File / Write Failed 并导致会话不可用，参考 Issue [#22](https://github.com/hank9999/kiro.rs/issues/22) 和 [#49](https://github.com/hank9999/kiro.rs/issues/49) 的说明与临时解决方案（通常与输出过长被截断有关，可尝试调低输出相关 token 上限）
+**Write Failed/会话卡死**: 已增加分块写入提示与工具参数校验，详见下方[大文件写入与截断处理](#大文件写入与截断处理)。上游仍可能截断长输出；`max_tokens` 未映射到 Kiro 的原生生成上限，调低它不能保证避免截断。历史讨论见 Issue [#22](https://github.com/hank9999/kiro.rs/issues/22)（包含 Windows 路径问题）和 [#49](https://github.com/hank9999/kiro.rs/issues/49)（长输出截断）。
 
 ## 功能特性
 
@@ -448,6 +448,16 @@ RUST_LOG=debug ./target/release/kiro-rs
 设置 `"ccBufferedStream": false` 后，`/cc/v1/messages` 会与 `/v1/messages` 一样实时返回内容：首个 `message_start` 使用估算值，结束时的 `message_delta.usage.input_tokens` 使用上游上下文使用量计算的值（上游未提供时保留估算值）。默认仍为缓冲模式。代理侧上下文压缩仍会等待摘要及后续调用完成。
 
 远程 token 计数通过异步请求共享连接池，`countTokensTimeoutSeconds` 同时限制连接和响应体读取时间。超时、HTTP 错误或无效计数会自动回退本地估算。
+
+### 大文件写入与截断处理
+
+携带工具的请求会附加分块提示，即使没有 `system`；常见的 Write/Edit、`write_file`、`apply_patch`、Bash/`exec_command` 及对应 MCP 名称会在工具描述中收到额外提醒。建议每次生成少于 50 行、12000 字符，先建骨架再逐步填充。整次响应还会收到 `min(max_tokens, 4096)` 的软预算提示，包含思考和所有工具参数，避免多个小调用合计仍超长。这些是保守的提示策略，不是 Kiro 的实际输出上限或强制文件大小限制。
+
+普通对话的 JSON、实时 SSE、`/cc/v1` 缓冲 SSE 共用工具校验：暂存工具事件，直到收到结束标记、参数是合法 JSON 对象且包含工具 schema 顶层 `required` 字段后再交给客户端；没有必填字段的工具仍允许空参数。并行交错的工具事件保留原顺序，所有尚未完成的调用通过校验后一起释放。工具暂存的事件 payload 合计最多 4 MiB；工具片段之间的文本一同暂存，其他文本仍实时返回，工具生成期间每 25 秒发送 ping 保活。
+
+未向响应处理层释放任何事件时，工具参数截断可以自动缩块恢复：丢弃失败片段，在原始请求的当前用户消息中追加恢复指令，要求只生成一个完整的小调用（首次最多 20 行、4000 字符，第二次 10 行、2000 字符），保留原历史、工具 schema 和工具结果。配置 `"toolOutputRecoveryAttempts": 1` 默认恢复一次，允许 0～2，0 为关闭，修改后重启生效。恢复会额外调用模型并消耗额度，失败尝试保留在调用日志中。恢复只适用于已声明的工具、合法响应帧中的参数截断；已释放事件（包括实时正文或完整工具）、上下文已满、网络断流、损坏帧、缺少必填字段及非截断语法错误不会自动重放。即使使用缓冲或 JSON 模式，也沿用同样保守的边界。
+
+超过恢复次数或不符合恢复条件时，返回带缩小分块建议的错误：JSON 为 `400 invalid_request_error`；已经开始的 SSE 为 `error` 事件，不伪造正常完成，也不发出失败工具的残缺参数。新增识别 Kiro `metadataEvent.stopReason=max_tokens`，与长度异常一起触发截断处理；普通文本达到长度限制时保留 `max_tokens` stop reason。这些措施通过缩小生成任务提高成功率，不能提高上游的硬上限，也不能保证模型遵守提示或客户端停止重试。
 
 ### 上下文压缩
 

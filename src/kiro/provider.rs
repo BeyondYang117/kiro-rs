@@ -120,6 +120,10 @@ pub struct KiroProvider {
 }
 
 impl KiroProvider {
+    pub(crate) fn tool_output_recovery_attempts(&self) -> u8 {
+        self.token_manager.config().tool_output_recovery_attempts
+    }
+
     /// Called only after the Messages response has been decoded and validated.
     pub(crate) fn report_response_success(&self, credential_id: u64) {
         self.token_manager.report_success(credential_id);

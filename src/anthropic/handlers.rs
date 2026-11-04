@@ -731,14 +731,19 @@ fn create_ping_sse() -> Bytes {
     Bytes::from("event: ping\ndata: {\"type\": \"ping\"}\n\n")
 }
 
-fn upstream_error_event(error: impl std::fmt::Display) -> SseEvent {
-    crate::request_log::error_details(&error);
-    tracing::error!("Invalid upstream response: {error}");
+fn upstream_error_event(error: Error) -> SseEvent {
+    crate::request_log::error_details(format!("{error:#}"));
+    tracing::error!("Invalid upstream response: {error:#}");
+    let error_type = if error.is::<super::upstream::ToolCallError>() {
+        "invalid_request_error"
+    } else {
+        "api_error"
+    };
     SseEvent::new(
         "error",
         json!({
             "type": "error",
-            "error": {"type": "api_error", "message": format!("Upstream response failed: {error}")}
+            "error": {"type": error_type, "message": format!("Upstream response failed: {error:#}")}
         }),
     )
 }
@@ -747,12 +752,19 @@ fn upstream_error_response(error: Error) -> Response {
     if error.is::<crate::kiro::token_manager::CapacityError>() {
         return map_provider_error(error);
     }
+    // Replaying a malformed/truncated tool call unchanged will not repair it.
+    // Avoid SDK retries intended for transient 5xx errors.
+    let (status, error_type) = if error.is::<super::upstream::ToolCallError>() {
+        (StatusCode::BAD_REQUEST, "invalid_request_error")
+    } else {
+        (StatusCode::BAD_GATEWAY, "api_error")
+    };
     crate::request_log::error_details(format!("{error:#}"));
     tracing::error!("Invalid upstream response: {error:#}");
     (
-        StatusCode::BAD_GATEWAY,
+        status,
         Json(ErrorResponse::new(
-            "api_error",
+            error_type,
             format!("Upstream response failed: {error:#}"),
         )),
     )
@@ -787,7 +799,7 @@ fn create_sse_stream(
                         events.iter().flat_map(|event| ctx.process_kiro_event(event)).collect(),
                         false,
                     ),
-                    Some(Err(error)) => (vec![upstream_error_event(format!("{error:#}"))], true),
+                    Some(Err(error)) => (vec![upstream_error_event(error)], true),
                     None => (ctx.generate_final_events(), true),
                 },
                 _ = ping_interval.tick() => {
@@ -919,6 +931,9 @@ async fn handle_non_stream_request(
                         context_usage.context_usage_percentage,
                         actual_input_tokens
                     );
+                }
+                Event::Metadata(metadata) if metadata.output_limited() => {
+                    stop_reason = "max_tokens".to_string();
                 }
                 Event::Exception { exception_type, .. }
                     if exception_type == "ContentLengthExceededException" =>
@@ -1339,7 +1354,7 @@ fn create_buffered_sse_stream(
                             }
                             continue;
                         }
-                        Some(Err(error)) => vec![upstream_error_event(format!("{error:#}"))],
+                        Some(Err(error)) => vec![upstream_error_event(error)],
                         None => ctx.finish_and_get_all_events(),
                     }
                 };

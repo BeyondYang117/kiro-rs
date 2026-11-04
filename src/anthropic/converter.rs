@@ -80,17 +80,38 @@ fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
 }
 
 /// 追加到 Write 工具 description 末尾的内容
-const WRITE_TOOL_DESCRIPTION_SUFFIX: &str = "- IMPORTANT: If the content to write exceeds 150 lines, you MUST only write the first 50 lines using this tool, then use `Edit` tool to append the remaining content in chunks of no more than 50 lines each. If needed, leave a unique placeholder to help append content. Do NOT attempt to write all content at once.";
+const WRITE_TOOL_DESCRIPTION_SUFFIX: &str = "- IMPORTANT: Large tool arguments can be truncated upstream. For large files, create a small skeleton first, then append or edit in chunks using the available tools. Keep each call below 50 lines and 12000 characters of generated content, whichever limit is reached first. Include all required arguments and finish the JSON object. After a failure, inspect the file and use smaller chunks; never repeat the same oversized write unchanged.";
 
 /// 追加到 Edit 工具 description 末尾的内容
-const EDIT_TOOL_DESCRIPTION_SUFFIX: &str = "- IMPORTANT: If the `new_string` content exceeds 50 lines, you MUST split it into multiple Edit calls, each replacing no more than 50 lines at a time. If used to append content, leave a unique placeholder to help append content. On the final chunk, do NOT include the placeholder.";
+const EDIT_TOOL_DESCRIPTION_SUFFIX: &str = "- IMPORTANT: Split large replacements or patches into separate calls below 50 lines and 12000 characters of generated content each. Use precise anchors and include all required arguments. Inspect the result after a failure before retrying with smaller chunks. Remove any temporary placeholders when finished.";
+
+const SHELL_TOOL_DESCRIPTION_SUFFIX: &str = "- IMPORTANT: Do not put an entire large file in a shell command, heredoc, script, or encoded payload. Split generated content into small complete calls below 50 lines and 12000 characters each. Prefer the available file editing tools for large files. After a truncation failure, inspect the current state and reduce the chunk size.";
 
 /// 追加到系统提示词的分块写入策略
 const SYSTEM_CHUNKED_POLICY: &str = "\
-When the Write or Edit tool has content size limits, always comply silently. \
-Never suggest bypassing these limits via alternative tools. \
-Never ask the user whether to switch approaches. \
-Complete all chunked operations without commentary.";
+Tool output safety: upstream generation can truncate large tool arguments even when a high max_tokens was requested. \
+Keep file writes, edits, patches, and generated shell scripts in small complete calls, below 50 lines and 12000 characters of generated content per call. \
+For large files, create a skeleton then fill it in incrementally using the available tools; do not move an oversized payload into a shell heredoc or encoded command. \
+Always include required arguments and close the JSON object. If a tool fails or output is truncated, inspect the current state, reduce the chunk size, and do not repeat the same failed call unchanged. \
+Finish all chunks and verify the final file.";
+
+fn chunked_tool_suffix(name: &str) -> &'static str {
+    // MCP names use server prefixes; do not rely on one client's capitalization.
+    match name
+        .rsplit("__")
+        .next()
+        .unwrap_or(name)
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "write" | "write_file" | "create_file" => WRITE_TOOL_DESCRIPTION_SUFFIX,
+        "edit" | "edit_file" | "multiedit" | "apply_patch" => EDIT_TOOL_DESCRIPTION_SUFFIX,
+        "bash" | "shell" | "exec" | "exec_command" | "execute_command" | "run_command" => {
+            SHELL_TOOL_DESCRIPTION_SUFFIX
+        }
+        _ => "",
+    }
+}
 
 /// 模型映射：将 Anthropic 模型名映射到 Kiro 模型 ID
 /// 严格对照版本号
@@ -690,12 +711,13 @@ fn convert_tools(
         .map(|t| {
             let mut description = t.description.clone();
 
-            // 对 Write/Edit 工具追加自定义描述后缀
-            let suffix = match t.name.as_str() {
-                "Write" => WRITE_TOOL_DESCRIPTION_SUFFIX,
-                "Edit" => EDIT_TOOL_DESCRIPTION_SUFFIX,
-                _ => "",
-            };
+            let suffix = chunked_tool_suffix(&t.name);
+            // Reserve space for the policy so long descriptions cannot erase it.
+            let description_limit =
+                10000 - suffix.chars().count() - usize::from(!suffix.is_empty());
+            if let Some((idx, _)) = description.char_indices().nth(description_limit) {
+                description.truncate(idx);
+            }
             if !suffix.is_empty() {
                 description.push('\n');
                 description.push_str(suffix);
@@ -737,24 +759,37 @@ fn build_history(
     let mut history = Vec::new();
 
     // 1. 处理系统消息
-    if let Some(ref system) = req.system {
-        let system_content: String = system
-            .iter()
-            .map(|s| s.text.clone())
-            .collect::<Vec<_>>()
-            .join("\n");
+    let mut system_content: String = req
+        .system
+        .as_ref()
+        .map(|system| {
+            system
+                .iter()
+                .map(|s| s.text.clone())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
 
+    if req.tools.as_ref().is_some_and(|tools| !tools.is_empty()) {
         if !system_content.is_empty() {
-            // 追加分块写入策略到系统消息
-            let system_content = format!("{}\n{}", system_content, SYSTEM_CHUNKED_POLICY);
-
-            // 系统消息作为 user + assistant 配对
-            let user_msg = HistoryUserMessage::new(system_content, model_id);
-            history.push(Message::User(user_msg));
-
-            let assistant_msg = HistoryAssistantMessage::new("I will follow these instructions.");
-            history.push(Message::Assistant(assistant_msg));
+            system_content.push('\n');
         }
+        system_content.push_str(SYSTEM_CHUNKED_POLICY);
+        // This is a planning hint, not a claim that Kiro accepts max_tokens.
+        // Bound the whole response, since many small calls can also overflow it.
+        system_content.push_str(&format!(
+            " Aim to finish this entire response within {} output tokens, including reasoning and ALL tool arguments combined. Reserve room to close every JSON object. When a task needs more, return one small complete tool call and continue on the next client turn after its result; do not batch many chunks into one response.",
+            req.max_tokens.clamp(1, 4096)
+        ));
+    }
+    if !system_content.is_empty() {
+        // 系统消息作为 user + assistant 配对
+        let user_msg = HistoryUserMessage::new(system_content, model_id);
+        history.push(Message::User(user_msg));
+
+        let assistant_msg = HistoryAssistantMessage::new("I will follow these instructions.");
+        history.push(Message::Assistant(assistant_msg));
     }
 
     // 2. 处理常规消息历史
@@ -1168,6 +1203,79 @@ mod tests {
             context_management: None,
         };
         assert_eq!(determine_chat_trigger_type(&req), "MANUAL");
+    }
+
+    #[test]
+    fn chunked_policy_survives_long_descriptions_and_missing_system() {
+        for name in [
+            "Write",
+            "write_file",
+            "mcp__files__create_file",
+            "Edit",
+            "apply_patch",
+            "Bash",
+            "exec_command",
+        ] {
+            for system in [
+                serde_json::Value::Null,
+                serde_json::json!(""),
+                serde_json::json!("Original instructions"),
+            ] {
+                let req: MessagesRequest = serde_json::from_value(serde_json::json!({
+                    "model":"claude-sonnet-5", "max_tokens":1024,
+                    "messages":[{"role":"user","content":"hi"}], "system":system,
+                    "tools":[{"name":name,"description":"长".repeat(11000),
+                        "input_schema":{"type":"object","properties":{}}}]
+                }))
+                .unwrap();
+                let converted = convert_request(&req).unwrap();
+                let state = converted.conversation_state;
+                let description = &state
+                    .current_message
+                    .user_input_message
+                    .user_input_message_context
+                    .tools[0]
+                    .tool_specification
+                    .description;
+                assert!(description.chars().count() <= 10000);
+                assert!(description.ends_with(chunked_tool_suffix(name)));
+                let history = serde_json::to_string(&state.history).unwrap();
+                assert!(history.contains(SYSTEM_CHUNKED_POLICY));
+                if !system.is_null() && system != "" {
+                    assert!(history.contains("Original instructions"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tool_response_budget_uses_client_limit_with_a_conservative_ceiling() {
+        for (requested, budget) in [(256, 256), (4096, 4096), (64000, 4096)] {
+            let req: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "model":"claude-sonnet-5", "max_tokens":requested,
+                "messages":[{"role":"user","content":"hi"}],
+                "tools":[{"name":"write_file", "input_schema":{"type":"object"}}]
+            }))
+            .unwrap();
+            let converted = convert_request(&req).unwrap();
+            let history = serde_json::to_string(&converted.conversation_state.history).unwrap();
+            assert!(history.contains(&format!("within {budget} output tokens")));
+            assert!(history.contains("ALL tool arguments combined"));
+        }
+    }
+
+    #[test]
+    fn requests_without_tools_do_not_receive_chunked_policy() {
+        let req: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"claude-sonnet-5", "max_tokens":1024,
+            "messages":[{"role":"user","content":"hi"}], "system":"Original instructions"
+        }))
+        .unwrap();
+        let history =
+            serde_json::to_string(&convert_request(&req).unwrap().conversation_state.history)
+                .unwrap();
+        assert!(history.contains("Original instructions"));
+        assert!(!history.contains(SYSTEM_CHUNKED_POLICY));
     }
 
     #[test]
