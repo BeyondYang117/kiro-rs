@@ -250,8 +250,7 @@ impl KiroProvider {
                 .client_for(&ctx.credentials)?
                 .post(&url)
                 .body(body)
-                .header("content-type", "application/json")
-                .header("Connection", "close");
+                .header("content-type", "application/json");
             let request = endpoint.decorate_mcp(base, &rctx);
 
             crate::request_log::attempt_started(ctx.id, endpoint.name());
@@ -289,7 +288,8 @@ impl KiroProvider {
             crate::request_log::attempt_result(Some(status.as_u16()), None, upstream_id.as_deref());
             let retry_after = Self::retry_after(response.headers(), SystemTime::now());
             if status.as_u16() == 429 {
-                self.token_manager.report_rate_limited(ctx.id, retry_after);
+                self.token_manager
+                    .report_rate_limited_for_context(&ctx, retry_after);
             }
 
             // 成功响应
@@ -449,8 +449,7 @@ impl KiroProvider {
                 .client_for(&ctx.credentials)?
                 .post(&url)
                 .body(body)
-                .header("content-type", "application/json")
-                .header("Connection", "close");
+                .header("content-type", "application/json");
             let request = endpoint.decorate_api(base, &rctx);
 
             crate::request_log::attempt_started(ctx.id, endpoint.name());
@@ -490,7 +489,8 @@ impl KiroProvider {
             crate::request_log::attempt_result(Some(status.as_u16()), None, upstream_id.as_deref());
             let retry_after = Self::retry_after(response.headers(), SystemTime::now());
             if status.as_u16() == 429 {
-                self.token_manager.report_rate_limited(ctx.id, retry_after);
+                self.token_manager
+                    .report_rate_limited_for_context(&ctx, retry_after);
             }
 
             // Messages callers validate the body before reporting success.

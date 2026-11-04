@@ -61,7 +61,12 @@ pub fn build_client(
     timeout_secs: u64,
     tls_backend: TlsBackend,
 ) -> anyhow::Result<Client> {
-    let mut builder = Client::builder().timeout(Duration::from_secs(timeout_secs));
+    let mut builder = Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        // Reuse upstream TCP/TLS connections to reduce first-byte latency.
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(16)
+        .tcp_keepalive(Duration::from_secs(30));
 
     match tls_backend {
         TlsBackend::Rustls => {

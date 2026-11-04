@@ -930,8 +930,31 @@ impl MultiTokenManager {
         ))
     }
 
-    /// 429 是账号级冷却，不计为认证失败；并发 429 不能缩短已有冷却。
+    /// 供无实际调用上下文的调度测试使用。
+    #[cfg(test)]
     pub fn report_rate_limited(&self, id: u64, retry_after: Option<StdDuration>) {
+        self.report_rate_limited_inner(id, None, retry_after);
+    }
+
+    /// 429 触发账号冷却；同一批在途调用只执行一次自适应降档。
+    pub(crate) fn report_rate_limited_for_context(
+        &self,
+        context: &CallContext,
+        retry_after: Option<StdDuration>,
+    ) {
+        let epoch = context
+            .reservation
+            .as_ref()
+            .map(|reservation| &reservation.adaptive_epoch);
+        self.report_rate_limited_inner(context.id, epoch, retry_after);
+    }
+
+    fn report_rate_limited_inner(
+        &self,
+        id: u64,
+        epoch: Option<&Arc<()>>,
+        retry_after: Option<StdDuration>,
+    ) {
         let duration = retry_after.unwrap_or_default().max(StdDuration::from_secs(
             self.config.concurrency.rate_limit_cooldown_seconds,
         ));
@@ -940,7 +963,9 @@ impl MultiTokenManager {
             .fetch_add(1, Ordering::Relaxed);
         let mut entries = self.entries.lock();
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-            if self.config.concurrency.adaptive_concurrency {
+            if self.config.concurrency.adaptive_concurrency
+                && epoch.is_none_or(|epoch| Arc::ptr_eq(epoch, &entry.adaptive_limit.epoch))
+            {
                 entry.adaptive_limit.rate_limited();
             }
             let remaining = entry
