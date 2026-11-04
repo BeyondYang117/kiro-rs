@@ -248,6 +248,11 @@ export function CredentialCard({
                 {disabledReason}
               </p>
             )}
+            {!credential.disabled && (credential.cooldownRemainingMs ?? 0) > 0 && (
+              <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                冷却剩余约 {Math.ceil(credential.cooldownRemainingMs! / 1000)} 秒
+              </p>
+            )}
           </div>
 
           <div>
@@ -282,6 +287,9 @@ export function CredentialCard({
             >
               失败 {credential.failureCount} · 刷新失败 {credential.refreshFailureCount}
             </div>
+            {credential.inFlight !== undefined && (
+              <div className="mt-1 text-xs text-muted-foreground">在途 {credential.inFlight}</div>
+            )}
             <div
               className="mt-1 text-xs text-muted-foreground"
               title={

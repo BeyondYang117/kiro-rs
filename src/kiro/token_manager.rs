@@ -27,6 +27,10 @@ use crate::kiro::model::token_refresh::{
 use crate::kiro::model::usage_limits::UsageLimitsResponse;
 use crate::model::config::Config;
 
+mod concurrency;
+pub use concurrency::ConcurrencySnapshot;
+use concurrency::{ConcurrencyMetrics, Waiter};
+
 /// 检查 Token 是否在指定时间内过期
 pub(crate) fn is_token_expiring_within(
     credentials: &KiroCredentials,
@@ -475,6 +479,8 @@ pub struct CredentialEntrySnapshot {
     pub email: Option<String>,
     /// API 调用成功次数
     pub success_count: u64,
+    pub in_flight: u64,
+    pub cooldown_remaining_ms: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     pub last_used_at: Option<String>,
     /// 是否配置了凭据级代理
@@ -496,6 +502,7 @@ pub struct CredentialEntrySnapshot {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagerSnapshot {
+    pub concurrency: ConcurrencySnapshot,
     /// 凭据条目列表
     pub entries: Vec<CredentialEntrySnapshot>,
     /// 当前活跃凭据 ID
@@ -522,6 +529,9 @@ pub struct MultiTokenManager {
     /// 在途名额由调用上下文持有，包含 Token 获取和响应体消费。
     in_flight_slots: Arc<Semaphore>,
     waiting_slots: Semaphore,
+    /// 锁顺序：wait_queue -> entries -> current_id/load_balancing_mode。
+    wait_queue: Mutex<Vec<Waiter>>,
+    concurrency_metrics: ConcurrencyMetrics,
     capacity_changed: Arc<Notify>,
     /// 凭据文件路径（用于回写）
     credentials_path: Option<PathBuf>,
@@ -729,6 +739,8 @@ impl MultiTokenManager {
             current_id: Mutex::new(initial_id),
             in_flight_slots,
             waiting_slots,
+            wait_queue: Mutex::new(Vec::new()),
+            concurrency_metrics: ConcurrencyMetrics::default(),
             capacity_changed: Arc::new(Notify::new()),
             credentials_path,
             is_multiple_format: AtomicBool::new(is_multiple_format),
@@ -793,17 +805,29 @@ impl MultiTokenManager {
         self.entries.lock().iter().filter(|e| !e.disabled).count()
     }
 
+    fn requires_opus(model: Option<&str>) -> bool {
+        model.is_some_and(|name| name.to_ascii_lowercase().contains("opus"))
+    }
+
     /// 复用当前凭据和重新选择凭据时使用相同的模型资格检查。
     fn eligible_for_model(entry: &CredentialEntry, model: Option<&str>) -> bool {
-        !entry.disabled
-            && (!model.is_some_and(|name| name.to_ascii_lowercase().contains("opus"))
-                || entry.credentials.supports_opus())
+        !entry.disabled && (!Self::requires_opus(model) || entry.credentials.supports_opus())
+    }
+
+    fn dispatchable(&self, entry: &CredentialEntry, model: Option<&str>, now: Instant) -> bool {
+        Self::eligible_for_model(entry, model)
+            && entry.in_flight.load(Ordering::Relaxed)
+                < self.config.concurrency.max_in_flight_per_credential
+            && entry.cooldown.is_none_or(|(started, duration)| {
+                now.saturating_duration_since(started) >= duration
+            })
     }
 
     /// 检查资格、容量、冷却并预留名额都在同一临界区内完成。
     fn try_reserve_credential(
         &self,
         model: Option<&str>,
+        earlier_waiters: &[Waiter],
     ) -> anyhow::Result<(Option<ReservedCredential>, Option<Instant>)> {
         let mut entries = self.entries.lock();
         if !entries.iter().any(|e| Self::eligible_for_model(e, model)) {
@@ -843,15 +867,23 @@ impl MultiTokenManager {
                 })
             })
             .min();
+        // 按到达顺序服务可调度的等待者；模型不匹配/账号满载/冷却不阻塞后续请求。
+        if self.in_flight_slots.available_permits() == 0 {
+            return Ok((None, ready_at));
+        }
+        if !earlier_waiters.is_empty() {
+            let has_general_waiter = earlier_waiters.iter().any(|waiter| !waiter.requires_opus);
+            if entries.iter().any(|entry| {
+                self.dispatchable(entry, None, now)
+                    && (has_general_waiter || entry.credentials.supports_opus())
+            }) {
+                return Ok((None, ready_at));
+            }
+        }
         let balanced = self.load_balancing_mode.lock().as_str() == "balanced";
         let current_id = *self.current_id.lock();
         let best = eligible
-            .filter(|e| {
-                e.in_flight.load(Ordering::Relaxed)
-                    < self.config.concurrency.max_in_flight_per_credential
-                    && e.cooldown
-                        .is_none_or(|(started, duration)| now.duration_since(started) >= duration)
-            })
+            .filter(|e| self.dispatchable(e, model, now))
             .min_by_key(|e| {
                 if balanced {
                     (
@@ -886,44 +918,14 @@ impl MultiTokenManager {
         ))
     }
 
-    async fn reserve_credential(&self, model: Option<&str>) -> anyhow::Result<ReservedCredential> {
-        let deadline = tokio::time::Instant::now()
-            + StdDuration::from_secs(self.config.concurrency.wait_timeout_seconds);
-        let mut waiting_slot = None;
-        loop {
-            // 先注册通知再检查状态，避免在检查与等待之间丢失释放/管理操作通知。
-            let notified = self.capacity_changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            let (reserved, ready_at) = self.try_reserve_credential(model)?;
-            if let Some(reserved) = reserved {
-                return Ok(reserved);
-            }
-            if waiting_slot.is_none() {
-                waiting_slot = Some(
-                    self.waiting_slots
-                        .try_acquire()
-                        .map_err(|_| CapacityError::QueueFull)?,
-                );
-            }
-            let wake_at = ready_at
-                .map(tokio::time::Instant::from_std)
-                .map_or(deadline, |ready| ready.min(deadline));
-            tokio::select! {
-                _ = &mut notified => {},
-                _ = tokio::time::sleep_until(wake_at) => {},
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(CapacityError::WaitTimeout.into());
-            }
-        }
-    }
-
     /// 429 是账号级冷却，不计为认证失败；并发 429 不能缩短已有冷却。
     pub fn report_rate_limited(&self, id: u64, retry_after: Option<StdDuration>) {
         let duration = retry_after.unwrap_or_default().max(StdDuration::from_secs(
             self.config.concurrency.rate_limit_cooldown_seconds,
         ));
+        self.concurrency_metrics
+            .rate_limited_total
+            .fetch_add(1, Ordering::Relaxed);
         let mut entries = self.entries.lock();
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
             let remaining = entry
@@ -1545,11 +1547,13 @@ impl MultiTokenManager {
 
     /// 获取管理器状态快照（用于 Admin API）
     pub fn snapshot(&self) -> ManagerSnapshot {
+        let queue = self.wait_queue.lock();
         let entries = self.entries.lock();
         let current_id = *self.current_id.lock();
         let available = entries.iter().filter(|e| !e.disabled).count();
 
         ManagerSnapshot {
+            concurrency: self.concurrency_snapshot(&queue, &entries),
             entries: entries
                 .iter()
                 .map(|e| CredentialEntrySnapshot {
@@ -1592,6 +1596,8 @@ impl MultiTokenManager {
                     },
                     email: e.credentials.email.clone(),
                     success_count: e.success_count,
+                    in_flight: e.in_flight.load(Ordering::Relaxed),
+                    cooldown_remaining_ms: concurrency::cooldown_remaining_ms(e),
                     last_used_at: e.last_used_at.clone(),
                     has_proxy: e.credentials.proxy_url.is_some(),
                     proxy_url: e.credentials.proxy_url.clone(),

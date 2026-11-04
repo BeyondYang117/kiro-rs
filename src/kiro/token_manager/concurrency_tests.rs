@@ -135,6 +135,11 @@ async fn timeout_releases_waiting_capacity_and_zero_queue_fails_fast() {
         Some(&CapacityError::WaitTimeout)
     );
     assert_eq!(manager.waiting_slots.available_permits(), 1);
+    let metrics = manager.snapshot().concurrency;
+    assert_eq!(metrics.wait_timeout_total, 1);
+    assert_eq!(metrics.cancelled_wait_total, 0);
+    assert_eq!(metrics.finished_wait_total, 1);
+    assert!(metrics.total_wait_ms >= 900);
     drop(active);
     drop(manager.acquire_context(None).await.unwrap());
 
@@ -152,6 +157,140 @@ async fn timeout_releases_waiting_capacity_and_zero_queue_fails_fast() {
             .downcast_ref::<CapacityError>(),
         Some(&CapacityError::QueueFull)
     );
+}
+
+#[tokio::test]
+async fn dispatchable_waiters_keep_arrival_order_even_when_polled_in_reverse() {
+    for mode in ["balanced", "priority"] {
+        let manager = manager(
+            serde_json::json!({"loadBalancingMode":mode,"concurrency":{"maxInFlight":1}}),
+            1,
+        );
+        let active = manager.acquire_context(None).await.unwrap();
+        let mut requests = (0..4)
+            .map(|_| Box::pin(manager.acquire_context(None)))
+            .collect::<Vec<_>>();
+        for request in &mut requests {
+            assert!(futures::poll!(request.as_mut()).is_pending());
+        }
+        drop(active);
+        // 名额已经释放，刚到的调用依然不能插队。
+        let mut newcomer = Box::pin(manager.acquire_context(None));
+        assert!(futures::poll!(newcomer.as_mut()).is_pending());
+        requests.push(newcomer);
+        while !requests.is_empty() {
+            for request in requests.iter_mut().skip(1).rev() {
+                assert!(futures::poll!(request.as_mut()).is_pending());
+            }
+            let mut first = requests.remove(0);
+            match futures::poll!(first.as_mut()) {
+                std::task::Poll::Ready(Ok(context)) => drop(context),
+                _ => panic!("oldest dispatchable request must acquire the free slot"),
+            }
+        }
+        let metrics = manager.snapshot().concurrency;
+        assert_eq!(metrics.admitted_total, 6);
+        assert_eq!(metrics.queued_total, 5);
+        assert_eq!(metrics.finished_wait_total, 5);
+        assert_eq!(metrics.cancelled_wait_total, 0);
+        assert_eq!(metrics.waiting, 0);
+        assert_eq!(metrics.in_flight, 0);
+    }
+}
+
+#[tokio::test]
+async fn blocked_opus_waiter_does_not_waste_free_capacity_but_retains_priority_when_ready() {
+    for mode in ["balanced", "priority"] {
+        let manager = manager(
+            serde_json::json!({"loadBalancingMode":mode,"concurrency":{
+                "maxInFlight":2,"maxInFlightPerCredential":1}}),
+            2,
+        );
+        manager.entries.lock()[1].credentials.subscription_title = Some("KIRO FREE".into());
+        let pro = manager
+            .acquire_context(Some("claude-opus-4.6"))
+            .await
+            .unwrap();
+        let mut opus = Box::pin(manager.acquire_context(Some("claude-opus-4.6")));
+        assert!(futures::poll!(opus.as_mut()).is_pending());
+        let free = manager
+            .acquire_context(Some("claude-sonnet-4.6"))
+            .await
+            .unwrap();
+        assert_eq!(free.id, 2);
+        let mut sonnet = Box::pin(manager.acquire_context(Some("claude-sonnet-4.6")));
+        assert!(futures::poll!(sonnet.as_mut()).is_pending());
+        drop(pro);
+        assert!(futures::poll!(sonnet.as_mut()).is_pending());
+        let pro = opus.await.unwrap();
+        assert_eq!(pro.id, 1);
+        drop(free);
+        assert_eq!(sonnet.await.unwrap().id, 2);
+        drop(pro);
+    }
+}
+
+#[tokio::test]
+async fn cancelling_head_wakes_queued_successor_without_another_capacity_release() {
+    let manager = manager(serde_json::json!({"concurrency":{"maxInFlight":1}}), 1);
+    let active = manager.acquire_context(None).await.unwrap();
+    let mut head = Box::pin(manager.acquire_context(None));
+    assert!(futures::poll!(head.as_mut()).is_pending());
+    let pending = manager.clone();
+    let successor = tokio::spawn(async move { pending.acquire_context(None).await });
+    wait_for_waiters(&manager, 2).await;
+    drop(active);
+    // 后继先醒来也必须等队首，不需要依赖任务调度顺序。
+    tokio::task::yield_now().await;
+    assert!(!successor.is_finished());
+    drop(head);
+    let context = timeout(StdDuration::from_secs(1), successor)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let metrics = manager.snapshot().concurrency;
+    assert_eq!(metrics.waiting, 0);
+    assert_eq!(metrics.in_flight, 1);
+    assert_eq!(metrics.cancelled_wait_total, 1);
+    assert_eq!(metrics.finished_wait_total, 2);
+    drop(context);
+}
+
+#[tokio::test]
+async fn snapshot_distinguishes_enabled_cooling_saturated_and_deleted_active_accounts() {
+    let manager = manager(
+        serde_json::json!({"concurrency":{
+        "maxInFlight":2,"maxInFlightPerCredential":1,"maxWaiting":0}}),
+        2,
+    );
+    let active = manager.acquire_context(None).await.unwrap();
+    manager.report_rate_limited(2, Some(StdDuration::from_secs(u64::MAX)));
+    assert!(
+        manager
+            .acquire_context(None)
+            .await
+            .err()
+            .unwrap()
+            .is::<CapacityError>()
+    );
+    let snapshot = manager.snapshot();
+    assert_eq!(snapshot.available, 2);
+    assert_eq!(snapshot.entries[0].in_flight, 1);
+    assert_eq!(snapshot.entries[1].cooldown_remaining_ms, u64::MAX);
+    assert_eq!(snapshot.concurrency.cooling_credentials, 1);
+    assert_eq!(snapshot.concurrency.saturated_credentials, 1);
+    assert_eq!(snapshot.concurrency.queue_full_total, 1);
+    assert_eq!(snapshot.concurrency.rate_limited_total, 1);
+    manager.set_disabled(active.id, true).unwrap();
+    manager.delete_credential(active.id).unwrap();
+    let metrics = manager.snapshot().concurrency;
+    assert_eq!(metrics.in_flight, 1);
+    assert_eq!(metrics.saturated_credentials, 0);
+    manager.report_rate_limited(active.id, None);
+    assert_eq!(manager.snapshot().concurrency.rate_limited_total, 2);
+    drop(active);
+    assert_eq!(manager.snapshot().concurrency.in_flight, 0);
 }
 
 #[tokio::test]

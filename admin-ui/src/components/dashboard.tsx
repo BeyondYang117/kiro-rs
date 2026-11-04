@@ -33,6 +33,7 @@ import {
   DropdownMenuItem,
 } from '@/components/ui/dropdown-menu'
 import { CredentialCard } from '@/components/credential-card'
+import { ConcurrencyPanel } from '@/components/concurrency-panel'
 import { BalanceDialog } from '@/components/balance-dialog'
 import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { BatchImportDialog } from '@/components/batch-import-dialog'
@@ -730,7 +731,7 @@ export function Dashboard({ onLogout, onShowLogs }: DashboardProps) {
           </Card>
           <Card>
             <CardHeader className="px-3 pt-4 pb-2 sm:px-6">
-              <CardTitle className="text-sm font-medium text-muted-foreground">可用凭据</CardTitle>
+              <CardTitle className="text-sm font-medium text-muted-foreground">已启用凭据</CardTitle>
             </CardHeader>
             <CardContent className="px-3 pb-4 sm:px-6">
               <div className="text-2xl font-bold text-green-600">{data?.available || 0}</div>
@@ -752,6 +753,8 @@ export function Dashboard({ onLogout, onShowLogs }: DashboardProps) {
             </CardContent>
           </Card>
         </div>
+
+        {data?.concurrency && <ConcurrencyPanel metrics={data.concurrency} />}
 
         <section className="space-y-4" aria-label="凭据管理">
           <div className="flex flex-wrap items-center justify-between gap-3">

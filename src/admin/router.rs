@@ -56,3 +56,92 @@ pub fn create_admin_router(state: AdminState) -> Router {
         ))
         .with_state(state)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::admin::AdminService;
+    use crate::kiro::{model::credentials::KiroCredentials, token_manager::MultiTokenManager};
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn credential_capacity_metrics_require_admin_auth_and_include_live_account_state() {
+        let manager = Arc::new(
+            MultiTokenManager::new(
+                serde_json::from_value(serde_json::json!({"concurrency":{
+                "maxInFlight":2,"maxInFlightPerCredential":1}}))
+                .unwrap(),
+                (1..=2)
+                    .map(|id| KiroCredentials {
+                        id: Some(id),
+                        kiro_api_key: Some(format!("private-account-key-{id}")),
+                        ..Default::default()
+                    })
+                    .collect(),
+                None,
+                None,
+                true,
+            )
+            .unwrap(),
+        );
+        let active = manager.acquire_context(None).await.unwrap();
+        manager.report_rate_limited(2, None);
+        let mut pending = Box::pin(manager.acquire_context(None));
+        assert!(futures::poll!(pending.as_mut()).is_pending());
+        let app = create_admin_router(AdminState::new(
+            "admin-test-key",
+            AdminService::new(manager.clone(), ["ide".into()]),
+        ));
+        for key in [None, Some("wrong-key")] {
+            let mut request = Request::builder().uri("/credentials");
+            if let Some(key) = key {
+                request = request.header("x-api-key", key);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/credentials")
+                    .header("x-api-key", "admin-test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["available"], 2);
+        assert_eq!(value["concurrency"]["maxInFlight"], 2);
+        assert_eq!(value["concurrency"]["inFlight"], 1);
+        assert_eq!(value["concurrency"]["waiting"], 1);
+        assert_eq!(value["concurrency"]["coolingCredentials"], 1);
+        assert_eq!(value["concurrency"]["saturatedCredentials"], 1);
+        assert_eq!(value["concurrency"]["rateLimitedTotal"], 1);
+        assert_eq!(value["credentials"][0]["inFlight"], 1);
+        assert!(
+            value["credentials"][1]["cooldownRemainingMs"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(
+            !String::from_utf8(body.to_vec())
+                .unwrap()
+                .contains("private-account-key")
+        );
+        drop((pending, active));
+        assert_eq!(manager.snapshot().concurrency.cancelled_wait_total, 1);
+    }
+}

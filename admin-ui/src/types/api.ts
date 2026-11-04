@@ -1,5 +1,6 @@
 // 凭据状态响应
 export interface CredentialsStatusResponse {
+  concurrency?: ConcurrencySnapshot
   total: number
   available: number
   currentId: number
@@ -21,12 +22,35 @@ export interface CredentialStatusItem {
   apiKeyHash?: string
   maskedApiKey?: string
   successCount: number
+  inFlight?: number
+  cooldownRemainingMs?: number
   lastUsedAt: string | null
   hasProxy: boolean
   proxyUrl?: string
   refreshFailureCount: number
   disabledReason?: string
   endpoint: string
+}
+
+export interface ConcurrencySnapshot {
+  maxInFlight: number
+  maxInFlightPerCredential: number
+  maxWaiting: number
+  waitTimeoutSeconds: number
+  inFlight: number
+  waiting: number
+  coolingCredentials: number
+  saturatedCredentials: number
+  oldestWaitMs: number
+  admittedTotal: number
+  queuedTotal: number
+  queueFullTotal: number
+  waitTimeoutTotal: number
+  cancelledWaitTotal: number
+  rateLimitedTotal: number
+  finishedWaitTotal: number
+  totalWaitMs: number
+  maxWaitMs: number
 }
 
 // 余额响应

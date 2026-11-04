@@ -230,7 +230,7 @@ docker login -u abu116
 
 并发保护在单进程内生效，普通对话、流式对话、压缩摘要和 WebSearch 共用名额。名额从选择账号开始持有，覆盖 Token 获取与上游响应体读取，流结束、丢弃响应或取消调用时释放；HTTP 重试退避期间不占名额。两种模式都会跳过满载或冷却中的账号，同时保留模型资格检查。Token 刷新按账号互斥，同账号自动刷新在获取锁后复查 Token，不同账号可并行刷新。
 
-等待者在名额释放、账号管理变更或冷却到期后重新参与调度，不保证 FIFO。队列满或等待超时会返回 `503 overloaded_error` 和 `Retry-After: 1`，不消耗 Provider 的 HTTP 重试预算；已经开始的 SSE 通过错误事件报告失败。等待上限针对每次获取上游名额，既不是整个客户端请求的总超时，也不限制处于退避中的客户端请求数。并发限制不等同于每分钟请求数或 token 配额限制。
+等待者在名额释放、账号管理变更或冷却到期后重新参与调度。对当前可调度的等待者按入队顺序分配名额，新请求不能插队；如果前面的调用暂时没有符合模型、容量和冷却条件的账号，后面的调用可使用空闲账号，避免 Opus 等请求阻塞整个队列。等待被取消、超时或出错时会移出队列并唤醒后续调用。队列满或等待超时会返回 `503 overloaded_error` 和 `Retry-After: 1`，不消耗 Provider 的 HTTP 重试预算；已经开始的 SSE 通过错误事件报告失败。等待上限针对每次获取上游名额，既不是整个客户端请求的总超时，也不限制处于退避中的客户端请求数。并发限制不等同于每分钟请求数或 token 配额限制。
 
 未指定 `loadBalancingMode` 的配置现在默认使用 `balanced`；显式设置的 `priority` 保留。并发参数修改后重启生效，冷却状态仅保存在内存中。多实例共享账号池时仍需额外的跨实例协调。
 
@@ -543,6 +543,10 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
   - `GET /admin` - 访问管理页面（需要在编译前构建 `admin-ui/dist`）
 
 余额缓存有效期为 5 分钟，同时校验凭据 ID 和认证信息的哈希；更换账户、缓存时间异常或旧缓存缺少身份信息时重新查询。统计和余额缓存均使用同目录临时文件原子替换，新文件在 Unix 上使用 `0600` 权限。统计保存会串行处理并保留写入期间的新更新，保存失败后仍会重试。
+
+管理首页每 5 秒刷新并发状态：全局在途/等待数量及上限、账号冷却/满载数量、排队拒绝/超时次数、429 次数和排队耗时；账号列表展示各账号在途数量与剩余冷却时间。“已启用凭据”不等于此刻可调度，冷却与满载账号数可重叠。
+
+`GET /api/admin/credentials` 同时返回 `concurrency` 对象，包含 `inFlight`、`waiting`、`maxInFlight`、`maxInFlightPerCredential`、`maxWaiting`、`waitTimeoutSeconds`、`coolingCredentials`、`saturatedCredentials`、`oldestWaitMs`；累计指标为 `admittedTotal`、`queuedTotal`、`queueFullTotal`、`waitTimeoutTotal`、`cancelledWaitTotal`、`rateLimitedTotal`、`finishedWaitTotal`、`totalWaitMs`、`maxWaitMs`。`credentials[]` 新增 `inFlight` 和 `cooldownRemainingMs`。这些指标只针对当前进程，自启动起累计且不持久化；获准/入队次数按上游名额获取计数，不代表客户端请求数或成功次数。排队耗时包含已离队的成功、错误、超时和取消等待，不包含仍在队列中的调用；均值用 `totalWaitMs / finishedWaitTotal` 计算。全局在途数包含已删除账号尚未结束的调用。
 
 ### 调用日志与错误查询
 

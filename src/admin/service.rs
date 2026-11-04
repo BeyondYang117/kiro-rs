@@ -91,6 +91,8 @@ impl AdminService {
                 masked_api_key: entry.masked_api_key,
                 email: entry.email,
                 success_count: entry.success_count,
+                in_flight: entry.in_flight,
+                cooldown_remaining_ms: entry.cooldown_remaining_ms,
                 last_used_at: entry.last_used_at.clone(),
                 has_proxy: entry.has_proxy,
                 proxy_url: entry.proxy_url,
@@ -104,6 +106,7 @@ impl AdminService {
         credentials.sort_by_key(|c| c.priority);
 
         CredentialsStatusResponse {
+            concurrency: snapshot.concurrency,
             total: snapshot.total,
             available: snapshot.available,
             current_id: snapshot.current_id,
