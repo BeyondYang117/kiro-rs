@@ -293,6 +293,11 @@ export function CredentialCard({
                 {credential.effectiveConcurrencyLimit !== undefined && ` / 当前上限 ${credential.effectiveConcurrencyLimit}`}
               </div>
             )}
+            {credential.adaptiveProbeTarget !== undefined && (
+              <div className="mt-1 text-xs text-muted-foreground">
+                单请求探测 · 成功后上限 {credential.adaptiveProbeTarget}
+              </div>
+            )}
             <div
               className="mt-1 text-xs text-muted-foreground"
               title={

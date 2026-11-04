@@ -483,6 +483,8 @@ pub struct CredentialEntrySnapshot {
     pub in_flight: u64,
     pub cooldown_remaining_ms: u64,
     pub effective_concurrency_limit: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adaptive_probe_target: Option<u64>,
     /// 最后一次 API 调用时间（RFC3339 格式）
     pub last_used_at: Option<String>,
     /// 是否配置了凭据级代理
@@ -966,7 +968,11 @@ impl MultiTokenManager {
             if self.config.concurrency.adaptive_concurrency
                 && epoch.is_none_or(|epoch| Arc::ptr_eq(epoch, &entry.adaptive_limit.epoch))
             {
-                entry.adaptive_limit.rate_limited();
+                if entry.adaptive_limit.rate_limited() {
+                    self.concurrency_metrics
+                        .adaptive_reduction_total
+                        .fetch_add(1, Ordering::Relaxed);
+                }
             }
             let remaining = entry
                 .cooldown
@@ -1639,6 +1645,12 @@ impl MultiTokenManager {
                     in_flight: e.in_flight.load(Ordering::Relaxed),
                     cooldown_remaining_ms: concurrency::cooldown_remaining_ms(e),
                     effective_concurrency_limit: self.effective_concurrency_limit(e),
+                    adaptive_probe_target: self
+                        .config
+                        .concurrency
+                        .adaptive_concurrency
+                        .then(|| e.adaptive_limit.probe_target())
+                        .flatten(),
                     last_used_at: e.last_used_at.clone(),
                     has_proxy: e.credentials.proxy_url.is_some(),
                     proxy_url: e.credentials.proxy_url.clone(),

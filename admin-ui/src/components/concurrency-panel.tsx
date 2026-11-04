@@ -47,7 +47,10 @@ export function ConcurrencyPanel({ metrics }: { metrics: ConcurrencySnapshot }) 
           <div>
             <dt className="text-xs text-muted-foreground">排队拒绝 / 等待超时</dt>
             <dd className="mt-1 text-xl font-semibold tabular-nums">{metrics.queueFullTotal.toLocaleString()} / {metrics.waitTimeoutTotal.toLocaleString()}</dd>
-            <p className="mt-2 text-xs text-muted-foreground">429 共 {metrics.rateLimitedTotal.toLocaleString()} 次</p>
+            <p className="mt-2 text-xs text-muted-foreground">
+              429 共 {metrics.rateLimitedTotal.toLocaleString()} 次
+              {metrics.adaptiveConcurrency && ` · 降档 ${(metrics.adaptiveReductionTotal ?? 0).toLocaleString()} 次`}
+            </p>
           </div>
         </dl>
         <p className="mt-4 border-t pt-3 text-xs leading-relaxed text-muted-foreground">

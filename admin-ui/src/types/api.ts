@@ -25,6 +25,7 @@ export interface CredentialStatusItem {
   inFlight?: number
   cooldownRemainingMs?: number
   effectiveConcurrencyLimit?: number
+  adaptiveProbeTarget?: number
   lastUsedAt: string | null
   hasProxy: boolean
   proxyUrl?: string
@@ -51,6 +52,7 @@ export interface ConcurrencySnapshot {
   waitTimeoutTotal: number
   cancelledWaitTotal: number
   rateLimitedTotal: number
+  adaptiveReductionTotal?: number
   finishedWaitTotal: number
   totalWaitMs: number
   maxWaitMs: number

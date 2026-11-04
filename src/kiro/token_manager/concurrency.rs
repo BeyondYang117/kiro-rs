@@ -23,6 +23,7 @@ pub struct ConcurrencySnapshot {
     pub wait_timeout_total: u64,
     pub cancelled_wait_total: u64,
     pub rate_limited_total: u64,
+    pub adaptive_reduction_total: u64,
     /// 所有已离队调用（含取消和错误）的耗时汇总；不含仍在等待的调用。
     pub finished_wait_total: u64,
     pub total_wait_ms: u64,
@@ -47,16 +48,22 @@ impl AdaptiveLimit {
         }
     }
 
-    pub(super) fn rate_limited(&mut self) {
+    pub(super) fn rate_limited(&mut self) -> bool {
+        let previous_limit = self.limit;
         self.limit = (self.limit / 2).max(1);
         self.probing = true;
         self.successes = 0;
         // 限流前已在途请求的迟到成功不能推动本轮恢复。
         self.epoch = Arc::new(());
+        self.limit < previous_limit
     }
 
     fn effective_limit(&self) -> u64 {
         if self.probing { 1 } else { self.limit }
+    }
+
+    pub(super) fn probe_target(&self) -> Option<u64> {
+        self.probing.then_some(self.limit)
     }
 
     fn succeeded(&mut self, maximum: u64) {
@@ -80,6 +87,7 @@ pub(super) struct ConcurrencyMetrics {
     wait_timeout_total: AtomicU64,
     cancelled_wait_total: AtomicU64,
     pub(super) rate_limited_total: AtomicU64,
+    pub(super) adaptive_reduction_total: AtomicU64,
     finished_wait_total: AtomicU64,
     total_wait_ms: AtomicU64,
     max_wait_ms: AtomicU64,
@@ -220,6 +228,7 @@ impl MultiTokenManager {
             wait_timeout_total: metrics.wait_timeout_total.load(Ordering::Relaxed),
             cancelled_wait_total: metrics.cancelled_wait_total.load(Ordering::Relaxed),
             rate_limited_total: metrics.rate_limited_total.load(Ordering::Relaxed),
+            adaptive_reduction_total: metrics.adaptive_reduction_total.load(Ordering::Relaxed),
             finished_wait_total: metrics.finished_wait_total.load(Ordering::Relaxed),
             total_wait_ms: metrics.total_wait_ms.load(Ordering::Relaxed),
             max_wait_ms: metrics.max_wait_ms.load(Ordering::Relaxed),
