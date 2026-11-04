@@ -25,7 +25,7 @@ use super::middleware::AppState;
 use super::stream::{BufferedStreamContext, SseEvent, StreamContext};
 use super::types::{
     CountTokensRequest, CountTokensResponse, ErrorResponse, Message, MessagesRequest, Model,
-    ModelsResponse, OutputConfig, Thinking,
+    ModelsResponse, OutputConfig, SystemMessage, Thinking,
 };
 use super::upstream::{ResponsePolicy, response_events};
 use super::websearch;
@@ -459,63 +459,115 @@ fn model_input_limit(model: &str) -> i32 {
 }
 
 /// 两个入口以及压缩后续请求共享相同的校验规则。
-pub(super) fn validate_request(payload: &MessagesRequest) -> Result<(), &'static str> {
+fn validate_and_normalize_request(payload: &mut MessagesRequest) -> Result<(), String> {
     if payload.max_tokens <= 0 {
-        return Err("max_tokens must be greater than zero");
+        return Err("max_tokens must be greater than zero".into());
     }
-    validate_message_input(&payload.model, &payload.messages)?;
+    normalize_message_input(&payload.model, &mut payload.system, &mut payload.messages)?;
     if let Some(thinking) = &payload.thinking
         && !matches!(
             thinking.thinking_type.as_str(),
             "enabled" | "adaptive" | "disabled"
         )
     {
-        return Err("thinking.type must be enabled, adaptive, or disabled");
+        return Err("thinking.type must be enabled, adaptive, or disabled".into());
     }
     if let Some(config) = &payload.output_config {
         let allowed = model_capabilities(&payload.model)["effort"][&config.effort]["supported"]
             .as_bool()
             == Some(true);
         if !config.effort.is_empty() && !allowed {
-            return Err("output_config.effort is unsupported for the requested model");
+            return Err("output_config.effort is unsupported for the requested model".into());
         }
     }
     Ok(())
 }
 
-/// 在历史规范化、远程计数及工具分流之前校验，避免错误内容被静默丢弃。
-fn validate_message_input(model: &str, messages: &[Message]) -> Result<(), &'static str> {
+/// 先完整校验，再把兼容客户端内嵌的指令移入顶层 system。
+/// 普通消息仍然保留 user/assistant 角色，避免转换器静默丢弃未知角色。
+fn normalize_message_input(
+    model: &str,
+    system: &mut Option<Vec<SystemMessage>>,
+    messages: &mut Vec<Message>,
+) -> Result<(), String> {
     if model.trim().is_empty() {
-        return Err("model must not be empty");
+        return Err("model must not be empty".into());
     }
     if messages.is_empty() {
-        return Err("messages must contain at least one message");
+        return Err("messages must contain at least one message".into());
     }
-    for message in messages {
-        if !matches!(message.role.as_str(), "user" | "assistant") {
-            return Err("message.role must be user or assistant");
+    for (index, message) in messages.iter().enumerate() {
+        let instruction = matches!(message.role.as_str(), "system" | "developer");
+        if !instruction && !matches!(message.role.as_str(), "user" | "assistant") {
+            let role: String = message.role.chars().take(64).collect();
+            return Err(format!(
+                "messages[{index}].role is unsupported: {}; expected user or assistant (system/developer text instructions are also accepted)",
+                json!(role)
+            ));
         }
         match &message.content {
             serde_json::Value::String(_) => {}
             serde_json::Value::Array(blocks) => {
-                for block in blocks {
+                for (block_index, block) in blocks.iter().enumerate() {
                     let Some(kind) = block
                         .get("type")
                         .and_then(serde_json::Value::as_str)
                         .filter(|kind| !kind.trim().is_empty())
                     else {
-                        return Err("content blocks must be objects with a non-empty type string");
+                        return Err(format!(
+                            "messages[{index}].content[{block_index}] must be an object with a non-empty type string"
+                        ));
                     };
+                    if instruction && kind != "text" {
+                        return Err(format!(
+                            "messages[{index}].content[{block_index}]: system/developer messages only support text blocks"
+                        ));
+                    }
                     if kind == "text"
                         && !block.get("text").is_some_and(serde_json::Value::is_string)
                     {
-                        return Err("text blocks must contain a text string");
+                        return Err(format!(
+                            "messages[{index}].content[{block_index}] must contain a text string"
+                        ));
                     }
                 }
             }
-            _ => return Err("message.content must be a string or an array of content blocks"),
+            _ => {
+                return Err(format!(
+                    "messages[{index}].content must be a string or an array of content blocks"
+                ));
+            }
         }
     }
+    if !messages
+        .iter()
+        .any(|message| matches!(message.role.as_str(), "user" | "assistant"))
+    {
+        return Err("messages must contain at least one user or assistant message in addition to system/developer instructions".into());
+    }
+    messages.retain(|message| {
+        if !matches!(message.role.as_str(), "system" | "developer") {
+            return true;
+        }
+        let instructions = system.get_or_insert_with(Vec::new);
+        match &message.content {
+            serde_json::Value::String(text) => {
+                instructions.push(SystemMessage { text: text.clone() })
+            }
+            serde_json::Value::Array(blocks) => {
+                instructions.extend(blocks.iter().map(|block| {
+                    SystemMessage {
+                        text: block["text"]
+                            .as_str()
+                            .expect("validated text block")
+                            .to_owned(),
+                    }
+                }));
+            }
+            _ => unreachable!("validated message content"),
+        }
+        false
+    });
     Ok(())
 }
 
@@ -525,7 +577,7 @@ pub async fn post_messages(
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
     crate::request_log::request_metadata(&payload.model, payload.stream);
-    if let Err(message) = validate_request(&payload) {
+    if let Err(message) = validate_and_normalize_request(&mut payload) {
         return super::compaction::invalid_request(message);
     }
 
@@ -544,7 +596,7 @@ pub(super) async fn post_messages_inner(
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
     crate::request_log::request_metadata(&payload.model, payload.stream);
-    if let Err(message) = validate_request(&payload) {
+    if let Err(message) = validate_and_normalize_request(&mut payload) {
         return super::compaction::invalid_request(message);
     }
 
@@ -1075,7 +1127,9 @@ pub async fn count_tokens(
     JsonExtractor(mut payload): JsonExtractor<CountTokensRequest>,
 ) -> impl IntoResponse {
     crate::request_log::request_metadata(&payload.model, false);
-    if let Err(message) = validate_message_input(&payload.model, &payload.messages) {
+    if let Err(message) =
+        normalize_message_input(&payload.model, &mut payload.system, &mut payload.messages)
+    {
         return super::compaction::invalid_request(message);
     }
     if let Err(message) = super::compaction::normalize_history(&mut payload.messages) {
@@ -1111,7 +1165,7 @@ pub async fn post_messages_cc(
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
     crate::request_log::request_metadata(&payload.model, payload.stream);
-    if let Err(message) = validate_request(&payload) {
+    if let Err(message) = validate_and_normalize_request(&mut payload) {
         return super::compaction::invalid_request(message);
     }
 
@@ -1130,7 +1184,7 @@ pub(super) async fn post_messages_cc_inner(
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
     crate::request_log::request_metadata(&payload.model, payload.stream);
-    if let Err(message) = validate_request(&payload) {
+    if let Err(message) = validate_and_normalize_request(&mut payload) {
         return super::compaction::invalid_request(message);
     }
 
@@ -1370,6 +1424,55 @@ fn create_buffered_sse_stream(
 #[cfg(test)]
 mod model_capability_tests {
     use super::model_capabilities;
+
+    #[test]
+    fn instruction_normalization_is_idempotent_and_keeps_conversation_blocks() {
+        let mut payload: super::MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"claude-sonnet-5-5", "max_tokens":1024, "system":"top-level",
+            "messages":[
+                {"role":"system", "content":"system instructions"},
+                {"role":"user", "content":"question"},
+                {"role":"developer", "content":[{"type":"text", "text":"developer instructions"}]},
+                {"role":"assistant", "content":[{"type":"tool_use", "id":"t1", "name":"read", "input":{}}]},
+                {"role":"user", "content":[{"type":"tool_result", "tool_use_id":"t1", "content":"done"}]}
+            ]
+        })).unwrap();
+        let original = payload.messages.clone();
+        for _ in 0..2 {
+            super::validate_and_normalize_request(&mut payload).unwrap();
+            assert_eq!(
+                payload
+                    .system
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|part| part.text.as_str())
+                    .collect::<Vec<_>>(),
+                ["top-level", "system instructions", "developer instructions"]
+            );
+            assert_eq!(
+                serde_json::to_value(&payload.messages).unwrap(),
+                serde_json::to_value([&original[1], &original[3], &original[4]]).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn role_errors_identify_the_message_without_copying_its_content() {
+        for role in ["tool", "function", "unknown", ""] {
+            let mut payload: super::MessagesRequest = serde_json::from_value(serde_json::json!({
+                "model":"claude-sonnet-5-5", "max_tokens":1024,
+                "messages":[{"role":"user", "content":"hi"}, {"role":role, "content":"private-body-sentinel"}]
+            })).unwrap();
+            let error = super::validate_and_normalize_request(&mut payload).unwrap_err();
+            assert!(error.contains("messages[1].role"), "{error}");
+            assert!(
+                error.contains(&serde_json::json!(role).to_string()),
+                "{error}"
+            );
+            assert!(!error.contains("private-body-sentinel"));
+        }
+    }
 
     #[tokio::test]
     async fn overload_errors_keep_503_and_retry_after_for_initial_and_buffered_responses() {

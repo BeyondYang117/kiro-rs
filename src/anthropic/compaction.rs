@@ -2383,7 +2383,14 @@ mod tests {
             json!({"max_tokens":-1}),
             json!({"model":"   "}),
             json!({"messages":[]}),
-            json!({"messages":[{"role":"system", "content":"silently dropped"},
+            json!({"messages":[{"role":"unknown", "content":"silently dropped"},
+                {"role":"user", "content":"hi"}]}),
+            json!({"messages":[{"role":"system", "content":"instructions only"}]}),
+            json!({"messages":[{"role":"developer", "content":[{"type":"image", "source":{}}]},
+                {"role":"user", "content":"hi"}]}),
+            json!({"messages":[{"role":"system", "content":[{"type":"text", "text":42}]},
+                {"role":"user", "content":"hi"}]}),
+            json!({"messages":[{"role":"tool", "content":"unpaired result"},
                 {"role":"user", "content":"hi"}]}),
             json!({"messages":[{"role":"user", "content":null}]}),
             json!({"messages":[{"role":"user", "content":123}]}),
@@ -2470,6 +2477,92 @@ mod tests {
                 serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
                     .unwrap();
             assert_eq!(body["error"]["type"], "invalid_request_error");
+        }
+    }
+
+    #[tokio::test]
+    async fn embedded_instructions_reach_upstream_and_match_token_counting() {
+        for cc in [false, true] {
+            for streaming in [false, true] {
+                for mode in ["normal", "compact", "threshold"] {
+                    let upstream =
+                        mock(frame("assistantResponseEvent", json!({"content":"hello"}))).await;
+                    let mut payload = json!({
+                        "model":"claude-sonnet-5-5", "max_tokens":1024, "stream":streaming,
+                        "system":"top-level instructions",
+                        "messages":[
+                            {"role":"system", "content":"embedded system"},
+                            {"role":"developer", "content":[
+                                {"type":"text", "text":"developer first"},
+                                {"type":"text", "text":"developer second"}
+                            ]},
+                            {"role":"user", "content":"hi"}
+                        ]
+                    });
+                    match mode {
+                        "compact" => payload["compaction"] = json!({"type":"summarize"}),
+                        "threshold" => {
+                            payload["context_management"] =
+                                json!({"edits":[{"type":"compact_20260112"}]})
+                        }
+                        _ => {}
+                    }
+                    let response = if cc {
+                        super::super::handlers::post_messages_cc(
+                            State(upstream.state.clone()),
+                            Json(request(payload.clone())),
+                        )
+                        .await
+                    } else {
+                        super::super::handlers::post_messages(
+                            State(upstream.state.clone()),
+                            Json(request(payload.clone())),
+                        )
+                        .await
+                    };
+                    assert_eq!(response.status(), StatusCode::OK, "{mode}");
+                    let _ = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                    {
+                        let requests = upstream.requests.lock().unwrap();
+                        assert_eq!(requests.len(), 1, "{mode}");
+                        assert_eq!(
+                            requests[0]["conversationState"]["history"][0]["userInputMessage"]["content"],
+                            "top-level instructions\nembedded system\ndeveloper first\ndeveloper second"
+                        );
+                        if mode != "compact" {
+                            assert_eq!(
+                                requests[0]["conversationState"]["currentMessage"]["userInputMessage"]
+                                    ["content"],
+                                "hi"
+                            );
+                        }
+                    }
+                    let mut counts = Vec::new();
+                    for normalized in [false, true] {
+                        let mut count_payload = payload.clone();
+                        if normalized {
+                            count_payload["system"] = json!([
+                                {"text":"top-level instructions"}, {"text":"embedded system"},
+                                {"text":"developer first"}, {"text":"developer second"}
+                            ]);
+                            count_payload["messages"] = json!([{"role":"user", "content":"hi"}]);
+                        }
+                        let response = super::super::handlers::count_tokens(Json(
+                            serde_json::from_value(count_payload).unwrap(),
+                        ))
+                        .await
+                        .into_response();
+                        assert_eq!(response.status(), StatusCode::OK);
+                        let body: Value = serde_json::from_slice(
+                            &to_bytes(response.into_body(), 1_000_000).await.unwrap(),
+                        )
+                        .unwrap();
+                        counts.push(body["input_tokens"].as_u64().unwrap());
+                    }
+                    assert!(counts[0] > 0);
+                    assert_eq!(counts[0], counts[1]);
+                }
+            }
         }
     }
 
