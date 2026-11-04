@@ -67,6 +67,8 @@ export interface ConcurrencySnapshot {
   finishedWaitTotal: number
   totalWaitMs: number
   maxWaitMs: number
+  p50WaitMs?: number
+  p95WaitMs?: number
 }
 
 // 余额响应

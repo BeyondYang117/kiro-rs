@@ -81,7 +81,7 @@ export function ConcurrencyPanel({ metrics }: { metrics: ConcurrencySnapshot }) 
         )}
         <p className="mt-4 border-t pt-3 text-xs leading-relaxed text-muted-foreground">
           累计获准 {metrics.admittedTotal.toLocaleString()} 次 · 入队 {metrics.queuedTotal.toLocaleString()} 次 · 取消等待 {metrics.cancelledWaitTotal.toLocaleString()} 次
-          {' · '}已结束排队平均 {averageWait.toFixed(2)} 秒 / 最长 {(metrics.maxWaitMs / 1000).toFixed(2)} 秒
+          {' · '}平均 {averageWait.toFixed(2)} 秒 · P50 {((metrics.p50WaitMs ?? 0) / 1000).toFixed(2)} 秒 · P95 {((metrics.p95WaitMs ?? 0) / 1000).toFixed(2)} 秒 · 最长 {(metrics.maxWaitMs / 1000).toFixed(2)} 秒
         </p>
       </CardContent>
     </Card>

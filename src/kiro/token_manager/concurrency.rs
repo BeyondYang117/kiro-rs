@@ -38,6 +38,8 @@ pub struct ConcurrencySnapshot {
     pub finished_wait_total: u64,
     pub total_wait_ms: u64,
     pub max_wait_ms: u64,
+    pub p50_wait_ms: u64,
+    pub p95_wait_ms: u64,
 }
 
 /// 账号级 AIMD：429 后减半、冷却后单请求探测，每个成功窗口增加一个名额。
@@ -105,6 +107,39 @@ pub(super) struct ConcurrencyMetrics {
     finished_wait_total: AtomicU64,
     total_wait_ms: AtomicU64,
     max_wait_ms: AtomicU64,
+    wait_histogram: [AtomicU64; 10],
+}
+
+const WAIT_BUCKET_UPPER_MS: [u64; 9] = [10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000];
+
+fn wait_bucket(wait_ms: u64) -> usize {
+    WAIT_BUCKET_UPPER_MS
+        .iter()
+        .position(|upper| wait_ms <= *upper)
+        .unwrap_or(WAIT_BUCKET_UPPER_MS.len())
+}
+
+fn histogram_percentile(
+    histogram: &[u64; 10],
+    count: u64,
+    percentile: u64,
+    max_wait_ms: u64,
+) -> u64 {
+    if count == 0 {
+        return 0;
+    }
+    let target = count.saturating_mul(percentile).saturating_add(99) / 100;
+    let mut cumulative = 0u64;
+    for (index, bucket) in histogram.iter().enumerate() {
+        cumulative = cumulative.saturating_add(*bucket);
+        if cumulative >= target {
+            return WAIT_BUCKET_UPPER_MS
+                .get(index)
+                .copied()
+                .unwrap_or(max_wait_ms);
+        }
+    }
+    max_wait_ms
 }
 
 pub(super) struct Waiter {
@@ -132,6 +167,7 @@ impl Drop for WaitingGuard<'_> {
         let wait_ms = millis(self.started.elapsed());
         metrics.total_wait_ms.fetch_add(wait_ms, Ordering::Relaxed);
         metrics.max_wait_ms.fetch_max(wait_ms, Ordering::Relaxed);
+        metrics.wait_histogram[wait_bucket(wait_ms)].fetch_add(1, Ordering::Relaxed);
         metrics.finished_wait_total.fetch_add(1, Ordering::Relaxed);
         if !self.completed {
             metrics.cancelled_wait_total.fetch_add(1, Ordering::Relaxed);
@@ -203,6 +239,10 @@ impl MultiTokenManager {
     ) -> ConcurrencySnapshot {
         let settings = &self.config.concurrency;
         let metrics = &self.concurrency_metrics;
+        let wait_histogram =
+            std::array::from_fn(|index| metrics.wait_histogram[index].load(Ordering::Relaxed));
+        let finished_wait_total = metrics.finished_wait_total.load(Ordering::Relaxed);
+        let max_wait_ms = metrics.max_wait_ms.load(Ordering::Relaxed);
         let global_available_slots = self.in_flight_slots.available_permits();
         let now = Instant::now();
         let mut available_slots = 0usize;
@@ -279,9 +319,21 @@ impl MultiTokenManager {
             affinity_miss_total: metrics.affinity_miss_total.load(Ordering::Relaxed),
             affinity_fallback_total: metrics.affinity_fallback_total.load(Ordering::Relaxed),
             affinity_switch_total: metrics.affinity_switch_total.load(Ordering::Relaxed),
-            finished_wait_total: metrics.finished_wait_total.load(Ordering::Relaxed),
+            finished_wait_total,
             total_wait_ms: metrics.total_wait_ms.load(Ordering::Relaxed),
-            max_wait_ms: metrics.max_wait_ms.load(Ordering::Relaxed),
+            max_wait_ms,
+            p50_wait_ms: histogram_percentile(
+                &wait_histogram,
+                finished_wait_total,
+                50,
+                max_wait_ms,
+            ),
+            p95_wait_ms: histogram_percentile(
+                &wait_histogram,
+                finished_wait_total,
+                95,
+                max_wait_ms,
+            ),
         }
     }
 
@@ -378,5 +430,23 @@ impl MultiTokenManager {
                 return Err(CapacityError::WaitTimeout.into());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{histogram_percentile, wait_bucket};
+
+    #[test]
+    fn wait_histogram_reports_bounded_percentiles_and_overflow_maximum() {
+        let mut histogram = [0; 10];
+        for wait_ms in [0, 10, 11, 25, 26, 5_001, 9_000] {
+            histogram[wait_bucket(wait_ms)] += 1;
+        }
+        assert_eq!(histogram_percentile(&histogram, 0, 50, 9_000), 0);
+        assert_eq!(histogram_percentile(&histogram, 7, 50, 9_000), 25);
+        assert_eq!(histogram_percentile(&histogram, 7, 95, 9_000), 9_000);
+        assert_eq!(wait_bucket(5_000), 8);
+        assert_eq!(wait_bucket(5_001), 9);
     }
 }
