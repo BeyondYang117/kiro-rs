@@ -20,7 +20,7 @@ function Status({ record }: { record: LogRecord }) {
 }
 
 function ResponseDiagnostics({ data }: { data: UpstreamResponseDiagnostics }) {
-  const outcomes: Record<string, string> = { empty: '无有效内容', decode_error: '解码失败', read_error: '读取失败', incomplete: '响应不完整', prefix_limit: '空内容超出限制', limited: '达到上游限制', success: '成功' }
+  const outcomes: Record<string, string> = { empty: '无有效内容', refusal: '上游拒绝', decode_error: '解码失败', read_error: '读取失败', incomplete: '响应不完整', prefix_limit: '空内容超出限制', limited: '达到上游限制', success: '成功' }
   return <div className="mt-3 space-y-2 rounded-md bg-muted/30 p-3 text-xs">
     <p className="font-medium">响应诊断 · {outcomes[data.outcome] ?? data.outcome}</p>
     <dl className="grid gap-2 sm:grid-cols-2">

@@ -420,7 +420,9 @@ async fn summarize(
         token::count_all_tokens(&payload.model, &payload.system, &payload.messages, &None).await
             as i32;
     while let Some(batch) = events.next().await {
-        for event in batch.map_err(|error| upstream_error(error.to_string()))? {
+        for event in
+            batch.map_err(|error| Box::new(super::handlers::upstream_error_response(error)))?
+        {
             match event {
                 Event::AssistantResponse(response) => text.push_str(&response.content),
                 Event::ToolUse(_) => stop_reason = "tool_use",
@@ -1083,6 +1085,119 @@ mod tests {
                 "stream":streaming, "messages":[{"role":"user", "content":"private-prompt-sentinel"}]}).to_string()))
             .unwrap();
         crate::request_log::tests::capture_request(app, req).await
+    }
+
+    fn refusal_response() -> Vec<u8> {
+        let mut bytes = frame("contextUsageEvent", json!({"contextUsagePercentage":20.0}));
+        bytes.extend(frame(
+            "metadataEvent",
+            json!({
+                "stopReason":"guardrail_intervened",
+                "stopDetails":{"refusal":{
+                    "category":"CONTENT_POLICY",
+                    "explanation":"Request blocked by upstream policy."
+                }}
+            }),
+        ));
+        bytes
+    }
+
+    async fn assert_refusal_response(response: Response, streaming: bool) {
+        assert_eq!(
+            response.status(),
+            if streaming {
+                StatusCode::OK
+            } else {
+                StatusCode::BAD_REQUEST
+            }
+        );
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("invalid_request_error"), "{text}");
+        assert!(text.contains("Upstream refused the request"), "{text}");
+        assert!(text.contains("CONTENT_POLICY"), "{text}");
+        assert!(
+            text.contains("Request blocked by upstream policy."),
+            "{text}"
+        );
+        assert!(!text.contains("Empty upstream response"), "{text}");
+        assert!(!text.contains("event: message_stop"), "{text}");
+        assert!(!text.contains("event: message_delta"), "{text}");
+        if streaming {
+            assert_eq!(text.matches("event: error\n").count(), 1, "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn upstream_refusals_fail_without_empty_retries_or_tool_recovery() {
+        for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+            for streaming in [false, true] {
+                for pending_tool in [false, true] {
+                    let mut bytes = if pending_tool {
+                        truncated_write()
+                    } else {
+                        Vec::new()
+                    };
+                    bytes.extend(refusal_response());
+                    let mut upstream = mock_scripted(vec![bytes, recovered_write()]).await;
+                    upstream.state.cc_buffered_stream = buffered;
+                    let response =
+                        dispatch(upstream.state.clone(), write_request(streaming), cc).await;
+                    assert_refusal_response(response, streaming).await;
+                    assert_eq!(upstream.requests.lock().unwrap().len(), 1);
+                    assert_eq!(upstream.manager.snapshot().entries[0].success_count, 0);
+                    assert_eq!(upstream.manager.snapshot().available, 1);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn summary_refusals_keep_the_terminal_error_and_do_not_continue() {
+        for cc in [false, true] {
+            for streaming in [false, true] {
+                let upstream = mock_scripted(vec![refusal_response(), recovered_write()]).await;
+                let response =
+                    handle_request(upstream.state.clone(), compact_request(streaming), cc).await;
+                assert_refusal_response(response, streaming).await;
+                assert_eq!(upstream.requests.lock().unwrap().len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn refusal_logs_identify_the_cause_and_redact_secrets() {
+        for streaming in [false, true] {
+            let bytes = frame(
+                "metadataEvent",
+                json!({
+                    "stopReason":"refusal",
+                    "stopDetails":{"refusal":{
+                        "category":"CONTENT_POLICY",
+                        "explanation":"Blocked. accessToken=private-token-sentinel"
+                    }}
+                }),
+            );
+            let upstream = mock_scripted(vec![bytes]).await;
+            let record = logged_completion(&upstream, streaming).await;
+            assert_eq!(record["status"], "error");
+            assert_eq!(record["httpStatus"], if streaming { 200 } else { 400 });
+            let attempts = record["upstreamAttempts"].as_array().unwrap();
+            assert_eq!(attempts.len(), 1);
+            assert_eq!(attempts[0]["status"], 200);
+            assert_eq!(attempts[0]["responseDiagnostics"]["outcome"], "refusal");
+            assert_eq!(
+                attempts[0]["responseDiagnostics"]["eventTypes"]["metadataEvent"],
+                1
+            );
+            let error = attempts[0]["error"].as_str().unwrap();
+            assert!(error.contains("CONTENT_POLICY"), "{error}");
+            assert!(error.contains("Blocked."), "{error}");
+            assert!(error.contains("[REDACTED]"), "{error}");
+            let encoded = record.to_string();
+            assert!(!encoded.contains("private-token-sentinel"));
+            assert!(!encoded.contains("private-prompt-sentinel"));
+        }
     }
 
     #[tokio::test]

@@ -786,7 +786,9 @@ fn create_ping_sse() -> Bytes {
 fn upstream_error_event(error: Error) -> SseEvent {
     crate::request_log::error_details(format!("{error:#}"));
     tracing::error!("Invalid upstream response: {error:#}");
-    let error_type = if error.is::<super::upstream::ToolCallError>() {
+    let error_type = if error.is::<super::upstream::ToolCallError>()
+        || error.is::<super::upstream::UpstreamRefusalError>()
+    {
         "invalid_request_error"
     } else {
         "api_error"
@@ -800,13 +802,15 @@ fn upstream_error_event(error: Error) -> SseEvent {
     )
 }
 
-fn upstream_error_response(error: Error) -> Response {
+pub(super) fn upstream_error_response(error: Error) -> Response {
     if error.is::<crate::kiro::token_manager::CapacityError>() {
         return map_provider_error(error);
     }
-    // Replaying a malformed/truncated tool call unchanged will not repair it.
+    // Replaying a malformed/truncated tool call or an explicit refusal will not repair it.
     // Avoid SDK retries intended for transient 5xx errors.
-    let (status, error_type) = if error.is::<super::upstream::ToolCallError>() {
+    let (status, error_type) = if error.is::<super::upstream::ToolCallError>()
+        || error.is::<super::upstream::UpstreamRefusalError>()
+    {
         (StatusCode::BAD_REQUEST, "invalid_request_error")
     } else {
         (StatusCode::BAD_GATEWAY, "api_error")

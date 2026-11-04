@@ -18,6 +18,44 @@ const MAX_EMPTY_PREFIX_BYTES: usize = 1024 * 1024;
 // Bound memory while withholding tool calls until their arguments are valid.
 const MAX_TOOL_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
+/// An explicit upstream refusal is terminal; replaying the request cannot repair it.
+#[derive(Debug)]
+pub(super) struct UpstreamRefusalError(String);
+
+impl UpstreamRefusalError {
+    fn from_metadata(metadata: &crate::kiro::model::events::MetadataEvent) -> Self {
+        let mut message = "Upstream refused the request".to_owned();
+        if let Some(refusal) = metadata
+            .stop_details
+            .as_ref()
+            .and_then(|details| details.refusal.as_ref())
+        {
+            if let Some(category) = &refusal.category {
+                message.push_str(&format!(" (category: {category})"));
+            }
+            if let Some(explanation) = &refusal.explanation {
+                message.push_str(": ");
+                message.push_str(explanation);
+            }
+        }
+        Self(
+            crate::request_log::redact(&message)
+                .chars()
+                .take(2048)
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect(),
+        )
+    }
+}
+
+impl std::fmt::Display for UpstreamRefusalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UpstreamRefusalError {}
+
 #[derive(Debug)]
 pub(super) enum ToolCallError {
     Invalid(String),
@@ -173,7 +211,11 @@ pub(super) fn response_events(
                             state.decoder.record_failure(
                                 state.credential_id,
                                 state.retries + usize::from(state.recoveries) + 1,
-                                "decode_error",
+                                if error.is::<UpstreamRefusalError>() {
+                                    "refusal"
+                                } else {
+                                    "decode_error"
+                                },
                                 format!("{error:#}"),
                             );
                             if state
@@ -555,6 +597,9 @@ impl UpstreamResponseDecoder {
                 _ => {}
             }
             match &event {
+                Event::Metadata(metadata) if metadata.is_refusal() => {
+                    return Err(UpstreamRefusalError::from_metadata(metadata).into());
+                }
                 Event::ContextUsage(usage) if usage.context_usage_percentage >= 100.0 => {
                     self.context_full = true;
                 }
