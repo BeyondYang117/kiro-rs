@@ -162,12 +162,11 @@ pub fn map_model(model: &str) -> Option<String> {
     }
 }
 
+/// Proxy defaults follow Claude Code's model-specific effort choices.
 pub fn default_effort(model: &str) -> &'static str {
     match map_model(model).as_deref() {
-        Some("claude-opus-5.5" | "claude-haiku-5.5") => "medium",
-        Some("claude-fable-5.1" | "claude-opus-5" | "claude-sonnet-5" | "claude-sonnet-5.5") => {
-            "high"
-        }
+        Some("claude-opus-5.5" | "claude-sonnet-5.5" | "claude-haiku-5.5") => "medium",
+        Some("claude-opus-4.7") => "xhigh",
         _ => "high",
     }
 }

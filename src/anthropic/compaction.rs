@@ -934,6 +934,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn claude_code_effort_reaches_upstream_across_response_modes() {
+        for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+            for streaming in [false, true] {
+                for effort in ["low", "medium", "high", "xhigh", "max"] {
+                    for thinking in [None, Some("adaptive"), Some("enabled"), Some("disabled")] {
+                        let mut upstream =
+                            mock(frame("assistantResponseEvent", json!({"content":"answer"})))
+                                .await;
+                        upstream.state.cc_buffered_stream = buffered;
+                        let mut payload = json!({"model":"claude-haiku-5-5", "max_tokens":1024,
+                            "stream":streaming, "messages":[{"role":"user", "content":"question"}],
+                            "output_config":{"effort":effort}});
+                        if let Some(kind) = thinking {
+                            payload["thinking"] = json!({"type":kind, "budget_tokens":2048});
+                        }
+                        let response = dispatch(upstream.state.clone(), request(payload), cc).await;
+                        assert_eq!(response.status(), StatusCode::OK);
+                        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                        let text = String::from_utf8(body.to_vec()).unwrap();
+                        assert!(text.contains("answer"));
+                        assert!(!text.contains("event: error"));
+                        let requests = upstream.requests.lock().unwrap();
+                        assert_eq!(requests.len(), 1);
+                        let sent = &requests[0];
+                        assert!(sent.get("additionalModelRequestFields").is_none());
+                        let prefix =
+                            sent["conversationState"]["history"][0]["userInputMessage"]["content"]
+                                .as_str()
+                                .unwrap();
+                        assert!(
+                            prefix
+                                .contains(&format!("<thinking_effort>{effort}</thinking_effort>")),
+                            "{sent}"
+                        );
+                        assert_eq!(
+                            prefix.contains("<thinking_mode>"),
+                            matches!(thinking, Some("enabled" | "adaptive"))
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn session_affinity_binds_only_validated_responses_across_response_modes() {
         let session = "abcdef01-2345-6789-abcd-0123456789ab";
         let key = crate::kiro::token_manager::session_key(session).unwrap();

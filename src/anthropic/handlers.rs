@@ -429,14 +429,11 @@ fn model_capabilities(model: &str) -> serde_json::Value {
             | "claude-fable-5.1"
             | "claude-haiku-5.5"
     );
-    let adaptive = generation_5
-        || mapped.contains("fable")
-        || mapped == "claude-opus-4.6"
-        || mapped == "claude-sonnet-4.6";
     let modern_effort = generation_5
         || mapped.contains("fable")
         || mapped == "claude-opus-4.7"
         || mapped == "claude-opus-4.8";
+    let adaptive = modern_effort || mapped == "claude-opus-4.6" || mapped == "claude-sonnet-4.6";
     let effort: Vec<&str> = if mapped.contains("haiku") && mapped != "claude-haiku-5.5" {
         vec![]
     } else if modern_effort {
@@ -665,8 +662,7 @@ pub(super) async fn post_messages_inner(
         }
     };
 
-    // Model aliases provide defaults; explicit request parameters take precedence.
-    override_thinking_from_model_name(&mut payload);
+    apply_thinking_defaults(&mut payload);
 
     // 检查是否为 WebSearch 请求
     if websearch::has_web_search_tool(&payload) {
@@ -1119,55 +1115,30 @@ async fn handle_non_stream_request(
     (StatusCode::OK, Json(response_body)).into_response()
 }
 
-/// 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
-///
-/// - Opus 4.6：覆写为 adaptive 类型
-/// - 其他模型：覆写为 enabled 类型
-/// - budget_tokens 固定为 20000
-fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
-    let model_lower = payload.model.to_lowercase();
-    if !model_lower.contains("thinking") {
-        return;
-    }
-
-    if payload.thinking.is_some() {
-        return;
-    }
-
-    let is_adaptive_thinking = (model_lower.contains("opus")
-        && (model_lower.contains("4-6")
-            || model_lower.contains("4.6")
-            || model_lower.contains("4-7")
-            || model_lower.contains("4.7")
-            || model_lower.contains("4-8")
-            || model_lower.contains("4.8")))
-        || (model_lower.contains("sonnet")
-            && (model_lower.contains("4-6") || model_lower.contains("4.6")))
-        || model_lower.contains("haiku-5")
-        || model_lower.contains("sonnet-5")
-        || model_lower.contains("opus-5")
-        || model_lower.contains("fable");
-
-    let thinking_type = if is_adaptive_thinking {
-        "adaptive"
-    } else {
-        "enabled"
-    };
-
-    tracing::info!(
-        model = %payload.model,
-        thinking_type = thinking_type,
-        "模型名包含 thinking 后缀，覆写 thinking 配置"
-    );
-
-    payload.thinking = Some(Thinking {
-        thinking_type: thinking_type.to_string(),
-        budget_tokens: 20000,
-    });
-    if is_adaptive_thinking && payload.output_config.is_none() {
-        payload.output_config = Some(OutputConfig {
-            effort: super::converter::default_effort(&payload.model).to_string(),
+/// Model aliases supply thinking defaults; explicit client controls take priority.
+/// Adaptive requests share model-specific effort defaults, with or without an alias.
+fn apply_thinking_defaults(payload: &mut MessagesRequest) {
+    if payload.thinking.is_none() && payload.model.to_lowercase().contains("thinking") {
+        let adaptive = model_capabilities(&payload.model)["thinking"]["types"]["adaptive"]
+            .as_bool()
+            == Some(true);
+        payload.thinking = Some(Thinking {
+            thinking_type: if adaptive { "adaptive" } else { "enabled" }.to_string(),
+            budget_tokens: 20000,
         });
+    }
+
+    if payload
+        .thinking
+        .as_ref()
+        .is_some_and(|thinking| thinking.thinking_type == "adaptive")
+    {
+        let config = payload.output_config.get_or_insert_with(|| OutputConfig {
+            effort: String::new(),
+        });
+        if config.effort.is_empty() {
+            config.effort = super::converter::default_effort(&payload.model).to_string();
+        }
     }
 }
 
@@ -1263,8 +1234,7 @@ pub(super) async fn post_messages_cc_inner(
         }
     };
 
-    // 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
-    override_thinking_from_model_name(&mut payload);
+    apply_thinking_defaults(&mut payload);
 
     // 检查是否为 WebSearch 请求
     if websearch::has_web_search_tool(&payload) {
@@ -1520,6 +1490,82 @@ pub(super) async fn count_tokens_route(
 #[cfg(test)]
 mod model_capability_tests {
     use super::model_capabilities;
+
+    #[test]
+    fn adaptive_effort_defaults_match_claude_code_and_preserve_explicit_values() {
+        for (model, default) in [
+            ("claude-haiku-5-5", "medium"),
+            ("claude-opus-5-5", "medium"),
+            ("claude-sonnet-5-5", "medium"),
+            ("claude-opus-4-7", "xhigh"),
+            ("claude-opus-4-8", "high"),
+            ("claude-sonnet-5", "high"),
+            ("claude-fable-5-1", "high"),
+            ("claude-opus-4-6", "high"),
+        ] {
+            assert_eq!(
+                model_capabilities(model)["thinking"]["types"]["adaptive"],
+                true
+            );
+            for alias in [false, true] {
+                for effort in [None, Some(""), Some("low")] {
+                    let mut value = serde_json::json!({
+                        "model":if alias {format!("{model}-thinking")} else {model.to_owned()},
+                        "max_tokens":1024, "messages":[{"role":"user", "content":"hi"}]
+                    });
+                    if !alias {
+                        value["thinking"] = serde_json::json!({"type":"adaptive"});
+                    }
+                    if let Some(effort) = effort {
+                        value["output_config"] = serde_json::json!({"effort":effort});
+                    }
+                    let mut payload = serde_json::from_value(value).unwrap();
+                    for _ in 0..2 {
+                        super::apply_thinking_defaults(&mut payload);
+                        assert_eq!(payload.thinking.as_ref().unwrap().thinking_type, "adaptive");
+                        assert_eq!(
+                            payload.output_config.as_ref().unwrap().effort,
+                            effort.filter(|value| !value.is_empty()).unwrap_or(default)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn effort_does_not_enable_thinking_or_replace_explicit_budgets() {
+        for (model, kind) in [
+            ("claude-sonnet-5-5", None),
+            ("claude-sonnet-5-5-thinking", Some("disabled")),
+            ("claude-sonnet-5-5-thinking", Some("enabled")),
+        ] {
+            let mut value = serde_json::json!({"model":model, "max_tokens":1024,
+                "messages":[{"role":"user", "content":"hi"}], "output_config":{"effort":"low"}});
+            if let Some(kind) = kind {
+                value["thinking"] = serde_json::json!({"type":kind, "budget_tokens":4096});
+            }
+            let mut payload = serde_json::from_value(value).unwrap();
+            super::apply_thinking_defaults(&mut payload);
+            assert_eq!(
+                payload
+                    .thinking
+                    .as_ref()
+                    .map(|thinking| thinking.thinking_type.as_str()),
+                kind
+            );
+            if let Some(thinking) = payload.thinking {
+                assert_eq!(thinking.budget_tokens, 4096);
+            }
+            assert_eq!(payload.output_config.unwrap().effort, "low");
+        }
+        let mut payload = serde_json::from_value(serde_json::json!({
+            "model":"claude-haiku-5-5", "max_tokens":1024, "messages":[{"role":"user", "content":"hi"}]
+        })).unwrap();
+        super::apply_thinking_defaults(&mut payload);
+        assert!(payload.thinking.is_none());
+        assert!(payload.output_config.is_none());
+    }
 
     #[test]
     fn instruction_normalization_is_idempotent_and_keeps_conversation_blocks() {

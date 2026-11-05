@@ -516,6 +516,20 @@ Kiro 没有原生 Anthropic 压缩接口，摘要由代理额外调用当前模�
 
 默认 `ide` 端点沿用旧版提示词标签实现 thinking，恢复升级前的请求协议；这属于提示词引导，不保证精确的推理强度或预算。用户显式传入的设置优先于模型名中的 `-thinking` 别名。普通请求不会附加原生 thinking/effort 字段，历史推理也不会以新版字段发送给旧端点。
 
+支持 Claude Code 的标准强度字段 `output_config.effort`，无需给模型名加 `-thinking`。强度会独立转换为 `<thinking_effort>` 提示词；仅传 effort、使用固定预算 thinking 或显式关闭 thinking 时也会保留强度，不会因为 effort 自动开启思考输出。当前支持的级别按模型校验，不支持的值返回 `400 invalid_request_error`。
+
+当 `thinking.type` 为 `adaptive`（包括 `-thinking` 别名自动启用）且没有传非空 effort 时，默认值为：Haiku 5.5、Sonnet 5.5、Opus 5.5 使用 `medium`，Opus 4.7 使用 `xhigh`，其余使用 `high`。显式 effort 始终优先。完全不传 thinking/effort 且没有使用 `-thinking` 别名时，代理不添加控制参数，沿用 Kiro 自身行为。`enabled` 未传 `budget_tokens` 时默认 20000，默认 IDE 提示词预算最多 24576。
+
+Claude Code 可直接连接 `/cc` 前缀（客户端会追加 `/v1/messages`），例如：
+
+```bash
+export ANTHROPIC_BASE_URL="http://127.0.0.1:8990/cc"
+export ANTHROPIC_AUTH_TOKEN="你的代理 apiKey"
+claude --model claude-haiku-5-5 --effort high
+```
+
+会话内可用 `/effort` 调整强度，也可通过 `CLAUDE_CODE_EFFORT_LEVEL=high` 设置。客户端需升级到支持所选模型及 effort 的版本；Haiku 5.5 需要 Claude Code v2.1.293 或更高。参数格式与客户端设置参考 [Anthropic effort 文档](https://platform.claude.com/docs/en/build-with-claude/effort)及 [Claude Code 模型配置](https://code.claude.com/docs/en/model-config#adjust-effort-level)。
+
 只有验证过当前 Kiro 账号、区域支持原生参数后，才设置 `"endpoints":{"ide":{"nativeThinking":true}}`。此模式通过 `additionalModelRequestFields` 传递 thinking/effort；`enabled` 会同时传递 `budget_tokens`，是否接受由上游模型 schema 决定。历史签名按 `reasoningContent.reasoningText.{text,signature}` 传递，加密块按 `reasoningContent.redactedContent` 传递；不拼接多个签名对应的文本。该模式尚未经过真实 Kiro 调用验证。
 
 上下文窗口使用项目内维护的模型映射：已确认的 1M 模型会在 `GET /v1/models` 的 `max_input_tokens` 和 `GET /v1/models/{model_id}` 中声明 1,000,000。运行时 Kiro `contextUsageEvent` 只提供百分比，响应 `input_tokens` 是按窗口换算的估值；未收到事件时回退到本地 token 估算。上游拒绝 1M 请求时，代理无法扩展 Kiro 账号或模型本身的限制。

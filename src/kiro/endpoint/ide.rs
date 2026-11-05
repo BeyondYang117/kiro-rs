@@ -134,18 +134,25 @@ fn legacy_thinking_body(body: &str) -> String {
         .as_object_mut()
         .and_then(|root| root.remove("additionalModelRequestFields"));
     let prefix = fields.as_ref().and_then(|fields| {
-        match fields.pointer("/thinking/type").and_then(Value::as_str) {
-            Some("enabled") => Some(format!(
+        let thinking_type = fields.pointer("/thinking/type").and_then(Value::as_str);
+        let mut prefix = match thinking_type {
+            Some("enabled") => format!(
                 "<thinking_mode>enabled</thinking_mode><max_thinking_length>{}</max_thinking_length>",
                 fields.pointer("/thinking/budget_tokens").and_then(Value::as_i64)
                     .unwrap_or(20_000).min(24_576)
-            )),
-            Some("adaptive") => Some(format!(
-                "<thinking_mode>adaptive</thinking_mode><thinking_effort>{}</thinking_effort>",
-                fields.pointer("/output_config/effort").and_then(Value::as_str).unwrap_or("high")
-            )),
-            _ => None,
+            ),
+            Some("adaptive") => "<thinking_mode>adaptive</thinking_mode>".to_owned(),
+            _ => String::new(),
+        };
+        // Effort applies to the whole response, independently of thinking mode.
+        // Claude Code may send it without a thinking block or with thinking disabled.
+        let effort = fields.pointer("/output_config/effort").and_then(Value::as_str)
+            .filter(|effort| !effort.is_empty())
+            .or_else(|| (thinking_type == Some("adaptive")).then_some("high"));
+        if let Some(effort) = effort {
+            prefix.push_str(&format!("<thinking_effort>{effort}</thinking_effort>"));
         }
+        (!prefix.is_empty()).then_some(prefix)
     });
     if let Some(state) = request.get_mut("conversationState") {
         let model = state
@@ -280,10 +287,50 @@ mod tests {
     #[test]
     fn explicitly_disabled_thinking_adds_no_prompt_or_native_fields() {
         let body = json!({"conversationState":{"currentMessage":{"userInputMessage":{"content":"hi", "modelId":"claude-opus-5.5"}}},
-            "additionalModelRequestFields":{"thinking":{"type":"disabled"},"output_config":{"effort":"medium"}}});
+            "additionalModelRequestFields":{"thinking":{"type":"disabled"}}});
         let result = transform(body, false);
         assert!(result.get("additionalModelRequestFields").is_none());
         assert!(result["conversationState"].get("history").is_none());
+    }
+
+    #[test]
+    fn effort_is_preserved_in_every_thinking_mode_and_native_transport() {
+        for effort in ["low", "medium", "high", "xhigh", "max"] {
+            for thinking in [None, Some("disabled"), Some("enabled"), Some("adaptive")] {
+                let mut fields = json!({"output_config":{"effort":effort}});
+                if let Some(kind) = thinking {
+                    fields["thinking"] = json!({"type":kind, "budget_tokens":1234});
+                }
+                let body = json!({"conversationState":{
+                    "currentMessage":{"userInputMessage":{"content":"question", "modelId":"claude-sonnet-5.5"}},
+                    "history":[{"userInputMessage":{"content":"previous question"}},
+                        {"assistantResponseMessage":{"content":"previous answer"}}]
+                }, "additionalModelRequestFields":fields});
+                let legacy = transform(body.clone(), false);
+                assert!(legacy.get("additionalModelRequestFields").is_none());
+                assert_eq!(
+                    legacy["conversationState"]["currentMessage"],
+                    body["conversationState"]["currentMessage"]
+                );
+                let history = legacy["conversationState"]["history"].as_array().unwrap();
+                assert_eq!(
+                    &history[2..],
+                    body["conversationState"]["history"].as_array().unwrap()
+                );
+                let prefix = history[0]["userInputMessage"]["content"].as_str().unwrap();
+                assert!(prefix.contains(&format!("<thinking_effort>{effort}</thinking_effort>")));
+                assert_eq!(
+                    prefix.contains("<thinking_mode>"),
+                    matches!(thinking, Some("enabled" | "adaptive"))
+                );
+                if thinking == Some("enabled") {
+                    assert!(prefix.contains("<max_thinking_length>1234</max_thinking_length>"));
+                }
+                let native = transform(body.clone(), true);
+                assert_eq!(native["additionalModelRequestFields"], fields);
+                assert_eq!(native["conversationState"], body["conversationState"]);
+            }
+        }
     }
 
     #[test]
