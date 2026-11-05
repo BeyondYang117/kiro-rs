@@ -1,4 +1,7 @@
-//! Durable request metadata. Conversation bodies and authentication headers are never stored.
+//! Durable request metadata and bounded response previews. Request bodies are never stored.
+mod response;
+pub(crate) use response::append_preview;
+use response::{ResponsePreview, StreamResponsePreview};
 #[cfg(test)]
 pub(crate) mod tests;
 use std::{
@@ -31,7 +34,7 @@ use tracing_subscriber::{Layer, layer::Context};
 const MAX_ROWS: usize = 100_000;
 const MAX_CAPTURE: usize = 1024 * 1024;
 
-/// Response structure and counts only; never retain text, tool arguments or payload values.
+/// Response structure, counts, bounded assistant text and upstream stop reason.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct UpstreamResponseDiagnostics {
@@ -53,6 +56,9 @@ pub struct UpstreamResponseDiagnostics {
     pub incomplete_frame: bool,
     pub pending_tool_calls: usize,
     pub thinking_enabled: bool,
+    pub content: String,
+    pub content_truncated: bool,
+    pub stop_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -95,6 +101,8 @@ pub struct Record {
     affinity: Option<String>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    response: Option<ResponsePreview>,
     credential_id: Option<u64>,
     attempts: usize,
     error: Option<String>,
@@ -118,6 +126,7 @@ impl Record {
             affinity: None,
             input_tokens: None,
             output_tokens: None,
+            response: None,
             credential_id: None,
             attempts: 0,
             error: None,
@@ -256,9 +265,15 @@ fn apply_usage(record: &mut Record, usage: &Value) {
     }
 }
 
-/// Called before serializing large JSON responses, without copying conversation text.
+/// Capture usage and a bounded response preview even when the JSON exceeds MAX_CAPTURE.
 pub fn response_usage(message: &Value) {
-    let _ = CURRENT.try_with(|context| apply_usage(&mut context.lock(), &message["usage"]));
+    let _ = CURRENT.try_with(|context| {
+        let mut record = context.lock();
+        apply_usage(&mut record, &message["usage"]);
+        if let Some(response) = ResponsePreview::from_message(message) {
+            record.response = Some(response);
+        }
+    });
 }
 
 /// Capture warnings and full error chains inside the request, including stream polling.
@@ -463,6 +478,7 @@ impl LogStore {
             let mut item: Value = serde_json::from_str(&row?)?;
             item.as_object_mut().unwrap().remove("diagnostics");
             item.as_object_mut().unwrap().remove("upstreamAttempts");
+            item.as_object_mut().unwrap().remove("response");
             items.push(item);
         }
         Ok(
@@ -557,12 +573,21 @@ struct Observer {
     discard_line: bool,
     stop: bool,
     finished: bool,
+    response_preview: StreamResponsePreview,
 }
 
 impl Observer {
     fn observe_json(&mut self, value: &Value) {
+        if self.is_sse {
+            self.response_preview.observe(value);
+        }
         let mut record = self.context.lock();
         apply_usage(&mut record, &value["usage"]);
+        if !self.is_sse
+            && let Some(response) = ResponsePreview::from_message(value)
+        {
+            record.response = Some(response);
+        }
         if record.path.ends_with("/count_tokens") {
             record.input_tokens = value["input_tokens"].as_u64();
         }
@@ -584,6 +609,9 @@ impl Observer {
             self.context.lock().first_byte_ms = Some(self.started.elapsed().as_millis() as u64);
         }
         if !self.is_sse {
+            if self.discard_line {
+                return;
+            }
             if self.buffer.len() + chunk.len() <= MAX_CAPTURE {
                 self.buffer.extend_from_slice(chunk);
             } else {
@@ -610,6 +638,7 @@ impl Observer {
                 } else {
                     self.line.clear();
                     self.discard_line = true;
+                    self.response_preview.mark_truncated();
                 }
             }
         }
@@ -632,6 +661,9 @@ impl Observer {
         }
         let record = {
             let mut record = self.context.lock();
+            if self.is_sse {
+                record.response = std::mem::take(&mut self.response_preview).finish();
+            }
             record.duration_ms = self.started.elapsed().as_millis() as u64;
             if record.status != "error" {
                 record.status = if (self.is_sse && !self.stop) || (!eof && !self.stop) {
@@ -686,6 +718,7 @@ pub async fn middleware(
         discard_line: false,
         stop: false,
         finished: false,
+        response_preview: StreamResponsePreview::default(),
     };
     let initial = context.lock().clone();
     observer.store.save_async(initial).await;

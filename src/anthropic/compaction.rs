@@ -1072,16 +1072,25 @@ mod tests {
     }
 
     async fn logged_completion(upstream: &Mock, streaming: bool) -> Value {
+        logged_completion_mode(upstream, streaming, false).await
+    }
+
+    async fn logged_completion_mode(upstream: &Mock, streaming: bool, cc: bool) -> Value {
         let state = upstream.state.clone();
+        let path = if cc {
+            "/cc/v1/messages"
+        } else {
+            "/v1/messages"
+        };
         let app = axum::Router::new().route(
-            "/v1/messages",
+            path,
             axum::routing::post(move |Json(req): Json<MessagesRequest>| {
                 let state = state.clone();
-                async move { dispatch(state, req, false).await }
+                async move { dispatch(state, req, cc).await }
             }),
         );
         let req = axum::http::Request::builder()
-            .method("POST").uri("/v1/messages").header("content-type", "application/json")
+            .method("POST").uri(path).header("content-type", "application/json")
             .body(Body::from(json!({"model":"claude-sonnet-5", "max_tokens":1024,
                 "stream":streaming, "messages":[{"role":"user", "content":"private-prompt-sentinel"}]}).to_string()))
             .unwrap();
@@ -1279,6 +1288,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn short_response_logs_content_and_both_stop_reasons_without_retrying() {
+        for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+            for streaming in [false, true] {
+                for reason in ["end_turn", "max_tokens", "other_upstream_reason"] {
+                    let mut bytes = frame("assistantResponseEvent", json!({"content":"OK"}));
+                    bytes.extend(frame("metadataEvent", json!({"stopReason":reason})));
+                    let mut upstream = mock(bytes).await;
+                    upstream.state.cc_buffered_stream = buffered;
+                    let record = logged_completion_mode(&upstream, streaming, cc).await;
+                    assert_eq!(record["status"], "success");
+                    assert_eq!(record["attempts"], 1);
+                    assert_eq!(
+                        record["response"]["content"],
+                        json!([{"type":"text", "text":"OK"}])
+                    );
+                    assert_eq!(
+                        record["response"]["stopReason"],
+                        if reason == "max_tokens" {
+                            "max_tokens"
+                        } else {
+                            "end_turn"
+                        }
+                    );
+                    assert_eq!(record["response"]["truncated"], false);
+                    let diagnostics = &record["upstreamAttempts"][0]["responseDiagnostics"];
+                    assert_eq!(diagnostics["content"], "OK");
+                    assert_eq!(diagnostics["contentTruncated"], false);
+                    assert_eq!(diagnostics["stopReason"], reason);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn recovered_response_logs_keep_the_failed_attempt() {
         for streaming in [false, true] {
             let upstream = mock_scripted(vec![
@@ -1341,7 +1384,15 @@ mod tests {
                 assert_eq!(diagnostic["bodyBytes"], bytes.len());
                 assert_eq!(diagnostic["incompleteFrame"], incomplete_frame);
                 assert_eq!(diagnostic["pendingToolCalls"], tools);
-                assert!(!record.to_string().contains("private-response-sentinel"));
+                // Parsed text is now retained as a bounded response preview, even
+                // when a later transport read fails. Corrupt frames stay excluded.
+                assert_eq!(
+                    diagnostic["content"]
+                        .as_str()
+                        .unwrap()
+                        .contains("private-response-sentinel"),
+                    outcome == "read_error"
+                );
             }
         }
     }

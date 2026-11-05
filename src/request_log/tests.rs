@@ -103,12 +103,130 @@ async fn body_failures_preserve_http_metadata_and_old_records_remain_readable() 
             .contains("secret-sentinel")
     );
     let mut old = serde_json::to_value(&record).unwrap();
+    old.as_object_mut().unwrap().remove("response");
     old["upstreamAttempts"][0]
         .as_object_mut()
         .unwrap()
         .remove("responseDiagnostics");
     let decoded: Record = serde_json::from_value(old).unwrap();
     assert!(decoded.upstream_attempts[0].response_diagnostics.is_none());
+    assert!(decoded.response.is_none());
+}
+
+#[tokio::test]
+async fn response_previews_match_json_and_fragmented_sse_and_redact_split_secrets() {
+    let message = json!({"type":"message", "content":[
+        {"type":"text", "text":"你好\nOK"},
+        {"type":"tool_use", "id":"tool-1", "name":"Example", "input":{"password":"secret-sentinel", "query":"hello"}}
+    ], "stop_reason":"tool_use"});
+    let events = [
+        json!({"type":"message_start", "message":{"content":[]}}),
+        json!({"type":"content_block_start", "index":0, "content_block":{"type":"text", "text":""}}),
+        json!({"type":"content_block_delta", "index":0, "delta":{"type":"text_delta", "text":"你好\n"}}),
+        json!({"type":"content_block_delta", "index":0, "delta":{"type":"text_delta", "text":"OK"}}),
+        json!({"type":"content_block_start", "index":1, "content_block":{"type":"tool_use", "id":"tool-1", "name":"Example", "input":{}}}),
+        json!({"type":"content_block_delta", "index":1, "delta":{"type":"input_json_delta", "partial_json":"{\"password\":\"secret-"}}),
+        json!({"type":"content_block_delta", "index":1, "delta":{"type":"input_json_delta", "partial_json":"sentinel\",\"query\":\"hello\"}"}}),
+        json!({"type":"message_delta", "delta":{"stop_reason":"tool_use"}}),
+        json!({"type":"message_stop"}),
+    ];
+    let sse = events
+        .iter()
+        .map(|value| format!("data: {value}\n\n"))
+        .collect::<String>();
+    let mut previews = Vec::new();
+    for streaming in [false, true] {
+        let message = message.clone();
+        let sse = sse.clone();
+        let app = Router::new().route(
+            "/v1/messages",
+            post(move || async move {
+                if streaming {
+                    let chunks = sse
+                        .as_bytes()
+                        .chunks(3)
+                        .map(|c| Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(c)))
+                        .collect::<Vec<_>>();
+                    Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .body(Body::from_stream(futures::stream::iter(chunks)))
+                        .unwrap()
+                } else {
+                    Json(message).into_response()
+                }
+            }),
+        );
+        let record = capture_request(app, request("/v1/messages")).await;
+        assert_eq!(record["status"], "success");
+        assert_eq!(record["response"]["stopReason"], "tool_use");
+        assert_eq!(record["response"]["truncated"], false);
+        assert_eq!(record["response"]["content"][0]["text"], "你好\nOK");
+        assert_eq!(
+            record["response"]["content"][1]["input"]["password"],
+            "[REDACTED]"
+        );
+        assert!(!record.to_string().contains("secret-sentinel"));
+        assert!(!record.to_string().contains("private-prompt-sentinel"));
+        previews.push(record["response"].clone());
+    }
+    assert_eq!(previews[0], previews[1]);
+}
+
+#[tokio::test]
+async fn large_response_previews_are_bounded_without_changing_client_content_or_usage() {
+    let fixture = TestStore::new();
+    let text = "你好".repeat(MAX_CAPTURE / 3);
+    let message = json!({"type":"message", "content":[{"type":"text", "text":text}],
+        "stop_reason":"max_tokens", "usage":{"input_tokens":100,"output_tokens":200}});
+    let expected = message.clone();
+    let app = Router::new()
+        .route(
+            "/cc/v1/messages",
+            post(move || async move {
+                response_usage(&message);
+                Json(message)
+            }),
+        )
+        .layer(from_fn_with_state(fixture.store.clone(), middleware));
+    let response = app.oneshot(request("/cc/v1/messages")).await.unwrap();
+    let id = response.headers()["x-request-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let body = to_bytes(response.into_body(), 4 * MAX_CAPTURE)
+        .await
+        .unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), expected);
+    let record = fixture.record(&id).await;
+    let preview = record.response.as_ref().unwrap();
+    assert!(preview.truncated);
+    assert!(preview.content[0]["text"].as_str().unwrap().len() <= response::MAX_PREVIEW_BYTES);
+    assert_eq!(preview.stop_reason.as_deref(), Some("max_tokens"));
+    assert_eq!(record.output_tokens, Some(200));
+    let listing = fixture.store.query(LogQuery::default()).unwrap();
+    assert!(listing["items"][0].get("response").is_none());
+}
+
+#[test]
+fn streaming_previews_bound_content_and_redact_after_assembling_deltas() {
+    let mut preview = StreamResponsePreview::default();
+    preview.observe(&json!({"type":"content_block_start", "index":0, "content_block":{"type":"text", "text":""}}));
+    for text in [
+        "Bearer ",
+        "split-secret-sentinel",
+        &"界".repeat(response::MAX_PREVIEW_BYTES),
+    ] {
+        preview.observe(&json!({"type":"content_block_delta", "index":0, "delta":{"type":"text_delta", "text":text}}));
+    }
+    preview.observe(&json!({"type":"message_delta", "delta":{"stop_reason":"end_turn"}}));
+    let preview = preview.finish().unwrap();
+    assert!(preview.truncated);
+    assert!(
+        !serde_json::to_string(&preview)
+            .unwrap()
+            .contains("split-secret-sentinel")
+    );
+    assert!(preview.content[0]["text"].as_str().unwrap().len() <= response::MAX_PREVIEW_BYTES);
 }
 
 #[tokio::test]

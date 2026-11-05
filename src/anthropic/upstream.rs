@@ -558,6 +558,7 @@ impl UpstreamResponseDecoder {
     fn diagnostics(&self, outcome: &str) -> UpstreamResponseDiagnostics {
         UpstreamResponseDiagnostics {
             outcome: outcome.into(),
+            content: crate::request_log::redact(&self.diagnostics.content),
             incomplete_frame: self.frames.has_pending_data(),
             pending_tool_calls: self.pending_tools.len(),
             ..self.diagnostics.clone()
@@ -623,6 +624,11 @@ impl UpstreamResponseDecoder {
             let event = Event::from_frame(frame)?;
             match &event {
                 Event::AssistantResponse(response) => {
+                    self.diagnostics.content_truncated |= crate::request_log::append_preview(
+                        &mut self.diagnostics.content,
+                        &response.content,
+                        4096,
+                    );
                     self.diagnostics.text_bytes += response.content.len() as u64;
                     self.diagnostics.non_whitespace_text_bytes += response
                         .content
@@ -640,6 +646,11 @@ impl UpstreamResponseDecoder {
                 }
                 Event::ToolUse(tool) => {
                     self.diagnostics.tool_input_bytes += tool.input.len() as u64
+                }
+                Event::Metadata(metadata) => {
+                    if let Some(reason) = metadata.stop_reason.as_deref() {
+                        self.diagnostics.stop_reason = Some(diagnostic_label(reason));
+                    }
                 }
                 Event::Unknown {} => self.diagnostics.unknown_events += 1,
                 _ => {}

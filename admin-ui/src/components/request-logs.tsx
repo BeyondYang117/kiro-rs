@@ -31,9 +31,11 @@ function ResponseDiagnostics({ data }: { data: UpstreamResponseDiagnostics }) {
         ['推理 / 脱敏推理 / 工具参数', `${formatNumber(data.reasoningBytes)} B / ${formatNumber(data.redactedReasoningBytes)} B / ${formatNumber(data.toolInputBytes)} B`],
         ['未知事件 / 未完成工具调用', `${formatNumber(data.unknownEvents)} / ${formatNumber(data.pendingToolCalls)}`],
         ['残留不完整帧 / 启用思考', `${data.incompleteFrame ? '是' : '否'} / ${data.thinkingEnabled ? '是' : '否'}`],
+        ['上游 stopReason', data.stopReason ?? '未提供'],
       ].map(([label, value]) => <div key={label}><dt className="text-muted-foreground">{label}</dt><dd className="mt-1 break-all">{value}</dd></div>)}
     </dl>
     <p className="break-all">事件计数：{Object.entries(data.eventTypes).map(([kind, count]) => `${kind} × ${count}`).join(' · ') || '未解析到事件'}</p>
+    {data.content !== undefined && <details><summary className="cursor-pointer text-muted-foreground">查看上游文本 content{data.contentTruncated ? '（已截断）' : ''}</summary><pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify(data.content, null, 2)}</pre></details>}
     {!!Object.keys(data.eventFields).length && <details><summary className="cursor-pointer text-muted-foreground">查看各类事件首帧字段</summary><pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words">{Object.entries(data.eventFields).map(([kind, fields]) => `${kind}: ${fields.join(', ') || '未识别到对象字段'}`).join('\n')}</pre></details>}
   </div>
 }
@@ -145,8 +147,10 @@ export function RequestLogs({ onBack, onLogout }: { onBack: () => void; onLogout
               ['总耗时 / 首包', `${formatDuration(detail.data.durationMs)} / ${formatDuration(detail.data.firstByteMs)}`],
               ['会话亲和（最后一次调度）', detail.data.affinity === 'hit' ? '复用绑定账号' : detail.data.affinity === 'fallback' ? '绑定账号不可用，已分流' : detail.data.affinity === 'miss' ? '无有效绑定' : '—'],
               ['输入 / 输出 Token', `${formatNumber(detail.data.inputTokens)} / ${formatNumber(detail.data.outputTokens)}`],
+              ['返回客户端的 stop_reason', detail.data.response?.stopReason ?? '未记录'],
             ].map(([key, value]) => <div key={key}><dt className="text-muted-foreground">{key}</dt><dd className="mt-1 break-all">{value}</dd></div>)}
           </dl>
+          {detail.data.response && <section><h3 className="mb-2 font-medium">返回客户端的 content{detail.data.response.truncated ? '（预览已截断）' : ''}</h3><pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border p-3 text-xs">{JSON.stringify(detail.data.response.content, null, 2)}</pre></section>}
           {detail.data.error && <section><h3 className="mb-2 font-medium text-destructive">错误原因</h3><pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs">{detail.data.error}</pre></section>}
           <section><h3 className="mb-2 font-medium">上游调用（{detail.data.attempts} 次）</h3><div className="space-y-2">{detail.data.upstreamAttempts?.length ? detail.data.upstreamAttempts.map((attempt, index) => <div key={index} className="rounded-md border p-3 text-sm"><div className="flex flex-wrap justify-between gap-2"><span>#{index + 1} · 凭据 #{attempt.credentialId} · {attempt.endpoint}</span><span className="text-muted-foreground">{formatTime(attempt.timestamp)} · {attempt.status == null ? '未取得 HTTP 响应' : `HTTP ${attempt.status}`}</span></div>{attempt.upstreamRequestId && <p className="mt-2 break-all font-mono text-xs">上游请求 ID：{attempt.upstreamRequestId}</p>}{attempt.responseDiagnostics && <ResponseDiagnostics data={attempt.responseDiagnostics} />}{attempt.error && <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-destructive">{attempt.error}</pre>}</div>) : <p className="text-sm text-muted-foreground">未向上游发起请求</p>}</div></section>
           <section><h3 className="mb-2 font-medium">诊断记录</h3>{detail.data.diagnostics?.length ? <div className="space-y-2">{detail.data.diagnostics.map((diagnostic, index) => <div key={index} className="rounded-md border p-3"><p className="mb-2 break-all text-xs text-muted-foreground">{formatTime(diagnostic.timestamp)} · {diagnostic.level} · {diagnostic.target}</p><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{diagnostic.message}</pre></div>)}</div> : <p className="text-sm text-muted-foreground">本次调用没有警告或错误</p>}</section>

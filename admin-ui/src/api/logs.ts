@@ -18,6 +18,9 @@ export interface UpstreamResponseDiagnostics {
   incompleteFrame: boolean
   pendingToolCalls: number
   thinkingEnabled: boolean
+  content?: string
+  contentTruncated?: boolean
+  stopReason?: string | null
 }
 
 export interface LogRecord {
@@ -34,6 +37,11 @@ export interface LogRecord {
   affinity?: 'hit' | 'miss' | 'fallback'
   inputTokens: number | null
   outputTokens: number | null
+  response?: {
+    content: unknown[]
+    stopReason: string | null
+    truncated: boolean
+  }
   credentialId: number | null
   attempts: number
   error: string | null
