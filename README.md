@@ -218,6 +218,12 @@ docker login -u abu116
 | `requestLogPath` | string | 凭据文件同目录下的 `kiro_requests.sqlite3` | 调用日志 SQLite 数据库路径；相对路径基于进程工作目录 |
 | `requestLogRetentionDays` | integer | `30` | 日志保留天数，最小 1；同时定期清理至最近 100000 条 |
 | `loadBalancingMode` | string | `balanced` | `balanced` 按在途请求数、累计成功次数、优先级依次选择；`priority` 优先复用当前账号 |
+| `requestLimits.maxConcurrentRequests` | integer | `64` | 单进程 HTTP 请求并发上限；超限返回 `429` |
+| `requestLimits.totalTimeoutSeconds` | integer | `900` | 单次请求总截止时间，覆盖处理和响应体读取，范围 1～86400 |
+| `requestLimits.firstContentTimeoutSeconds` | integer | `180` | 上游首个有效内容的最长等待时间，范围 1～86400 |
+| `requestLimits.idleTimeoutSeconds` | integer | `120` | 上游响应相邻数据块之间的最长空闲时间，范围 1～86400 |
+| `requestLimits.maxResponseBytes` | integer | `33554432` | 单次上游响应的字节上限，范围 1024～1073741824 |
+| `requestLimits.maxResponseEvents` | integer | `100000` | 单次响应生成的事件上限，范围 1～1000000 |
 | `sessionAffinity.enabled` | boolean | `true` | 两种调度模式均优先复用会话上次成功的账号；设为 `false` 恢复原调度规则 |
 | `sessionAffinity.ttlSeconds` | integer | `1800` | 绑定自上次成功响应起的有效秒数，范围 1～86400 |
 | `sessionAffinity.maxEntries` | integer | `10000` | 进程内绑定数量上限，范围 1～1000000；超限淘汰最久未成功的绑定 |
@@ -270,6 +276,14 @@ docker login -u abu116
    "proxyPassword": "pass",
    "adminApiKey": "sk-admin-your-secret-key",
    "loadBalancingMode": "balanced",
+   "requestLimits": {
+      "maxConcurrentRequests": 64,
+      "totalTimeoutSeconds": 900,
+      "firstContentTimeoutSeconds": 180,
+      "idleTimeoutSeconds": 120,
+      "maxResponseBytes": 33554432,
+      "maxResponseEvents": 100000
+   },
    "concurrency": {
       "maxInFlight": 64,
       "maxInFlightPerCredential": 8,

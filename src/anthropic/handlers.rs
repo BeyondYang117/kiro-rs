@@ -460,6 +460,32 @@ fn model_input_limit(model: &str) -> i32 {
 
 /// 两个入口以及压缩后续请求共享相同的校验规则。
 fn validate_and_normalize_request(payload: &mut MessagesRequest) -> Result<(), String> {
+    for name in ["temperature", "top_p", "top_k", "stop_sequences"] {
+        if payload
+            .extra_controls
+            .get(name)
+            .is_some_and(|v| !v.is_null())
+        {
+            return Err(format!("{name} is not supported by this Kiro proxy"));
+        }
+    }
+    if let Some(choice) = &payload.tool_choice {
+        let kind = choice.get("type").and_then(serde_json::Value::as_str);
+        if choice
+            .get("disable_parallel_tool_use")
+            .is_some_and(|value| value != false)
+        {
+            return Err("tool_choice.disable_parallel_tool_use is not supported".into());
+        }
+        match kind {
+            Some("auto") => {}
+            Some("none") => payload.tools = None,
+            Some("any" | "tool") => {
+                return Err("Forced tool_choice is not supported; use auto or none".into());
+            }
+            _ => return Err("tool_choice.type must be auto or none".into()),
+        }
+    }
     if payload.max_tokens <= 0 {
         return Err("max_tokens must be greater than zero".into());
     }
@@ -1360,7 +1386,8 @@ async fn handle_stream_request_buffered(
         estimated_input_tokens,
         thinking_enabled,
         tool_name_map,
-    );
+    )
+    .with_limits(provider.request_limits().clone());
 
     // 创建缓冲 SSE 流
     let events = response_events(
@@ -1408,7 +1435,11 @@ fn create_buffered_sse_stream(
                     batch = event_stream.next() => match batch {
                         Some(Ok(events)) => {
                             for event in events {
-                                ctx.process_and_buffer(&event);
+                                if let Err(error) = ctx.process_and_buffer(&event) {
+                                    let bytes = Bytes::from(upstream_error_event(error).to_sse_string());
+                                    return Some((stream::iter(vec![Ok(bytes)]),
+                                        (event_stream, ctx, true, ping_interval)));
+                                }
                             }
                             continue;
                         }
@@ -1423,6 +1454,46 @@ fn create_buffered_sse_stream(
             }
         },
     ).flatten()
+}
+
+fn json_rejection(error: axum::extract::rejection::JsonRejection) -> Response {
+    (
+        error.status(),
+        Json(ErrorResponse::new(
+            "invalid_request_error",
+            error.body_text(),
+        )),
+    )
+        .into_response()
+}
+
+pub(super) async fn post_messages_route(
+    state: State<AppState>,
+    payload: Result<JsonExtractor<MessagesRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match payload {
+        Ok(payload) => post_messages(state, payload).await,
+        Err(error) => json_rejection(error),
+    }
+}
+
+pub(super) async fn post_messages_cc_route(
+    state: State<AppState>,
+    payload: Result<JsonExtractor<MessagesRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match payload {
+        Ok(payload) => post_messages_cc(state, payload).await,
+        Err(error) => json_rejection(error),
+    }
+}
+
+pub(super) async fn count_tokens_route(
+    payload: Result<JsonExtractor<CountTokensRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match payload {
+        Ok(payload) => count_tokens(payload).await.into_response(),
+        Err(error) => json_rejection(error),
+    }
 }
 
 #[cfg(test)]

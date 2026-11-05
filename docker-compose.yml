@@ -19,4 +19,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    # Exceeds the server's 30-second drain period.
+    stop_grace_period: 40s
     restart: unless-stopped

@@ -98,6 +98,62 @@ impl SessionAffinityConfig {
     }
 }
 
+/// Bounds cover admission, retries, compaction and downstream body consumption.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RequestLimits {
+    pub max_concurrent_requests: usize,
+    pub total_timeout_seconds: u64,
+    pub first_content_timeout_seconds: u64,
+    pub idle_timeout_seconds: u64,
+    pub max_response_bytes: usize,
+    pub max_response_events: usize,
+}
+
+impl Default for RequestLimits {
+    fn default() -> Self {
+        Self {
+            max_concurrent_requests: 64,
+            total_timeout_seconds: 900,
+            first_content_timeout_seconds: 180,
+            idle_timeout_seconds: 120,
+            max_response_bytes: 32 * 1024 * 1024,
+            max_response_events: 100_000,
+        }
+    }
+}
+
+impl RequestLimits {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (1..=tokio::sync::Semaphore::MAX_PERMITS).contains(&self.max_concurrent_requests),
+            "requestLimits.maxConcurrentRequests 超出允许范围"
+        );
+        for (name, value) in [
+            ("totalTimeoutSeconds", self.total_timeout_seconds),
+            (
+                "firstContentTimeoutSeconds",
+                self.first_content_timeout_seconds,
+            ),
+            ("idleTimeoutSeconds", self.idle_timeout_seconds),
+        ] {
+            anyhow::ensure!(
+                (1..=86_400).contains(&value),
+                "requestLimits.{name} 必须在 1..=86400 之间"
+            );
+        }
+        anyhow::ensure!(
+            (1024..=1024 * 1024 * 1024).contains(&self.max_response_bytes),
+            "requestLimits.maxResponseBytes 必须在 1024..=1073741824 之间"
+        );
+        anyhow::ensure!(
+            (1..=1_000_000).contains(&self.max_response_events),
+            "requestLimits.maxResponseEvents 必须在 1..=1000000 之间"
+        );
+        Ok(())
+    }
+}
+
 /// KNA 应用配置
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -194,6 +250,9 @@ pub struct Config {
 
     #[serde(default)]
     pub concurrency: ConcurrencyConfig,
+
+    #[serde(default)]
+    pub request_limits: RequestLimits,
 
     #[serde(default)]
     pub session_affinity: SessionAffinityConfig,
@@ -330,6 +389,7 @@ impl Default for Config {
             request_log_retention_days: default_request_log_retention_days(),
             load_balancing_mode: default_load_balancing_mode(),
             concurrency: ConcurrencyConfig::default(),
+            request_limits: RequestLimits::default(),
             session_affinity: SessionAffinityConfig::default(),
             extract_thinking: default_extract_thinking(),
             default_endpoint: default_endpoint(),

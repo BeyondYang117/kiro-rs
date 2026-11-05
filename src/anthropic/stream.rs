@@ -1199,6 +1199,8 @@ pub struct BufferedStreamContext {
     inner: StreamContext,
     /// 缓冲的所有事件（包括 message_start、content_block_start 等）
     event_buffer: Vec<SseEvent>,
+    buffer_bytes: usize,
+    limits: crate::model::config::RequestLimits,
     /// 估算的 input_tokens（用于回退）
     estimated_input_tokens: i32,
     /// 是否已经生成了初始事件
@@ -1222,6 +1224,8 @@ impl BufferedStreamContext {
         Self {
             inner,
             event_buffer: Vec::new(),
+            buffer_bytes: 0,
+            limits: Default::default(),
             estimated_input_tokens,
             initial_events_generated: false,
         }
@@ -1230,17 +1234,42 @@ impl BufferedStreamContext {
     /// 处理 Kiro 事件并缓冲结果
     ///
     /// 复用 StreamContext 的事件处理逻辑，但把结果缓存而不是立即发送。
-    pub fn process_and_buffer(&mut self, event: &crate::kiro::model::events::Event) {
+    pub fn with_limits(mut self, limits: crate::model::config::RequestLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    fn append_bounded(&mut self, events: Vec<SseEvent>) -> anyhow::Result<()> {
+        for event in events {
+            self.buffer_bytes = self
+                .buffer_bytes
+                .saturating_add(event.to_sse_string().len());
+            if self.buffer_bytes > self.limits.max_response_bytes
+                || self.event_buffer.len() >= self.limits.max_response_events
+            {
+                self.event_buffer.clear();
+                anyhow::bail!("Buffered response limit exceeded");
+            }
+            self.event_buffer.push(event);
+        }
+        Ok(())
+    }
+
+    pub fn process_and_buffer(
+        &mut self,
+        event: &crate::kiro::model::events::Event,
+    ) -> anyhow::Result<()> {
         // 首次处理事件时，先生成初始事件（message_start 等）
         if !self.initial_events_generated {
             let initial_events = self.inner.generate_initial_events();
-            self.event_buffer.extend(initial_events);
+            self.append_bounded(initial_events)?;
             self.initial_events_generated = true;
         }
 
         // 处理事件并缓冲结果
         let events = self.inner.process_kiro_event(event);
-        self.event_buffer.extend(events);
+        self.append_bounded(events)?;
+        Ok(())
     }
 
     /// 完成流处理并返回所有事件

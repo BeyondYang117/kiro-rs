@@ -115,6 +115,9 @@ pub(super) fn response_events(
         recoveries: u8,
         emitted_content: bool,
         done: bool,
+        response_bytes: usize,
+        response_events: usize,
+        first_content_deadline: tokio::time::Instant,
     }
     impl State {
         async fn recover_tool_output(
@@ -172,6 +175,7 @@ pub(super) fn response_events(
             Ok(true)
         }
     }
+    let limits = provider.request_limits().clone();
     let state = State {
         request_body,
         credential_id: response.credential_id(),
@@ -188,15 +192,45 @@ pub(super) fn response_events(
         recoveries: 0,
         emitted_content: false,
         done: false,
+        response_bytes: 0,
+        response_events: 0,
+        first_content_deadline: tokio::time::Instant::now()
+            + Duration::from_secs(limits.first_content_timeout_seconds),
     };
     futures::stream::try_unfold(state, move |mut state| {
         let provider = provider.clone();
+        let limits = limits.clone();
         async move {
             if state.done {
                 return Ok(None);
             }
             loop {
-                if let Some(chunk) = state.body.as_mut().unwrap().next().await {
+                let idle_deadline =
+                    tokio::time::Instant::now() + Duration::from_secs(limits.idle_timeout_seconds);
+                let deadline = if state.has_content {
+                    idle_deadline
+                } else {
+                    idle_deadline.min(state.first_content_deadline)
+                };
+                let next = tokio::time::timeout_at(deadline, state.body.as_mut().unwrap().next())
+                    .await
+                    .map_err(|_| {
+                        let message = if !state.has_content
+                            && tokio::time::Instant::now() >= state.first_content_deadline
+                        {
+                            "Upstream first content deadline exceeded"
+                        } else {
+                            "Upstream idle timeout exceeded"
+                        };
+                        state.decoder.record_failure(
+                            state.credential_id,
+                            state.retries + usize::from(state.recoveries) + 1,
+                            "timeout",
+                            message,
+                        );
+                        anyhow::anyhow!(message)
+                    })?;
+                if let Some(chunk) = next {
                     let chunk = chunk.inspect_err(|error| {
                         state.decoder.record_failure(
                             state.credential_id,
@@ -205,6 +239,16 @@ pub(super) fn response_events(
                             crate::request_log::error_chain(error),
                         );
                     })?;
+                    state.response_bytes = state.response_bytes.saturating_add(chunk.len());
+                    if state.response_bytes > limits.max_response_bytes {
+                        state.decoder.record_failure(
+                            state.credential_id,
+                            state.retries + usize::from(state.recoveries) + 1,
+                            "response_limit",
+                            "Upstream response byte limit exceeded",
+                        );
+                        bail!("Upstream response byte limit exceeded");
+                    }
                     let events = match state.decoder.feed(&chunk) {
                         Ok(events) => events,
                         Err(error) => {
@@ -230,6 +274,10 @@ pub(super) fn response_events(
                     // Pending tools count as generated content, but remain eligible
                     // for bounded recovery until any response events are released.
                     state.has_content |= !state.decoder.pending_tools.is_empty();
+                    state.response_events = state.response_events.saturating_add(events.len());
+                    if state.response_events > limits.max_response_events {
+                        bail!("Upstream response event limit exceeded");
+                    }
                     for event in &events {
                         match event {
                             Event::AssistantResponse(response) => match policy {

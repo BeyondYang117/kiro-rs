@@ -80,3 +80,82 @@ pub fn cors_layer() -> tower_http::cors::CorsLayer {
         .allow_headers(Any)
         .expose_headers([axum::http::HeaderName::from_static("x-request-id")])
 }
+
+/// A slot spans JSON parsing, conversion, all retries and the complete response body.
+#[derive(Clone)]
+pub(super) struct RequestGuard {
+    pub slots: Arc<tokio::sync::Semaphore>,
+    pub timeout: std::time::Duration,
+}
+
+pub(super) async fn limit_request(
+    State(guard): State<RequestGuard>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    use futures::StreamExt;
+    use tokio::time::{Instant, timeout_at};
+    let permit = match guard.slots.try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [("retry-after", "1")],
+                Json(ErrorResponse::new(
+                    "rate_limit_error",
+                    "Request admission limit reached",
+                )),
+            )
+                .into_response();
+        }
+    };
+    let deadline = Instant::now() + guard.timeout;
+    let response = match timeout_at(deadline, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => {
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(ErrorResponse::new(
+                    "api_error",
+                    "Request total deadline exceeded",
+                )),
+            )
+                .into_response();
+        }
+    };
+    let sse = response
+        .headers()
+        .get("content-type")
+        .is_some_and(|value| value.as_bytes().starts_with(b"text/event-stream"));
+    let (parts, body) = response.into_parts();
+    let stream = futures::stream::unfold(
+        (body.into_data_stream().boxed(), Some(permit), false),
+        move |(mut body, mut permit, done)| async move {
+            if done {
+                return None;
+            }
+            let result = match timeout_at(deadline, body.next()).await {
+                Ok(Some(chunk)) => return Some((chunk, (body, permit, false))),
+                Ok(None) => return None,
+                Err(_) if sse => Ok(bytes::Bytes::from(
+                    super::stream::SseEvent::new(
+                        "error",
+                        serde_json::json!({"type":"error", "error":{
+                            "type":"api_error", "message":"Request total deadline exceeded"
+                        }}),
+                    )
+                    .to_sse_string(),
+                )),
+                Err(_) => Err(axum::Error::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Request total deadline exceeded",
+                ))),
+            };
+            // Cancel upstream immediately; do not retain capacity until the next poll.
+            permit.take();
+            let empty = futures::stream::empty::<Result<bytes::Bytes, axum::Error>>().boxed();
+            Some((result, (empty, permit, true)))
+        },
+    );
+    Response::from_parts(parts, Body::from_stream(stream))
+}

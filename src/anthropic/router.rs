@@ -10,7 +10,9 @@ use axum::{
 use crate::kiro::provider::KiroProvider;
 
 use super::{
-    handlers::{count_tokens, get_model, get_models, post_messages, post_messages_cc},
+    handlers::{
+        count_tokens_route, get_model, get_models, post_messages_cc_route, post_messages_route,
+    },
     middleware::{AppState, auth_middleware, cors_layer},
 };
 
@@ -40,6 +42,14 @@ pub fn create_router_with_provider(
     extract_thinking: bool,
     cc_buffered_stream: bool,
 ) -> Router {
+    let limits = kiro_provider
+        .as_ref()
+        .map(|provider| provider.request_limits().clone())
+        .unwrap_or_default();
+    let guard = super::middleware::RequestGuard {
+        slots: std::sync::Arc::new(tokio::sync::Semaphore::new(limits.max_concurrent_requests)),
+        timeout: std::time::Duration::from_secs(limits.total_timeout_seconds),
+    };
     let mut state = AppState::new(api_key, extract_thinking);
     state.cc_buffered_stream = cc_buffered_stream;
     if let Some(provider) = kiro_provider {
@@ -50,8 +60,12 @@ pub fn create_router_with_provider(
     let v1_routes = Router::new()
         .route("/models", get(get_models))
         .route("/models/{model_id}", get(get_model))
-        .route("/messages", post(post_messages))
-        .route("/messages/count_tokens", post(count_tokens))
+        .route("/messages", post(post_messages_route))
+        .route("/messages/count_tokens", post(count_tokens_route))
+        .layer(middleware::from_fn_with_state(
+            guard.clone(),
+            super::middleware::limit_request,
+        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -62,8 +76,12 @@ pub fn create_router_with_provider(
     let cc_v1_routes = Router::new()
         .route("/models", get(get_models))
         .route("/models/{model_id}", get(get_model))
-        .route("/messages", post(post_messages_cc))
-        .route("/messages/count_tokens", post(count_tokens))
+        .route("/messages", post(post_messages_cc_route))
+        .route("/messages/count_tokens", post(count_tokens_route))
+        .layer(middleware::from_fn_with_state(
+            guard.clone(),
+            super::middleware::limit_request,
+        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,

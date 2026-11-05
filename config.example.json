@@ -9,6 +9,14 @@
   "requestLogRetentionDays": 30,
   "toolOutputRecoveryAttempts": 1,
   "loadBalancingMode": "balanced",
+  "requestLimits": {
+    "maxConcurrentRequests": 64,
+    "totalTimeoutSeconds": 900,
+    "firstContentTimeoutSeconds": 180,
+    "idleTimeoutSeconds": 120,
+    "maxResponseBytes": 33554432,
+    "maxResponseEvents": 100000
+  },
   "concurrency": {
     "maxInFlight": 64,
     "maxInFlightPerCredential": 8,

@@ -43,6 +43,7 @@ pub struct ConcurrencySnapshot {
 }
 
 /// 账号级 AIMD：429 后减半、冷却后单请求探测，每个成功窗口增加一个名额。
+#[derive(Clone)]
 pub(super) struct AdaptiveLimit {
     limit: u64,
     probing: bool,

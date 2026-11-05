@@ -346,6 +346,7 @@ fn summary_request(request: &MessagesRequest, plan: &Plan) -> MessagesRequest {
         system: request.system.clone(),
         tools: None,
         tool_choice: None,
+        extra_controls: Default::default(),
         thinking: Some(Thinking {
             thinking_type: "disabled".into(),
             budget_tokens: 0,

@@ -126,6 +126,10 @@ pub struct KiroProvider {
 }
 
 impl KiroProvider {
+    pub(crate) fn request_limits(&self) -> &crate::model::config::RequestLimits {
+        &self.token_manager.config().request_limits
+    }
+
     pub(crate) fn tool_output_recovery_attempts(&self) -> u8 {
         self.token_manager.config().tool_output_recovery_attempts
     }
@@ -266,7 +270,13 @@ impl KiroProvider {
             let request = endpoint.decorate_mcp(base, &rctx);
 
             crate::request_log::attempt_started(ctx.id, endpoint.name());
-            let response = match request.send().await {
+            let response = match request
+                .timeout(Duration::from_secs(
+                    self.request_limits().total_timeout_seconds,
+                ))
+                .send()
+                .await
+            {
                 Ok(resp) => resp,
                 Err(e) => {
                     crate::request_log::attempt_result(
@@ -470,7 +480,13 @@ impl KiroProvider {
             let request = endpoint.decorate_api(base, &rctx);
 
             crate::request_log::attempt_started(ctx.id, endpoint.name());
-            let response = match request.send().await {
+            let response = match request
+                .timeout(Duration::from_secs(
+                    self.request_limits().total_timeout_seconds,
+                ))
+                .send()
+                .await
+            {
                 Ok(resp) => resp,
                 Err(e) => {
                     crate::request_log::attempt_result(

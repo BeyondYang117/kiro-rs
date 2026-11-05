@@ -219,7 +219,7 @@ async fn main() {
     };
 
     let app = app.layer(axum::middleware::from_fn_with_state(
-        request_logs,
+        request_logs.clone(),
         request_log::middleware,
     ));
 
@@ -242,6 +242,59 @@ async fn main() {
         tracing::info!("  GET  /admin");
     }
 
+    let app = app
+        .route(
+            "/healthz",
+            axum::routing::get(|| async { axum::http::StatusCode::OK }),
+        )
+        .route(
+            "/readyz",
+            axum::routing::get(move || {
+                let manager = token_manager.clone();
+                async move {
+                    if manager.available_count() > 0 {
+                        axum::http::StatusCode::OK
+                    } else {
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    }
+                }
+            }),
+        );
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        let _ = shutdown_rx.changed().await;
+    });
+    let server = std::future::IntoFuture::into_future(server);
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => { result.expect("HTTP server failed"); }
+        () = shutdown_signal() => {
+            tracing::info!("收到停机信号，停止接收连接，最多等待 30 秒完成在途请求");
+            let _ = shutdown_tx.send(true);
+            match tokio::time::timeout(std::time::Duration::from_secs(30), &mut server).await {
+                Ok(result) => result.expect("HTTP server failed during shutdown"),
+                Err(_) => tracing::warn!("停机等待超时，取消剩余请求"),
+            }
+        }
+    }
+    // Tokio waits for the final spawn_blocking log writes when the runtime exits.
+}
+
+async fn shutdown_signal() {
+    let interrupt = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("安装 Ctrl-C 处理器失败");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("安装 SIGTERM 处理器失败")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! { () = interrupt => {}, () = terminate => {} }
 }

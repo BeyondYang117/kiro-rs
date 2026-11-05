@@ -403,6 +403,7 @@ pub(crate) async fn get_usage_limits(
 // ============================================================================
 
 /// 单个凭据条目的状态
+#[derive(Clone)]
 struct CredentialEntry {
     /// 凭据唯一 ID
     id: u64,
@@ -653,6 +654,7 @@ impl MultiTokenManager {
         is_multiple_format: bool,
     ) -> anyhow::Result<Self> {
         config.concurrency.validate()?;
+        config.request_limits.validate()?;
         config.session_affinity.validate()?;
         anyhow::ensure!(
             config.tool_output_recovery_attempts <= 2,
@@ -1210,33 +1212,12 @@ impl MultiTokenManager {
     /// 回写凭据，保留单对象格式；新增或删空时升级为数组格式。
     /// 无文件路径时返回 Ok(false)。快照和原子替换在同一写锁内完成。
     fn persist_credentials(&self) -> anyhow::Result<bool> {
-        let Some(path) = &self.credentials_path else {
+        if self.credentials_path.is_none() {
             return Ok(false);
-        };
+        }
         let persist = || {
             let _guard = self.persistence_lock.lock();
-            let credentials: Vec<KiroCredentials> = {
-                let entries = self.entries.lock();
-                entries
-                    .iter()
-                    .map(|entry| {
-                        let mut credential = entry.credentials.clone();
-                        credential.canonicalize_auth_method();
-                        credential.disabled = entry.disabled;
-                        credential
-                    })
-                    .collect()
-            };
-            let multiple =
-                self.is_multiple_format.load(Ordering::Relaxed) || credentials.len() != 1;
-            let json = if multiple {
-                serde_json::to_vec_pretty(&credentials)?
-            } else {
-                serde_json::to_vec_pretty(&credentials[0])?
-            };
-            atomic_write_credentials(path, &json)?;
-            self.is_multiple_format.store(multiple, Ordering::Relaxed);
-            tracing::debug!("已回写凭据到文件: {:?}", path);
+            self.write_credentials(&self.entries.lock())?;
             Ok(true)
         };
         // block_in_place 仅适用于多线程 runtime；同步和单线程调用也应能保存。
@@ -1247,6 +1228,46 @@ impl MultiTokenManager {
         } else {
             persist()
         }
+    }
+
+    // Caller holds persistence_lock, then entries. Publish only after the atomic write.
+    fn write_credentials(&self, entries: &[CredentialEntry]) -> anyhow::Result<()> {
+        let Some(path) = &self.credentials_path else {
+            return Ok(());
+        };
+        let credentials: Vec<_> = entries
+            .iter()
+            .map(|entry| {
+                let mut credential = entry.credentials.clone();
+                credential.canonicalize_auth_method();
+                credential.disabled = entry.disabled;
+                credential
+            })
+            .collect();
+        let multiple = self.is_multiple_format.load(Ordering::Relaxed) || credentials.len() != 1;
+        let json = if multiple {
+            serde_json::to_vec_pretty(&credentials)?
+        } else {
+            serde_json::to_vec_pretty(&credentials[0])?
+        };
+        atomic_write_credentials(path, &json)?;
+        self.is_multiple_format.store(multiple, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn update_credentials<T>(
+        &self,
+        update: impl FnOnce(&mut Vec<CredentialEntry>) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let _persistence = self.persistence_lock.lock();
+        let mut entries = self.entries.lock();
+        let mut candidate = entries.clone();
+        let result = update(&mut candidate)?;
+        self.write_credentials(&candidate)?;
+        *entries = candidate;
+        drop(entries);
+        self.capacity_changed.notify_waiters();
+        Ok(result)
     }
 
     /// 获取缓存目录（凭据文件所在目录）
@@ -1714,55 +1735,38 @@ impl MultiTokenManager {
         }
     }
 
-    /// 设置凭据禁用状态（Admin API）
+    /// 管理修改在成功保存后才发布到调度器。
     pub fn set_disabled(&self, id: u64, disabled: bool) -> anyhow::Result<()> {
-        {
-            let mut entries = self.entries.lock();
+        self.update_credentials(|entries| {
             let entry = entries
                 .iter_mut()
                 .find(|e| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
             entry.disabled = disabled;
+            entry.disabled_reason = disabled.then_some(DisabledReason::Manual);
             if !disabled {
-                // 启用时重置失败计数
                 entry.failure_count = 0;
                 entry.refresh_failure_count = 0;
-                entry.disabled_reason = None;
-            } else {
-                entry.disabled_reason = Some(DisabledReason::Manual);
             }
-        }
-        self.capacity_changed.notify_waiters();
-        // 持久化更改
-        self.persist_credentials()?;
-        Ok(())
+            Ok(())
+        })
     }
 
-    /// 设置凭据优先级（Admin API）
-    ///
-    /// 修改优先级后会立即按新优先级重新选择当前凭据。
-    /// 即使持久化失败，内存中的优先级和当前凭据选择也会生效。
     pub fn set_priority(&self, id: u64, priority: u32) -> anyhow::Result<()> {
-        {
-            let mut entries = self.entries.lock();
+        self.update_credentials(|entries| {
             let entry = entries
                 .iter_mut()
                 .find(|e| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
             entry.credentials.priority = priority;
-        }
-        // 立即按新优先级重新选择当前凭据（无论持久化是否成功）
+            Ok(())
+        })?;
         self.select_highest_priority();
-        self.capacity_changed.notify_waiters();
-        // 持久化更改
-        self.persist_credentials()?;
         Ok(())
     }
 
-    /// 重置凭据失败计数并重新启用（Admin API）
     pub fn reset_and_enable(&self, id: u64) -> anyhow::Result<()> {
-        {
-            let mut entries = self.entries.lock();
+        self.update_credentials(|entries| {
             let entry = entries
                 .iter_mut()
                 .find(|e| e.id == id)
@@ -1774,14 +1778,11 @@ impl MultiTokenManager {
             entry.refresh_failure_count = 0;
             entry.disabled = false;
             entry.disabled_reason = None;
-        }
-        self.capacity_changed.notify_waiters();
-        // 持久化更改
-        self.persist_credentials()?;
-        Ok(())
+            Ok(())
+        })
     }
 
-    /// 获取指定凭据的使用额度（Admin API）
+    /// 获取指定凭据的使用额度。
     pub async fn get_usage_limits_for(&self, id: u64) -> anyhow::Result<UsageLimitsResponse> {
         let credentials = {
             let entries = self.entries.lock();
@@ -1990,8 +1991,7 @@ impl MultiTokenManager {
         validated_cred.proxy_password = new_cred.proxy_password;
         validated_cred.kiro_api_key = new_cred.kiro_api_key;
 
-        let new_id = {
-            let mut entries = self.entries.lock();
+        let new_id = self.update_credentials(|entries| {
             // 网络验证期间其他请求可能已添加相同凭据，插入前再次检查。
             let duplicate = entries.iter().any(|entry| {
                 if validated_cred.is_api_key_credential() {
@@ -2025,12 +2025,8 @@ impl MultiTokenManager {
                 ),
                 last_used_at: None,
             });
-            new_id
-        };
-
-        self.capacity_changed.notify_waiters();
-        // 6. 持久化
-        self.persist_credentials()?;
+            Ok(new_id)
+        })?;
 
         tracing::info!("成功添加凭据 #{}", new_id);
         Ok(new_id)
@@ -2053,48 +2049,21 @@ impl MultiTokenManager {
     /// - `Ok(())` - 删除成功
     /// - `Err(_)` - 凭据不存在、未禁用或持久化失败
     pub fn delete_credential(&self, id: u64) -> anyhow::Result<()> {
-        let was_current = {
-            let mut entries = self.entries.lock();
-
-            // 查找凭据
+        self.update_credentials(|entries| {
             let entry = entries
                 .iter()
                 .find(|e| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
-
-            // 检查是否已禁用
             if !entry.disabled {
                 anyhow::bail!("只能删除已禁用的凭据（请先禁用凭据 #{}）", id);
             }
-
-            // 记录是否是当前凭据
-            let current_id = *self.current_id.lock();
-            let was_current = current_id == id;
-
-            // 删除凭据
             entries.retain(|e| e.id != id);
-
-            was_current
-        };
-
-        // 如果删除的是当前凭据，切换到优先级最高的可用凭据
-        if was_current {
-            self.select_highest_priority();
+            Ok(())
+        })?;
+        self.select_highest_priority();
+        if self.entries.lock().is_empty() {
+            *self.current_id.lock() = 0;
         }
-
-        // 如果删除后没有任何凭据，将 current_id 重置为 0（与初始化行为保持一致）
-        {
-            let entries = self.entries.lock();
-            if entries.is_empty() {
-                let mut current_id = self.current_id.lock();
-                *current_id = 0;
-                tracing::info!("所有凭据已删除，current_id 已重置为 0");
-            }
-        }
-
-        self.capacity_changed.notify_waiters();
-        // 持久化更改
-        self.persist_credentials()?;
 
         // 立即回写统计数据，清除已删除凭据的残留条目
         self.save_stats();
@@ -3063,6 +3032,47 @@ mod tests {
     impl Drop for CredentialTestDirectory {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_admin_persistence_does_not_publish_changes() {
+        let directory = CredentialTestDirectory::new();
+        let path = directory.file();
+        let manager = MultiTokenManager::new(
+            Config::default(),
+            vec![
+                model_test_credential(1, Some("PRO")),
+                model_test_credential(2, Some("PRO")),
+            ],
+            None,
+            Some(path.clone()),
+            true,
+        )
+        .unwrap();
+        manager.set_disabled(2, true).unwrap();
+        manager.report_failure(1);
+        let before = manager.snapshot();
+        std::fs::remove_file(&path).unwrap();
+        // Replacing a directory with a credential file fails on all supported platforms.
+        std::fs::create_dir(&path).unwrap();
+        assert!(manager.set_disabled(1, true).is_err());
+        assert!(manager.set_priority(1, 99).is_err());
+        assert!(manager.reset_and_enable(2).is_err());
+        assert!(manager.delete_credential(2).is_err());
+        assert!(
+            manager
+                .add_credential(model_test_credential(3, Some("PRO")))
+                .await
+                .is_err()
+        );
+        let after = manager.snapshot();
+        assert_eq!(after.total, before.total);
+        assert_eq!(after.current_id, before.current_id);
+        for (before, after) in before.entries.iter().zip(&after.entries) {
+            assert_eq!(after.disabled, before.disabled);
+            assert_eq!(after.priority, before.priority);
+            assert_eq!(after.failure_count, before.failure_count);
         }
     }
 
