@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration as StdDuration, Instant};
 
 use crate::common::persistence::atomic_write as atomic_write_credentials;
-use crate::http_client::{ProxyConfig, build_client};
+use crate::http_client::{ProxyConfig, build_client, read_bounded_text};
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::model::token_refresh::{
@@ -29,6 +29,8 @@ use crate::model::config::Config;
 
 mod affinity;
 mod concurrency;
+#[cfg(test)]
+mod refresh_tests;
 use affinity::SessionAffinity;
 pub(crate) use affinity::{AffinityKey, session_key};
 pub use concurrency::ConcurrencySnapshot;
@@ -112,6 +114,107 @@ impl fmt::Display for RefreshTokenInvalidError {
 
 impl std::error::Error for RefreshTokenInvalidError {}
 
+// Account endpoints return small JSON documents. Keep their memory bound independent
+// of the much larger conversation allowance, including calls made through Admin API.
+async fn read_account_response(
+    response: reqwest::Response,
+    config: &Config,
+) -> anyhow::Result<(http::StatusCode, String)> {
+    let status = response.status();
+    let max_bytes = config
+        .request_limits
+        .max_response_bytes
+        .min(if status.is_success() {
+            1024 * 1024
+        } else {
+            64 * 1024
+        });
+    let result = read_bounded_text(
+        response,
+        max_bytes,
+        StdDuration::from_secs(config.request_limits.first_content_timeout_seconds.min(60)),
+        StdDuration::from_secs(config.request_limits.idle_timeout_seconds.min(60)),
+    )
+    .await;
+    let body = match result {
+        Ok(body) => body,
+        Err(error) if !status.is_success() => {
+            // Preserve status-based handling even if the error body cannot be read.
+            format!("[upstream error body unavailable: {error}]")
+        }
+        Err(error) => return Err(error),
+    };
+    Ok((status, body))
+}
+
+async fn read_refresh_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    config: &Config,
+    method: &str,
+) -> anyhow::Result<T> {
+    let (status, body) = read_account_response(response, config).await?;
+    if !status.is_success() {
+        // Match the OAuth error field, not incidental text in an error description.
+        let invalid_grant = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .is_some_and(|value| {
+                value.get("error").and_then(|v| v.as_str()) == Some("invalid_grant")
+            });
+        if status == http::StatusCode::BAD_REQUEST && invalid_grant {
+            return Err(RefreshTokenInvalidError {
+                message: format!("{method} refreshToken 已失效 (invalid_grant)"),
+            }
+            .into());
+        }
+        let message = match status.as_u16() {
+            401 => "凭证已过期或无效，需要重新认证",
+            403 => "权限不足，无法刷新 Token",
+            429 => "请求过于频繁，已被限流",
+            500..=599 => "服务器错误，OAuth 服务暂时不可用",
+            _ => "Token 刷新失败",
+        };
+        bail!("{method} {message}: {status} {body}");
+    }
+    Ok(serde_json::from_str(&body)?)
+}
+
+fn apply_refresh_response(
+    credentials: &KiroCredentials,
+    access_token: String,
+    refresh_token: Option<String>,
+    profile_arn: Option<String>,
+    expires_in: Option<i64>,
+) -> anyhow::Result<KiroCredentials> {
+    anyhow::ensure!(!access_token.trim().is_empty(), "刷新响应 accessToken 为空");
+    if let Some(token) = &refresh_token {
+        anyhow::ensure!(!token.trim().is_empty(), "刷新响应 refreshToken 为空");
+    }
+    let expires_at = if let Some(seconds) = expires_in {
+        anyhow::ensure!(seconds > 0, "刷新响应 expiresIn 必须为正数");
+        let duration = Duration::try_seconds(seconds)
+            .ok_or_else(|| anyhow::anyhow!("刷新响应 expiresIn 超出范围"))?;
+        Some(
+            Utc::now()
+                .checked_add_signed(duration)
+                .ok_or_else(|| anyhow::anyhow!("刷新响应 expiresIn 超出范围"))?
+                .to_rfc3339(),
+        )
+    } else {
+        credentials.expires_at.clone()
+    };
+    // Validate every field before constructing a replacement credential.
+    let mut updated = credentials.clone();
+    updated.access_token = Some(access_token);
+    if let Some(token) = refresh_token {
+        updated.refresh_token = Some(token);
+    }
+    if let Some(arn) = profile_arn {
+        updated.profile_arn = Some(arn);
+    }
+    updated.expires_at = expires_at;
+    Ok(updated)
+}
+
 /// 刷新 Token
 pub(crate) async fn refresh_token(
     credentials: &KiroCredentials,
@@ -184,50 +287,14 @@ async fn refresh_social_token(
         .send()
         .await?;
 
-    let status = response.status();
-    if !status.is_success() {
-        let body_text = response.text().await.unwrap_or_default();
-
-        // 400 + invalid_grant + Invalid refresh token provided → refreshToken 永久失效
-        if status.as_u16() == 400
-            && body_text.contains("\"invalid_grant\"")
-            && body_text.contains("Invalid refresh token provided")
-        {
-            return Err(RefreshTokenInvalidError {
-                message: format!("Social refreshToken 已失效 (invalid_grant): {}", body_text),
-            }
-            .into());
-        }
-
-        let error_msg = match status.as_u16() {
-            401 => "OAuth 凭证已过期或无效，需要重新认证",
-            403 => "权限不足，无法刷新 Token",
-            429 => "请求过于频繁，已被限流",
-            500..=599 => "服务器错误，AWS OAuth 服务暂时不可用",
-            _ => "Token 刷新失败",
-        };
-        bail!("{}: {} {}", error_msg, status, body_text);
-    }
-
-    let data: RefreshResponse = response.json().await?;
-
-    let mut new_credentials = credentials.clone();
-    new_credentials.access_token = Some(data.access_token);
-
-    if let Some(new_refresh_token) = data.refresh_token {
-        new_credentials.refresh_token = Some(new_refresh_token);
-    }
-
-    if let Some(profile_arn) = data.profile_arn {
-        new_credentials.profile_arn = Some(profile_arn);
-    }
-
-    if let Some(expires_in) = data.expires_in {
-        let expires_at = Utc::now() + Duration::seconds(expires_in);
-        new_credentials.expires_at = Some(expires_at.to_rfc3339());
-    }
-
-    Ok(new_credentials)
+    let data: RefreshResponse = read_refresh_response(response, config, "Social").await?;
+    apply_refresh_response(
+        credentials,
+        data.access_token,
+        data.refresh_token,
+        data.profile_arn,
+        data.expires_in,
+    )
 }
 
 /// 刷新 IdC Token (AWS SSO OIDC)
@@ -281,51 +348,14 @@ async fn refresh_idc_token(
         .send()
         .await?;
 
-    let status = response.status();
-    if !status.is_success() {
-        let body_text = response.text().await.unwrap_or_default();
-
-        // 400 + invalid_grant + Invalid refresh token provided → refreshToken 永久失效
-        if status.as_u16() == 400
-            && body_text.contains("\"invalid_grant\"")
-            && body_text.contains("Invalid refresh token provided")
-        {
-            return Err(RefreshTokenInvalidError {
-                message: format!("IdC refreshToken 已失效 (invalid_grant): {}", body_text),
-            }
-            .into());
-        }
-
-        let error_msg = match status.as_u16() {
-            401 => "IdC 凭证已过期或无效，需要重新认证",
-            403 => "权限不足，无法刷新 Token",
-            429 => "请求过于频繁，已被限流",
-            500..=599 => "服务器错误，AWS OIDC 服务暂时不可用",
-            _ => "IdC Token 刷新失败",
-        };
-        bail!("{}: {} {}", error_msg, status, body_text);
-    }
-
-    let data: IdcRefreshResponse = response.json().await?;
-
-    let mut new_credentials = credentials.clone();
-    new_credentials.access_token = Some(data.access_token);
-
-    if let Some(new_refresh_token) = data.refresh_token {
-        new_credentials.refresh_token = Some(new_refresh_token);
-    }
-
-    if let Some(expires_in) = data.expires_in {
-        let expires_at = Utc::now() + Duration::seconds(expires_in);
-        new_credentials.expires_at = Some(expires_at.to_rfc3339());
-    }
-
-    // 同步更新 profile_arn（如果 IdC 响应中包含）
-    if let Some(profile_arn) = data.profile_arn {
-        new_credentials.profile_arn = Some(profile_arn);
-    }
-
-    Ok(new_credentials)
+    let data: IdcRefreshResponse = read_refresh_response(response, config, "IdC").await?;
+    apply_refresh_response(
+        credentials,
+        data.access_token,
+        data.refresh_token,
+        data.profile_arn,
+        data.expires_in,
+    )
 }
 
 /// 获取使用额度信息
@@ -381,9 +411,8 @@ pub(crate) async fn get_usage_limits(
 
     let response = request.send().await?;
 
-    let status = response.status();
+    let (status, body_text) = read_account_response(response, config).await?;
     if !status.is_success() {
-        let body_text = response.text().await.unwrap_or_default();
         let error_msg = match status.as_u16() {
             401 => "认证失败，Token 无效或已过期",
             403 => "权限不足，无法获取使用额度",
@@ -394,7 +423,7 @@ pub(crate) async fn get_usage_limits(
         bail!("{}: {} {}", error_msg, status, body_text);
     }
 
-    let data: UsageLimitsResponse = response.json().await?;
+    let data: UsageLimitsResponse = serde_json::from_str(&body_text)?;
     Ok(data)
 }
 

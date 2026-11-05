@@ -225,7 +225,7 @@ docker login -u abu116
 | `requestLimits.totalTimeoutSeconds` | integer | `900` | 单次请求总截止时间，覆盖处理和响应体读取，范围 1～86400 |
 | `requestLimits.firstContentTimeoutSeconds` | integer | `180` | 对话等待上游首个有效内容的上限；MCP 等待首个非空数据块的上限，范围 1～86400 |
 | `requestLimits.idleTimeoutSeconds` | integer | `120` | 上游响应相邻数据块之间的最长空闲时间，范围 1～86400 |
-| `requestLimits.maxResponseBytes` | integer | `33554432` | 上游响应的字节上限，覆盖对话与 MCP；错误正文最多读取此值与 64 KiB 中较小者，范围 1024～1073741824 |
+| `requestLimits.maxResponseBytes` | integer | `33554432` | 上游响应的字节上限，覆盖对话、MCP、Token 刷新与余额查询；账户接口另设 1 MiB 上限，错误正文最多读取此值与 64 KiB 中较小者，范围 1024～1073741824 |
 | `requestLimits.maxResponseEvents` | integer | `100000` | 单次响应生成的事件上限，范围 1～1000000 |
 | `sessionAffinity.enabled` | boolean | `true` | 两种调度模式均优先复用会话上次成功的账号；设为 `false` 恢复原调度规则 |
 | `sessionAffinity.ttlSeconds` | integer | `1800` | 绑定自上次成功响应起的有效秒数，范围 1～86400 |
@@ -302,6 +302,8 @@ docker login -u abu116
 ### credentials.json
 
 支持单对象格式（向后兼容）或数组格式（多凭据）。两种格式都会保存 Token 刷新和管理变更；单对象文件添加第二个凭据或删除最后一个凭据时，会自动转为数组格式。回写使用同目录临时文件和原子替换，保留已有文件权限。
+
+Social 和 IdC 刷新会拒绝空的访问令牌、空的轮换刷新令牌，以及非正数或超出时间范围的 `expiresIn`，异常结果不会覆盖原凭据。HTTP 400 响应中 OAuth `error` 字段为 `invalid_grant` 时，自动调度会将对应凭据标为永久失效；其他错误仍按现有失败阈值处理。Token 刷新和余额查询保留 60 秒总超时，响应体首包与空闲时间同时受 `requestLimits` 中相应设置与 60 秒的较小值约束。
 
 #### 字段说明
 
@@ -473,7 +475,7 @@ RUST_LOG=debug ./target/release/kiro-rs
 
 设置 `"ccBufferedStream": false` 后，`/cc/v1/messages` 会与 `/v1/messages` 一样实时返回内容：首个 `message_start` 使用估算值，结束时的 `message_delta.usage.input_tokens` 使用上游上下文使用量计算的值（上游未提供时保留估算值）。默认仍为缓冲模式。代理侧上下文压缩仍会等待摘要及后续调用完成。
 
-远程 token 计数通过异步请求共享连接池，`countTokensTimeoutSeconds` 同时限制连接和响应体读取时间。超时、HTTP 错误或无效计数会自动回退本地估算。
+远程 token 计数通过异步请求共享连接池，`countTokensTimeoutSeconds` 同时限制连接和响应体读取时间，响应体最多读取 64 KiB。超时、超大响应、HTTP 错误或无效计数会自动回退本地估算。
 
 ### 大文件写入与截断处理
 

@@ -33,7 +33,9 @@ pub(crate) async fn read_bounded_text(
             .await
             .context("Upstream response body timeout exceeded")?;
         let Some(chunk) = next else { break };
-        let chunk = chunk.context("Failed to read upstream response body")?;
+        let chunk = chunk
+            .map_err(|error| error.without_url())
+            .context("Failed to read upstream response body")?;
         if chunk.len() > max_bytes.saturating_sub(buffer.len()) {
             anyhow::bail!("Upstream response byte limit exceeded ({max_bytes} bytes)");
         }

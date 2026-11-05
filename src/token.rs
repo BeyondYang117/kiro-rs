@@ -8,7 +8,7 @@
 //! - 4 个字符单位 = 1 token（四舍五入）
 
 use crate::anthropic::types::{CountTokensResponse, Message, SystemMessage, Tool};
-use crate::http_client::{ProxyConfig, build_client};
+use crate::http_client::{ProxyConfig, build_client, read_bounded_text};
 use crate::model::config::TlsBackend;
 use std::sync::OnceLock;
 
@@ -202,7 +202,11 @@ async fn call_remote_count_tokens(
     let response = response
         .error_for_status()
         .map_err(|error| error.without_url())?;
-    let result: CountTokensResponse = response.json().await.map_err(|error| error.without_url())?;
+    // The response only contains a count. A large or endless body must fall back
+    // to the local estimator without allocating conversation-sized buffers.
+    let timeout = std::time::Duration::from_secs(config.timeout_secs.max(1));
+    let body = read_bounded_text(response, 64 * 1024, timeout, timeout).await?;
+    let result: CountTokensResponse = serde_json::from_str(&body)?;
     anyhow::ensure!(result.input_tokens > 0, "远程计数必须为正整数");
     Ok(result.input_tokens as u64)
 }
@@ -350,6 +354,21 @@ mod tests {
                                 Json(serde_json::json!({"input_tokens":-1})).into_response()
                             }
                             "malformed" => "not json".into_response(),
+                            "oversized" => format!(
+                                "{{\"input_tokens\":123,\"padding\":\"{}\"}}",
+                                "x".repeat(64 * 1024)
+                            )
+                            .into_response(),
+                            "oversized_chunked" => Body::from_stream(
+                                stream::iter([
+                                    Ok::<_, std::io::Error>(
+                                        "{\"input_tokens\":123,\"padding\":\"".to_owned(),
+                                    ),
+                                    Ok("x".repeat(64 * 1024)),
+                                ])
+                                .chain(stream::pending()),
+                            )
+                            .into_response(),
                             "slow" => Body::from_stream(
                                 stream::once(async {
                                     Ok::<_, std::io::Error>("{\"input_tokens\":")
@@ -470,5 +489,46 @@ mod tests {
                 .unwrap();
         assert_eq!(result, 1);
         assert!(started.elapsed() >= std::time::Duration::from_millis(900));
+    }
+
+    #[tokio::test]
+    async fn oversized_remote_counts_fall_back_before_waiting_for_body_completion() {
+        use super::*;
+        let server = token_server().await;
+        let messages = vec![Message {
+            role: "user".into(),
+            content: serde_json::json!("hello world"),
+        }];
+        let request = TokenCountRequest {
+            model: "test",
+            system: &None,
+            messages: &messages,
+            tools: &None,
+        };
+        let local = count_all_tokens_local(None, &messages, None);
+        for mode in ["oversized", "oversized_chunked"] {
+            let mut config = remote_config(format!("{}/{mode}", server.url));
+            config.timeout_secs = 30;
+            let service = CountTokensService::new(config);
+            let error = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                call_remote_count_tokens(
+                    service.client.as_ref().unwrap(),
+                    service.config.api_url.as_ref().unwrap(),
+                    &service.config,
+                    &request,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert!(error.to_string().contains("byte limit"));
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(3), service.count(&request))
+                    .await
+                    .unwrap(),
+                local,
+            );
+        }
     }
 }
