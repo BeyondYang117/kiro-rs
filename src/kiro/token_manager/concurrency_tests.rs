@@ -36,6 +36,68 @@ async fn wait_for_waiters(manager: &MultiTokenManager, count: usize) {
 }
 
 #[tokio::test]
+async fn rpm_budget_is_shared_by_reservations_and_recovers_without_holding_capacity() {
+    let manager = manager(
+        serde_json::json!({"concurrency":{
+            "requestsPerMinute":2, "waitTimeoutSeconds":1
+        }}),
+        1,
+    );
+    let first = manager.acquire_context(None).await.unwrap();
+    let second = manager.acquire_context(None).await.unwrap();
+    drop((first, second));
+    assert_eq!(manager.snapshot().concurrency.available_slots, 0);
+    let pending_manager = manager.clone();
+    let pending = tokio::spawn(async move { pending_manager.acquire_context(None).await });
+    wait_for_waiters(&manager, 1).await;
+    assert_eq!(manager.snapshot().concurrency.in_flight, 0);
+    pending.abort();
+    let _ = pending.await;
+    assert_eq!(manager.snapshot().concurrency.waiting, 0);
+    // Leave the rolling window about to expire, without sleeping for a minute.
+    for time in manager.entries.lock()[0].request_times.iter_mut() {
+        *time = Instant::now() - StdDuration::from_millis(59_950);
+    }
+    let context = timeout(StdDuration::from_secs(1), manager.acquire_context(None))
+        .await
+        .unwrap()
+        .unwrap();
+    drop(context);
+    assert_eq!(manager.entries.lock()[0].request_times.len(), 1);
+    assert_eq!(manager.snapshot().concurrency.in_flight, 0);
+}
+
+#[tokio::test]
+async fn rpm_limit_is_per_account_and_can_be_disabled_explicitly() {
+    let limited = manager(
+        serde_json::json!({"concurrency":{
+            "requestsPerMinute":1, "maxWaiting":0
+        }}),
+        2,
+    );
+    let first = limited.acquire_context(None).await.unwrap();
+    let second = limited.acquire_context(None).await.unwrap();
+    assert_ne!(first.id, second.id);
+    drop((first, second));
+    assert!(
+        limited
+            .acquire_context(None)
+            .await
+            .err()
+            .unwrap()
+            .is::<CapacityError>()
+    );
+    let unlimited = manager(
+        serde_json::json!({"concurrency":{"requestsPerMinute":0}}),
+        1,
+    );
+    for _ in 0..80 {
+        drop(unlimited.acquire_context(None).await.unwrap());
+    }
+    assert!(unlimited.entries.lock()[0].request_times.is_empty());
+}
+
+#[tokio::test]
 async fn affinity_is_per_session_and_remaps_only_after_success_in_both_modes() {
     for mode in ["balanced", "priority"] {
         let manager = manager(

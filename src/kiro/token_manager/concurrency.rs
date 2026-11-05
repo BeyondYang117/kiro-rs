@@ -8,6 +8,8 @@ use tokio::sync::SemaphorePermit;
 pub struct ConcurrencySnapshot {
     pub session_affinity_enabled: bool,
     pub adaptive_concurrency: bool,
+    pub requests_per_minute: usize,
+    pub refresh_backoff_seconds: u64,
     pub recovering_credentials: usize,
     pub probing_credentials: usize,
     pub max_in_flight: usize,
@@ -43,11 +45,12 @@ pub struct ConcurrencySnapshot {
 }
 
 /// 账号级 AIMD：429 后减半、冷却后单请求探测，每个成功窗口增加一个名额。
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(super) struct AdaptiveLimit {
     limit: u64,
     probing: bool,
     successes: u64,
+    #[serde(skip)]
     pub(super) epoch: Arc<()>,
 }
 
@@ -59,6 +62,13 @@ impl AdaptiveLimit {
             successes: 0,
             epoch: Arc::new(()),
         }
+    }
+
+    pub(super) fn after_restart(mut self, maximum: u64) -> Self {
+        self.limit = self.limit.clamp(1, maximum);
+        self.successes = 0;
+        self.epoch = Arc::new(());
+        self
     }
 
     pub(super) fn rate_limited(&mut self) -> bool {
@@ -182,14 +192,6 @@ fn millis(duration: StdDuration) -> u64 {
     duration.as_millis().min(u64::MAX as u128) as u64
 }
 
-pub(super) fn cooldown_remaining_ms(entry: &CredentialEntry) -> u64 {
-    entry.cooldown.map_or(0, |(started, duration)| {
-        let remaining = duration.saturating_sub(started.elapsed());
-        // 向上取整，非零冷却不显示为 0ms；超大 Retry-After 饱和表示。
-        millis(remaining).saturating_add(u64::from(remaining.subsec_nanos() % 1_000_000 != 0))
-    })
-}
-
 impl MultiTokenManager {
     pub(super) fn effective_concurrency_limit(&self, entry: &CredentialEntry) -> u64 {
         if self.config.concurrency.adaptive_concurrency {
@@ -223,11 +225,15 @@ impl MultiTokenManager {
             return;
         }
         let before = self.effective_concurrency_limit(entry);
+        let was_probing = entry.adaptive_limit.probing;
         entry
             .adaptive_limit
             .succeeded(self.config.concurrency.max_in_flight_per_credential);
         let increased = self.effective_concurrency_limit(entry) > before;
         drop(entries);
+        if increased || was_probing {
+            self.save_protection_or_log(context.id);
+        }
         if increased {
             self.capacity_changed.notify_waiters();
         }
@@ -256,6 +262,17 @@ impl MultiTokenManager {
                 .effective_concurrency_limit(entry)
                 .saturating_sub(entry.in_flight.load(Ordering::Relaxed));
             let remaining = usize::try_from(remaining).unwrap_or(usize::MAX);
+            let remaining = if settings.requests_per_minute == 0 {
+                remaining
+            } else {
+                let recent = entry
+                    .request_times
+                    .iter()
+                    .rev()
+                    .take_while(|time| time.elapsed() < StdDuration::from_secs(60))
+                    .count();
+                remaining.min(settings.requests_per_minute.saturating_sub(recent))
+            };
             available_slots = available_slots
                 .saturating_add(remaining)
                 .min(global_available_slots);
@@ -268,6 +285,8 @@ impl MultiTokenManager {
         ConcurrencySnapshot {
             session_affinity_enabled: self.config.session_affinity.enabled,
             adaptive_concurrency: settings.adaptive_concurrency,
+            requests_per_minute: settings.requests_per_minute,
+            refresh_backoff_seconds: settings.refresh_backoff_seconds,
             recovering_credentials: entries
                 .iter()
                 .filter(|entry| {
@@ -296,7 +315,7 @@ impl MultiTokenManager {
             waiting_opus: queue.iter().filter(|waiter| waiter.requires_opus).count(),
             cooling_credentials: entries
                 .iter()
-                .filter(|e| !e.disabled && cooldown_remaining_ms(e) > 0)
+                .filter(|e| !e.disabled && !self.protection_remaining(e).is_zero())
                 .count(),
             saturated_credentials: entries
                 .iter()
@@ -344,9 +363,16 @@ impl MultiTokenManager {
         affinity_key: Option<&AffinityKey>,
     ) -> anyhow::Result<ReservedCredential> {
         let mut waiting = None;
-        let result = self
-            .reserve_credential_inner(model, affinity_key, &mut waiting)
-            .await;
+        let result: anyhow::Result<ReservedCredential> = async {
+            let reserved = self
+                .reserve_credential_inner(model, affinity_key, &mut waiting)
+                .await?;
+            // 不持有队列/entries 锁做磁盘 I/O；落盘前不获取 Token 或发送请求。
+            // 失败时 reservation 自动释放，RPM 预留仍保留。
+            self.persist_protection(reserved.id)?;
+            Ok(reserved)
+        }
+        .await;
         if let Some(guard) = waiting.as_mut() {
             guard.completed = true;
         }
@@ -362,7 +388,7 @@ impl MultiTokenManager {
                 Some(CapacityError::WaitTimeout) => {
                     metrics.wait_timeout_total.fetch_add(1, Ordering::Relaxed);
                 }
-                None => {}
+                _ => {}
             },
         }
         result

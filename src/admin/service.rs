@@ -290,6 +290,7 @@ impl AdminService {
             proxy_username: req.proxy_username,
             proxy_password: req.proxy_password,
             disabled: false, // 新添加的凭据默认启用
+            disabled_reason: None,
             kiro_api_key: req.kiro_api_key,
             endpoint: req.endpoint,
         };
@@ -760,7 +761,7 @@ mod tests {
             .insert(1, cached_balance(&service));
         service.save_balance_cache();
         assert_eq!(std::fs::read(path.join("keep")).unwrap(), b"original");
-        assert_eq!(std::fs::read_dir(&directory.0).unwrap().count(), 2);
+        assert_eq!(std::fs::read_dir(&directory.0).unwrap().count(), 3);
         std::fs::remove_dir_all(path).unwrap();
         service.save_balance_cache();
         assert_eq!(

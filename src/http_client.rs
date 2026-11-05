@@ -111,6 +111,27 @@ pub(crate) fn proxy_display_url(value: &str) -> String {
     url.as_str().trim_end_matches('/').to_owned()
 }
 
+/// Parse both Retry-After delta seconds and HTTP dates. Overflow means a long wait.
+pub(crate) fn retry_after(
+    headers: &reqwest::header::HeaderMap,
+    now: std::time::SystemTime,
+) -> Option<Duration> {
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Some(Duration::from_secs(value.parse().unwrap_or(u64::MAX)));
+    }
+    Some(
+        httpdate::parse_http_date(value)
+            .ok()?
+            .duration_since(now)
+            .unwrap_or_default(),
+    )
+}
+
 /// 构建 HTTP Client
 ///
 /// # Arguments

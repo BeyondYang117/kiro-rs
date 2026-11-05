@@ -47,6 +47,7 @@ pub fn create_router_with_provider(
         .map(|provider| provider.request_limits().clone())
         .unwrap_or_default();
     let guard = super::middleware::RequestGuard {
+        max_upstream_attempts: limits.max_upstream_attempts,
         slots: std::sync::Arc::new(tokio::sync::Semaphore::new(limits.max_concurrent_requests)),
         timeout: std::time::Duration::from_secs(limits.total_timeout_seconds),
     };

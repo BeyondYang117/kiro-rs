@@ -36,7 +36,9 @@ pub(super) fn map_provider_error(err: Error) -> Response {
     let err_str = err.to_string();
     let log_str = crate::request_log::redact(&err_str);
 
-    if err.is::<crate::kiro::token_manager::CapacityError>() {
+    if err.is::<crate::kiro::token_manager::CapacityError>()
+        || err.is::<crate::kiro::retry_budget::RetryBudgetExceeded>()
+    {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::RETRY_AFTER, "1")],
@@ -843,7 +845,9 @@ fn upstream_error_event(error: Error) -> SseEvent {
 }
 
 pub(super) fn upstream_error_response(error: Error) -> Response {
-    if error.is::<crate::kiro::token_manager::CapacityError>() {
+    if error.is::<crate::kiro::token_manager::CapacityError>()
+        || error.is::<crate::kiro::retry_budget::RetryBudgetExceeded>()
+    {
         return map_provider_error(error);
     }
     // Replaying a malformed/truncated tool call or an explicit refusal will not repair it.
@@ -1620,7 +1624,11 @@ mod model_capability_tests {
     async fn overload_errors_keep_503_and_retry_after_for_initial_and_buffered_responses() {
         use crate::kiro::token_manager::CapacityError;
         use axum::{body::to_bytes, http::StatusCode};
-        for error in [CapacityError::QueueFull, CapacityError::WaitTimeout] {
+        for error in [
+            CapacityError::QueueFull,
+            CapacityError::WaitTimeout,
+            CapacityError::ProtectionUnavailable,
+        ] {
             for response in [
                 super::map_provider_error(anyhow::Error::new(error).context("provider")),
                 super::upstream_error_response(error.into()),

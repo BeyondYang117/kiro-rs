@@ -52,6 +52,7 @@ interface CredentialCardProps {
 
 const disabledReasonLabels: Record<string, string> = {
   Manual: '手动禁用',
+  PermissionDenied: '上游拒绝权限，请检查后启用',
   TooManyFailures: '连续调用失败',
   TooManyRefreshFailures: '连续刷新失败',
   QuotaExceeded: '额度已用尽',

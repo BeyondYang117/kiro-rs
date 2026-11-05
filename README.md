@@ -207,7 +207,7 @@ docker login -u abu116
 | `apiRegion` | string | - | API Region（用于 API 请求），未配置时回退到 region |
 | `kiroVersion` | string | `0.9.2` | Kiro 版本号 |
 | `machineId` | string | - | 自定义机器码（64位十六进制），不定义则自动生成 |
-| `systemVersion` | string | 随机 | 系统版本标识 |
+| `systemVersion` | string | 当前运行平台 | 系统标识，默认 `darwin` / `win32` / `linux` 等；可显式配置完整版本 |
 | `nodeVersion` | string | `22.21.1` | Node.js 版本标识 |
 | `tlsBackend` | string | `rustls` | TLS 后端：`rustls` 或 `native-tls` |
 | `countTokensApiUrl` | string | - | 外部 count_tokens API 地址 |
@@ -221,6 +221,7 @@ docker login -u abu116
 | `requestLogPath` | string | 凭据文件同目录下的 `kiro_requests.sqlite3` | 调用日志 SQLite 数据库路径；相对路径基于进程工作目录 |
 | `requestLogRetentionDays` | integer | `30` | 日志保留天数，最小 1；同时定期清理至最近 100000 条 |
 | `loadBalancingMode` | string | `balanced` | `balanced` 按在途请求数、累计成功次数、优先级依次选择；`priority` 优先复用当前账号 |
+| `requestLimits.maxUpstreamAttempts` | integer | `9` | 单个客户端请求所有 Kiro HTTP 尝试共用上限，含 Token 刷新、对话、搜索、压缩和响应恢复；范围 1～100 |
 | `requestLimits.maxConcurrentRequests` | integer | `64` | 单进程 HTTP 请求并发上限；超限返回 `429` |
 | `requestLimits.totalTimeoutSeconds` | integer | `900` | 单次请求总截止时间，覆盖处理和响应体读取，范围 1～86400 |
 | `requestLimits.firstContentTimeoutSeconds` | integer | `180` | 对话等待上游首个有效内容的上限；MCP 等待首个非空数据块的上限，范围 1～86400 |
@@ -235,6 +236,8 @@ docker login -u abu116
 | `concurrency.maxWaiting` | integer | `128` | 等待名额的调用上限；`0` 表示满载/冷却时立即拒绝 |
 | `concurrency.waitTimeoutSeconds` | integer | `30` | 每次获取调用名额的最长等待秒数，范围 1～86400 |
 | `concurrency.rateLimitCooldownSeconds` | integer | `30` | 账号收到 429 后的最短冷却秒数，范围 1～86400；与 `Retry-After` 取较长者 |
+| `concurrency.requestsPerMinute` | integer | `60` | 每账号滚动 60 秒的调用预留上限；0 关闭，最大 1000000 |
+| `concurrency.refreshBackoffSeconds` | integer | `30` | 认证服务瞬态失败的初始退避秒数，带指数增长和抖动；范围 1～86400 |
 | `concurrency.adaptiveConcurrency` | boolean | `true` | 启用账号级自适应并发：429 后降低容量，冷却后单请求探测，再逐步恢复至配置上限 |
 | `ccBufferedStream` | boolean | `true` | `/cc/v1/messages` 是否缓冲完整流；设为 `false` 可实时返回内容 |
 | `extractThinking` | boolean | `true` | 非流式响应的 thinking 块提取。启用后 `<thinking>` 标签会被解析为独立的 `thinking` 内容块 |
@@ -248,9 +251,9 @@ docker login -u abu116
 
 并发保护在单进程内生效，普通对话、流式对话、压缩摘要和 WebSearch 共用名额。名额从选择账号开始持有，覆盖 Token 获取与上游响应体读取，流结束、丢弃响应或取消调用时释放；HTTP 重试退避期间不占名额。两种模式都会跳过满载或冷却中的账号，同时保留模型资格检查。Token 刷新按账号互斥，同账号自动刷新在获取锁后复查 Token，不同账号可并行刷新。
 
-等待者在名额释放、账号管理变更或冷却到期后重新参与调度。对当前可调度的等待者按入队顺序分配名额，新请求不能插队；如果前面的调用暂时没有符合模型、容量和冷却条件的账号，后面的调用可使用空闲账号，避免 Opus 等请求阻塞整个队列。等待被取消、超时或出错时会移出队列并唤醒后续调用。队列满或等待超时会返回 `503 overloaded_error` 和 `Retry-After: 1`，不消耗 Provider 的 HTTP 重试预算；已经开始的 SSE 通过错误事件报告失败。等待上限针对每次获取上游名额，既不是整个客户端请求的总超时，也不限制处于退避中的客户端请求数。并发限制不等同于每分钟请求数或 token 配额限制。
+等待者在名额释放、账号管理变更或冷却到期后重新参与调度。对当前可调度的等待者按入队顺序分配名额，新请求不能插队；如果前面的调用暂时没有符合模型、容量和冷却条件的账号，后面的调用可使用空闲账号，避免 Opus 等请求阻塞整个队列。等待被取消、超时或出错时会移出队列并唤醒后续调用。队列满或等待超时会返回 `503 overloaded_error` 和 `Retry-After: 1`，不消耗 Provider 的 HTTP 重试预算；已经开始的 SSE 通过错误事件报告失败。等待上限针对每次获取上游名额，既不是整个客户端请求的总超时，也不限制处于退避中的客户端请求数。并发限制与账号 RPM 保护分别生效；两者均不等同于 TPM 或上游计费额度。
 
-未指定 `loadBalancingMode` 的配置现在默认使用 `balanced`；显式设置的 `priority` 保留。并发参数修改后重启生效，冷却状态仅保存在内存中。多实例共享账号池时仍需额外的跨实例协调。
+未指定 `loadBalancingMode` 的配置现在默认使用 `balanced`；显式设置的 `priority` 保留。并发参数修改后重启生效；指定凭据文件路径时，冷却状态会持久保存并在重启后恢复。多实例共享账号池时仍需额外的跨实例协调。
 
 会话软亲和默认开启，在公平队列允许分配名额后，优先选择该会话上次成功使用且当前可调度的账号。账号满载、冷却、禁用、删除或不支持请求模型时，立即按原有 `balanced` / `priority` 规则选其他账号；不会专门等待绑定账号。没有有效绑定的请求沿用原调度规则，`priority` 的“当前账号”仍是全局偏好。仅在 Messages 响应完整且通过现有响应校验后建立或刷新绑定；空响应、解码失败、断流和取消不会更新绑定，分流请求成功后才改绑。同一会话并发请求按成功完成顺序更新绑定。
 
@@ -285,6 +288,7 @@ docker login -u abu116
    "loadBalancingMode": "balanced",
    "requestLimits": {
       "maxConcurrentRequests": 64,
+      "maxUpstreamAttempts": 9,
       "totalTimeoutSeconds": 900,
       "firstContentTimeoutSeconds": 180,
       "idleTimeoutSeconds": 120,
@@ -297,17 +301,31 @@ docker login -u abu116
       "maxWaiting": 128,
       "waitTimeoutSeconds": 30,
       "rateLimitCooldownSeconds": 30,
-      "adaptiveConcurrency": true
+      "adaptiveConcurrency": true,
+      "requestsPerMinute": 60,
+      "refreshBackoffSeconds": 30
    },
    "extractThinking": true
 }
 ```
 
+账号主动限速默认开启：每个账号在滚动 60 秒内最多预留 60 次调用，对话、WebSearch、压缩及其 HTTP/空响应/工具恢复重试共用。预留在获取 Token 前计入；取消、刷新失败或未实际发送请求也不退还，以保守限制尝试数。额度用完后沿用有界公平队列，窗口到期自动唤醒；不占用在途名额。此限制允许窗口内突发，并非每秒匀速节流，也不是 Kiro 官方额度或 TPM 限制。认证刷新单独由互斥和退避控制。设置 `requestsPerMinute: 0` 可关闭 RPM 保护。
+
+认证服务发生瞬态故障后，至少等待 `refreshBackoffSeconds`，连续失败时指数增长并加抖动，与有效 `Retry-After` 取更长者。退避在同账号刷新锁内登记，等待锁的请求、管理接口强制刷新和余额查询均不能跳过；不同账号互不阻塞。并发请求因同一个旧 access token 被拒绝时，锁内发现已更新就复用新 Token，不重复刷新。
+
+普通 API/MCP 的非 Token 失效 403 会立即停用账号并终止当前调用，保留上游 403；401 连续失败达到 3 次停用。自动停用原因与 `disabled` 一并写回凭据文件；写入失败会记录错误。所有账号或某个模型都无可用凭据时，也不会重新启用失败账号。排查权限、订阅或配置后，通过管理接口手动启用。凭据加载和新增验证前会规范化并固定 `machineId`，刷新 Token 不改变设备 ID；未配置的 `systemVersion` 使用实际运行平台，不再随机选择系统。
+
+客户端请求的 `maxUpstreamAttempts` 贯穿处理过程及响应流读取，额外恢复不会重置预算；预算耗尽时 JSON 返回 `503 overloaded_error`，已开始的 SSE 发送错误事件。总截止时间仍由 `totalTimeoutSeconds` 约束。管理后台独立请求不共享该客户端预算。`cooldownRemainingMs` / `coolingCredentials` 同时反映 429、刷新退避和 RPM 等待；容量估计计入当前 RPM 剩余额度，`concurrency` 新增 `requestsPerMinute` / `refreshBackoffSeconds`。
+
+指定凭据文件路径时，RPM 窗口、429 冷却、刷新退避及其连续失败次数、429 后的并发降档会持久保存到凭据文件旁的 `<凭据文件名>.protection.sqlite3`（例如 `credentials.json.protection.sqlite3`），无需额外配置。调用预留在获取 Token/发送请求前同步提交，冷却、退避及并发档位变化也及时写入，不依赖正常退出。此文件不保存 Token、API Key 或邮箱；按凭据 ID 和稳定身份摘要匹配，OAuth Token 轮换不会清空保护。重启时扣除停机时间，过期窗口自动失效；系统时钟回拨时保留保存时的剩余等待。并发成功窗口的累计进度在重启后从零开始，已降低的并发档位及探测状态保留。
+
+保护文件所在目录须可写；初始化/读取损坏失败会阻止启动，运行中写入失败时新的调用返回 `503 overloaded_error`，不继续发送上游请求。每次预留涉及同步磁盘提交，应使用可靠的本地持久盘。备份、迁移时与凭据文件一起保留；Docker Compose 默认已挂载整个配置目录。未指定凭据文件路径时保护仅在内存生效。此机制只解决单实例重启恢复，多实例共享账号仍需额外协调；不要让多个进程同时使用同一凭据和保护文件。
+
 ### credentials.json
 
 支持单对象格式（向后兼容）或数组格式（多凭据）。两种格式都会保存 Token 刷新和管理变更；单对象文件添加第二个凭据或删除最后一个凭据时，会自动转为数组格式。回写使用同目录临时文件和原子替换，保留已有文件权限。
 
-Social 和 IdC 刷新会拒绝空的访问令牌、空的轮换刷新令牌，以及非正数或超出时间范围的 `expiresIn`，异常结果不会覆盖原凭据。HTTP 400 响应中 OAuth `error` 字段为 `invalid_grant` 时，自动调度会将对应凭据标为永久失效；其他错误仍按现有失败阈值处理。Token 刷新和余额查询保留 60 秒总超时，响应体首包与空闲时间同时受 `requestLimits` 中相应设置与 60 秒的较小值约束。
+Social 和 IdC 刷新会拒绝空的访问令牌、空的轮换刷新令牌，以及非正数或超出时间范围的 `expiresIn`，异常结果不会覆盖原凭据。HTTP 400 响应中 OAuth `error` 字段为 `invalid_grant` 时立即停用；其他明确的 4xx 认证错误按失败阈值处理。429、408、5xx、网络及无效响应进入账号级刷新退避，不计入永久停用阈值。Token 刷新和余额查询保留 60 秒总超时，响应体首包与空闲时间同时受 `requestLimits` 中相应设置与 60 秒的较小值约束。
 
 #### 字段说明
 

@@ -252,7 +252,12 @@ impl KiroProvider {
             // MCP 调用（WebSearch 等工具）不涉及模型选择，无需按模型过滤凭据
             let ctx = match self.token_manager.acquire_context(None).await {
                 Ok(c) => c,
-                Err(e) if e.is::<CapacityError>() => return Err(e),
+                Err(e)
+                    if e.is::<CapacityError>()
+                        || e.is::<crate::kiro::retry_budget::RetryBudgetExceeded>() =>
+                {
+                    return Err(e);
+                }
                 Err(e) => {
                     last_error = Some(e);
                     continue;
@@ -289,6 +294,7 @@ impl KiroProvider {
                 .header("content-type", "application/json");
             let request = endpoint.decorate_mcp(base, &rctx);
 
+            crate::kiro::retry_budget::consume()?;
             crate::request_log::attempt_started(ctx.id, endpoint.name());
             let response = match request
                 .timeout(Duration::from_secs(
@@ -375,21 +381,35 @@ impl KiroProvider {
             // 401/403 凭据问题
             if matches!(status.as_u16(), 401 | 403) {
                 // token 被上游失效：先尝试 force-refresh，每凭据仅一次机会
-                if endpoint.is_bearer_token_invalid(&body) && !force_refreshed.contains(&ctx.id) {
+                if !ctx.credentials.is_api_key_credential()
+                    && endpoint.is_bearer_token_invalid(&body)
+                    && !force_refreshed.contains(&ctx.id)
+                {
                     force_refreshed.insert(ctx.id);
                     tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
-                    match self.token_manager.force_refresh_token_for(ctx.id).await {
+                    match self.token_manager.refresh_invalid_token(&ctx).await {
                         Ok(_) => {
                             tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
                             continue;
                         }
                         Err(error) => {
                             tracing::warn!(credential_id = ctx.id, error = %crate::request_log::redact(&format!("{error:#}")),
-                            "Token 强制刷新失败，计入失败")
+                            "Token 强制刷新失败，已应用认证恢复策略");
+                            if error.is::<crate::kiro::retry_budget::RetryBudgetExceeded>()
+                                || error.is::<CapacityError>()
+                            {
+                                return Err(error);
+                            }
+                            last_error = Some(error);
+                            continue;
                         }
                     }
                 }
 
+                if status.as_u16() == 403 {
+                    self.token_manager.report_permission_denied(ctx.id);
+                    return Err(UpstreamApiError { status, body }.into());
+                }
                 let has_available = self.token_manager.report_failure(ctx.id);
                 if !has_available {
                     anyhow::bail!("MCP 请求失败（所有凭据已用尽）: {} {}", status, body);
@@ -464,7 +484,12 @@ impl KiroProvider {
                 .await
             {
                 Ok(c) => c,
-                Err(e) if e.is::<CapacityError>() => return Err(e),
+                Err(e)
+                    if e.is::<CapacityError>()
+                        || e.is::<crate::kiro::retry_budget::RetryBudgetExceeded>() =>
+                {
+                    return Err(e);
+                }
                 Err(e) => {
                     last_error = Some(e);
                     continue;
@@ -500,6 +525,7 @@ impl KiroProvider {
                 .header("content-type", "application/json");
             let request = endpoint.decorate_api(base, &rctx);
 
+            crate::kiro::retry_budget::consume()?;
             crate::request_log::attempt_started(ctx.id, endpoint.name());
             let response = match request
                 .timeout(Duration::from_secs(
@@ -603,7 +629,7 @@ impl KiroProvider {
                 return Err(UpstreamApiError { status, body }.into());
             }
 
-            // 401/403 - 更可能是凭据/权限问题：计入失败并允许故障转移
+            // Token 失效先尝试刷新；403 停用并终止本次调用，401 按失败阈值处理。
             if matches!(status.as_u16(), 401 | 403) {
                 tracing::warn!(
                     "API 请求失败（可能为凭据错误，尝试 {}/{}）: {} {}",
@@ -614,21 +640,35 @@ impl KiroProvider {
                 );
 
                 // token 被上游失效：先尝试 force-refresh，每凭据仅一次机会
-                if endpoint.is_bearer_token_invalid(&body) && !force_refreshed.contains(&ctx.id) {
+                if !ctx.credentials.is_api_key_credential()
+                    && endpoint.is_bearer_token_invalid(&body)
+                    && !force_refreshed.contains(&ctx.id)
+                {
                     force_refreshed.insert(ctx.id);
                     tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
-                    match self.token_manager.force_refresh_token_for(ctx.id).await {
+                    match self.token_manager.refresh_invalid_token(&ctx).await {
                         Ok(_) => {
                             tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
                             continue;
                         }
                         Err(error) => {
                             tracing::warn!(credential_id = ctx.id, error = %crate::request_log::redact(&format!("{error:#}")),
-                            "Token 强制刷新失败，计入失败")
+                            "Token 强制刷新失败，已应用认证恢复策略");
+                            if error.is::<crate::kiro::retry_budget::RetryBudgetExceeded>()
+                                || error.is::<CapacityError>()
+                            {
+                                return Err(error);
+                            }
+                            last_error = Some(error);
+                            continue;
                         }
                     }
                 }
 
+                if status.as_u16() == 403 {
+                    self.token_manager.report_permission_denied(ctx.id);
+                    return Err(UpstreamApiError { status, body }.into());
+                }
                 let has_available = self.token_manager.report_failure(ctx.id);
                 if !has_available {
                     anyhow::bail!(
@@ -725,17 +765,7 @@ impl KiroProvider {
     }
 
     fn retry_after(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<Duration> {
-        let value = headers
-            .get(reqwest::header::RETRY_AFTER)?
-            .to_str()
-            .ok()?
-            .trim();
-        if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
-            // 超大整数同样视为超长等待，不能因溢出回退为立即重试。
-            return Some(Duration::from_secs(value.parse().unwrap_or(u64::MAX)));
-        }
-        let deadline = httpdate::parse_http_date(value).ok()?;
-        Some(deadline.duration_since(now).unwrap_or_default())
+        crate::http_client::retry_after(headers, now)
     }
 
     fn response_retry_delay(attempt: usize, retry_after: Option<Duration>) -> Option<Duration> {
@@ -1251,6 +1281,77 @@ mod retry_tests {
             "mcp" => provider.call_mcp("{}").await,
             _ => provider.call_api("{}").await,
         }
+    }
+
+    #[tokio::test]
+    async fn permission_denial_stops_the_call_without_cycling_accounts_or_reenabling_them() {
+        for kind in ["api", "stream", "mcp"] {
+            let mock = mock(StatusCode::FORBIDDEN, None, false).await;
+            for expected in 1..=2 {
+                let error = call(&mock.provider, kind).await.err().unwrap();
+                assert_eq!(
+                    error.downcast_ref::<UpstreamApiError>().unwrap().status,
+                    StatusCode::FORBIDDEN
+                );
+                assert_eq!(mock.calls.lock().len(), expected);
+            }
+            assert!(call(&mock.provider, kind).await.is_err());
+            assert_eq!(mock.calls.lock().len(), 2);
+            assert_eq!(
+                mock.provider.token_manager.snapshot().concurrency.in_flight,
+                0
+            );
+            assert!(
+                mock.provider
+                    .token_manager
+                    .snapshot()
+                    .entries
+                    .iter()
+                    .all(|entry| entry.disabled_reason.as_deref() == Some("PermissionDenied"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn one_budget_caps_http_retries_and_multiple_provider_calls() {
+        use crate::kiro::retry_budget::{CURRENT, RetryBudget, RetryBudgetExceeded};
+        for kind in ["api", "stream", "mcp"] {
+            let mock = mock(StatusCode::SERVICE_UNAVAILABLE, None, false).await;
+            let budget = RetryBudget::new(2, tokio::time::Instant::now() + Duration::from_secs(10));
+            let error = CURRENT
+                .scope(budget, call(&mock.provider, kind))
+                .await
+                .err()
+                .unwrap();
+            assert!(error.is::<RetryBudgetExceeded>());
+            assert_eq!(mock.calls.lock().len(), 2);
+            assert_eq!(
+                mock.provider.token_manager.snapshot().concurrency.in_flight,
+                0
+            );
+        }
+        let mock = mock(StatusCode::OK, None, false).await;
+        let budget = RetryBudget::new(2, tokio::time::Instant::now() + Duration::from_secs(10));
+        CURRENT
+            .scope(budget, async {
+                for kind in ["api", "mcp"] {
+                    call(&mock.provider, kind)
+                        .await
+                        .unwrap()
+                        .text()
+                        .await
+                        .unwrap();
+                }
+                assert!(
+                    call(&mock.provider, "stream")
+                        .await
+                        .err()
+                        .unwrap()
+                        .is::<RetryBudgetExceeded>()
+                );
+            })
+            .await;
+        assert_eq!(mock.calls.lock().len(), 2);
     }
 
     #[tokio::test]

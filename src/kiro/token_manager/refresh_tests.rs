@@ -17,6 +17,25 @@ fn credentials() -> KiroCredentials {
 }
 
 #[tokio::test]
+async fn refresh_errors_preserve_status_and_retry_after_for_shared_backoff() {
+    for status in [429, 503] {
+        let mut response = response(status, "busy".into());
+        response
+            .headers_mut()
+            .insert("retry-after", "600".parse().unwrap());
+        let error =
+            read_refresh_response::<RefreshResponse>(response, &Config::default(), "Social")
+                .await
+                .unwrap_err();
+        let service = error
+            .downcast_ref::<protection::RefreshServiceError>()
+            .unwrap();
+        assert_eq!(service.status.as_u16(), status);
+        assert_eq!(service.retry_after, Some(StdDuration::from_secs(600)));
+    }
+}
+
+#[tokio::test]
 async fn standalone_account_calls_validate_regions_before_network_or_token_processing() {
     for field in ["region", "authRegion", "apiRegion"] {
         let invalid = serde_json::json!({field:"private.invalid/"});

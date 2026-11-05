@@ -23,6 +23,10 @@ pub struct ConcurrencyConfig {
     pub rate_limit_cooldown_seconds: u64,
     /// 429 后减小账号并发，并在响应体完整读取后逐步恢复。
     pub adaptive_concurrency: bool,
+    /// 每账号滚动 60 秒内的上游调用预留数；0 关闭主动限速。
+    pub requests_per_minute: usize,
+    /// 认证服务瞬态故障的初始退避秒数。
+    pub refresh_backoff_seconds: u64,
 }
 
 impl Default for ConcurrencyConfig {
@@ -34,12 +38,22 @@ impl Default for ConcurrencyConfig {
             wait_timeout_seconds: 30,
             rate_limit_cooldown_seconds: 30,
             adaptive_concurrency: true,
+            requests_per_minute: 60,
+            refresh_backoff_seconds: 30,
         }
     }
 }
 
 impl ConcurrencyConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.requests_per_minute <= 1_000_000,
+            "concurrency.requestsPerMinute 必须在 0..=1000000 之间"
+        );
+        anyhow::ensure!(
+            (1..=86_400).contains(&self.refresh_backoff_seconds),
+            "concurrency.refreshBackoffSeconds 必须在 1..=86400 之间"
+        );
         anyhow::ensure!(
             (1..=tokio::sync::Semaphore::MAX_PERMITS).contains(&self.max_in_flight),
             "concurrency.maxInFlight 必须在 1..={} 之间",
@@ -102,6 +116,8 @@ impl SessionAffinityConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct RequestLimits {
+    /// 一个客户端请求所有上游调用（含压缩、搜索和恢复）共用的尝试上限。
+    pub max_upstream_attempts: usize,
     pub max_concurrent_requests: usize,
     pub total_timeout_seconds: u64,
     pub first_content_timeout_seconds: u64,
@@ -113,6 +129,7 @@ pub struct RequestLimits {
 impl Default for RequestLimits {
     fn default() -> Self {
         Self {
+            max_upstream_attempts: 9,
             max_concurrent_requests: 64,
             total_timeout_seconds: 900,
             first_content_timeout_seconds: 180,
@@ -125,6 +142,10 @@ impl Default for RequestLimits {
 
 impl RequestLimits {
     pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (1..=100).contains(&self.max_upstream_attempts),
+            "requestLimits.maxUpstreamAttempts 必须在 1..=100 之间"
+        );
         anyhow::ensure!(
             (1..=tokio::sync::Semaphore::MAX_PERMITS).contains(&self.max_concurrent_requests),
             "requestLimits.maxConcurrentRequests 超出允许范围"
@@ -321,8 +342,12 @@ fn default_kiro_version() -> String {
 }
 
 fn default_system_version() -> String {
-    const SYSTEM_VERSIONS: &[&str] = &["darwin#24.6.0", "win32#10.0.22631"];
-    SYSTEM_VERSIONS[fastrand::usize(..SYSTEM_VERSIONS.len())].to_string()
+    match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        platform => platform,
+    }
+    .to_string()
 }
 
 fn default_node_version() -> String {
@@ -564,6 +589,9 @@ mod tests {
         assert_eq!(defaults.concurrency.max_in_flight_per_credential, 8);
         assert_eq!(defaults.concurrency.max_waiting, 128);
         assert!(defaults.concurrency.adaptive_concurrency);
+        assert_eq!(defaults.concurrency.requests_per_minute, 60);
+        assert_eq!(defaults.concurrency.refresh_backoff_seconds, 30);
+        assert_eq!(defaults.request_limits.max_upstream_attempts, 9);
         let config: Config = serde_json::from_str(
             r#"{"loadBalancingMode":"priority","concurrency":{"maxWaiting":0,"maxInFlight":2}}"#,
         )
@@ -589,6 +617,9 @@ mod tests {
     #[test]
     fn invalid_concurrency_settings_fail_validation_instead_of_panicking_or_hanging() {
         for settings in [
+            serde_json::json!({"requestsPerMinute":1_000_001}),
+            serde_json::json!({"refreshBackoffSeconds":0}),
+            serde_json::json!({"refreshBackoffSeconds":86_401}),
             serde_json::json!({"maxInFlight":0}),
             serde_json::json!({"maxInFlight":usize::MAX}),
             serde_json::json!({"maxInFlightPerCredential":0}),

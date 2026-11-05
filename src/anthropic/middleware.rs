@@ -91,6 +91,7 @@ pub fn cors_layer() -> tower_http::cors::CorsLayer {
 pub(super) struct RequestGuard {
     pub slots: Arc<tokio::sync::Semaphore>,
     pub timeout: std::time::Duration,
+    pub max_upstream_attempts: usize,
 }
 
 pub(super) async fn limit_request(
@@ -115,7 +116,13 @@ pub(super) async fn limit_request(
         }
     };
     let deadline = Instant::now() + guard.timeout;
-    let response = match timeout_at(deadline, next.run(request)).await {
+    let budget = crate::kiro::retry_budget::RetryBudget::new(guard.max_upstream_attempts, deadline);
+    let response = match timeout_at(
+        deadline,
+        crate::kiro::retry_budget::CURRENT.scope(budget.clone(), next.run(request)),
+    )
+    .await
+    {
         Ok(response) => response,
         Err(_) => {
             return (
@@ -135,32 +142,40 @@ pub(super) async fn limit_request(
     let (parts, body) = response.into_parts();
     let stream = futures::stream::unfold(
         (body.into_data_stream().boxed(), Some(permit), false),
-        move |(mut body, mut permit, done)| async move {
-            if done {
-                return None;
+        move |(mut body, mut permit, done)| {
+            let budget = budget.clone();
+            async move {
+                if done {
+                    return None;
+                }
+                let result = match timeout_at(
+                    deadline,
+                    crate::kiro::retry_budget::CURRENT.scope(budget, body.next()),
+                )
+                .await
+                {
+                    Ok(Some(Ok(chunk))) => return Some((Ok(chunk), (body, permit, false))),
+                    Ok(Some(Err(error))) => Err(error),
+                    Ok(None) => return None,
+                    Err(_) if sse => Ok(bytes::Bytes::from(
+                        super::stream::SseEvent::new(
+                            "error",
+                            serde_json::json!({"type":"error", "error":{
+                                "type":"api_error", "message":"Request total deadline exceeded"
+                            }}),
+                        )
+                        .to_sse_string(),
+                    )),
+                    Err(_) => Err(axum::Error::new(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Request total deadline exceeded",
+                    ))),
+                };
+                // Cancel upstream immediately; do not retain capacity until the next poll.
+                permit.take();
+                let empty = futures::stream::empty::<Result<bytes::Bytes, axum::Error>>().boxed();
+                Some((result, (empty, permit, true)))
             }
-            let result = match timeout_at(deadline, body.next()).await {
-                Ok(Some(Ok(chunk))) => return Some((Ok(chunk), (body, permit, false))),
-                Ok(Some(Err(error))) => Err(error),
-                Ok(None) => return None,
-                Err(_) if sse => Ok(bytes::Bytes::from(
-                    super::stream::SseEvent::new(
-                        "error",
-                        serde_json::json!({"type":"error", "error":{
-                            "type":"api_error", "message":"Request total deadline exceeded"
-                        }}),
-                    )
-                    .to_sse_string(),
-                )),
-                Err(_) => Err(axum::Error::new(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "Request total deadline exceeded",
-                ))),
-            };
-            // Cancel upstream immediately; do not retain capacity until the next poll.
-            permit.take();
-            let empty = futures::stream::empty::<Result<bytes::Bytes, axum::Error>>().boxed();
-            Some((result, (empty, permit, true)))
         },
     );
     Response::from_parts(parts, Body::from_stream(stream))
@@ -208,6 +223,7 @@ mod request_guard_tests {
             )
             .layer(axum::middleware::from_fn_with_state(
                 RequestGuard {
+                    max_upstream_attempts: 9,
                     slots: slots.clone(),
                     timeout,
                 },
@@ -221,6 +237,39 @@ mod request_guard_tests {
             .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn attempt_budget_spans_handler_body_polling_and_isolated_client_requests() {
+        let app = Router::new()
+            .route(
+                "/budget",
+                get(|| async {
+                    crate::kiro::retry_budget::consume().unwrap();
+                    Body::from_stream(stream::iter(0..2).then(|_| async {
+                        Ok::<_, std::io::Error>(if crate::kiro::retry_budget::consume().is_ok() {
+                            "allowed "
+                        } else {
+                            "exhausted"
+                        })
+                    }))
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                RequestGuard {
+                    slots: Arc::new(tokio::sync::Semaphore::new(2)),
+                    timeout: Duration::from_secs(1),
+                    max_upstream_attempts: 2,
+                },
+                limit_request,
+            ));
+        let (first, second) = tokio::join!(call(&app, "/budget"), call(&app, "/budget"));
+        for response in [first, second] {
+            assert_eq!(
+                to_bytes(response.into_body(), 4096).await.unwrap(),
+                "allowed exhausted"
+            );
+        }
     }
 
     #[tokio::test]
