@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::time::sleep;
 
-use crate::http_client::{ProxyConfig, build_client};
+use crate::http_client::{ProxyConfig, build_client, read_bounded_text};
 use crate::kiro::endpoint::{KiroEndpoint, RequestContext};
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
@@ -95,8 +95,15 @@ impl UpstreamResponse {
         .boxed()
     }
 
-    pub async fn text(self) -> reqwest::Result<String> {
-        let result = self.response.text().await;
+    pub async fn text(self) -> anyhow::Result<String> {
+        let limits = &self.token_manager.config().request_limits;
+        let result = read_bounded_text(
+            self.response,
+            limits.max_response_bytes,
+            Duration::from_secs(limits.first_content_timeout_seconds),
+            Duration::from_secs(limits.idle_timeout_seconds),
+        )
+        .await;
         if result.is_ok() {
             self.token_manager.report_transport_success(&self.context);
         }
@@ -134,7 +141,7 @@ impl KiroProvider {
         self.token_manager.config().tool_output_recovery_attempts
     }
 
-    /// Called only after the Messages response has been decoded and validated.
+    /// Called only after the Messages or MCP response has been decoded and validated.
     pub(crate) fn report_response_success(
         &self,
         credential_id: u64,
@@ -219,6 +226,18 @@ impl KiroProvider {
     /// 发送 MCP API 请求（WebSearch 等工具调用）
     pub async fn call_mcp(&self, request_body: &str) -> anyhow::Result<UpstreamResponse> {
         self.call_mcp_with_retry(request_body).await
+    }
+
+    async fn read_error_body(&self, response: reqwest::Response) -> String {
+        let limits = self.request_limits();
+        read_bounded_text(
+            response,
+            limits.max_response_bytes.min(64 * 1024),
+            Duration::from_secs(limits.first_content_timeout_seconds),
+            Duration::from_secs(limits.idle_timeout_seconds),
+        )
+        .await
+        .unwrap_or_else(|error| format!("读取上游错误响应失败: {error:#}"))
     }
 
     /// 内部方法：带重试逻辑的 MCP API 调用
@@ -316,7 +335,6 @@ impl KiroProvider {
 
             // 成功响应
             if status.is_success() {
-                self.token_manager.report_success(ctx.id);
                 return Ok(UpstreamResponse {
                     response,
                     affinity_key: None,
@@ -326,10 +344,7 @@ impl KiroProvider {
             }
 
             // 失败响应
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|error| format!("读取上游错误响应失败: {error:#}"));
+            let body = self.read_error_body(response).await;
             crate::request_log::attempt_result(
                 Some(status.as_u16()),
                 Some(&body),
@@ -537,10 +552,7 @@ impl KiroProvider {
             }
 
             // 失败响应：读取 body 用于日志/错误信息
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|error| format!("读取上游错误响应失败: {error:#}"));
+            let body = self.read_error_body(response).await;
             crate::request_log::attempt_result(
                 Some(status.as_u16()),
                 Some(&body),
@@ -792,6 +804,47 @@ mod response_tests {
                 token_manager: manager,
             },
         )
+    }
+
+    #[tokio::test]
+    async fn oversized_text_response_releases_reservation_without_recording_success() {
+        let manager = Arc::new(
+            MultiTokenManager::new(
+                serde_json::from_value(serde_json::json!({
+                    "requestLimits": {"maxResponseBytes": 1024}
+                }))
+                .unwrap(),
+                vec![KiroCredentials {
+                    id: Some(1),
+                    kiro_api_key: Some("test-key".into()),
+                    ..Default::default()
+                }],
+                None,
+                None,
+                true,
+            )
+            .unwrap(),
+        );
+        let context = manager.acquire_context(None).await.unwrap();
+        let response = UpstreamResponse {
+            response: reqwest::Response::from(http::Response::new(reqwest::Body::from(
+                "x".repeat(1025),
+            ))),
+            affinity_key: None,
+            context,
+            token_manager: manager.clone(),
+        };
+        assert_eq!(manager.snapshot().concurrency.in_flight, 1);
+        assert!(
+            response
+                .text()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("byte limit")
+        );
+        assert_eq!(manager.snapshot().concurrency.in_flight, 0);
+        assert_eq!(manager.snapshot().entries[0].success_count, 0);
     }
 
     #[tokio::test]
@@ -1117,6 +1170,15 @@ mod retry_tests {
     }
 
     async fn mock(status: StatusCode, retry_after: Option<&'static str>, recover: bool) -> Mock {
+        mock_with_body(status, retry_after, recover, "upstream busy").await
+    }
+
+    async fn mock_with_body(
+        status: StatusCode,
+        retry_after: Option<&'static str>,
+        recover: bool,
+        body: &'static str,
+    ) -> Mock {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let captured = calls.clone();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1131,11 +1193,7 @@ mod retry_tests {
                     if recover && calls.len() > 1 {
                         return (StatusCode::OK, HeaderMap::new(), "success");
                     }
-                    (
-                        status,
-                        retry_after.map(headers).unwrap_or_default(),
-                        "upstream busy",
-                    )
+                    (status, retry_after.map(headers).unwrap_or_default(), body)
                 }
             }),
         );
@@ -1182,6 +1240,42 @@ mod retry_tests {
             "stream" => provider.call_api_stream("{}").await,
             "mcp" => provider.call_mcp("{}").await,
             _ => provider.call_api("{}").await,
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_error_bodies_preserve_status_and_do_not_retry_parameter_errors() {
+        static BODY: [u8; 65_537] = [b'x'; 65_537];
+        let mock = mock_with_body(
+            StatusCode::BAD_REQUEST,
+            None,
+            false,
+            std::str::from_utf8(&BODY).unwrap(),
+        )
+        .await;
+        for kind in ["api", "stream", "mcp"] {
+            let error = call(&mock.provider, kind).await.err().unwrap();
+            let error = error.downcast_ref::<UpstreamApiError>().unwrap();
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert!(error.body.contains("byte limit"));
+            assert!(error.body.len() < 1024);
+            assert_eq!(
+                mock.provider.token_manager.snapshot().concurrency.in_flight,
+                0
+            );
+        }
+        assert_eq!(mock.calls.lock().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn mcp_http_success_is_not_counted_before_response_validation() {
+        let mock = mock(StatusCode::OK, None, false).await;
+        let before = mock.provider.token_manager.snapshot();
+        let response = call(&mock.provider, "mcp").await.unwrap();
+        response.text().await.unwrap();
+        let after = mock.provider.token_manager.snapshot();
+        for (before, after) in before.entries.iter().zip(&after.entries) {
+            assert_eq!(before.success_count, after.success_count);
         }
     }
 

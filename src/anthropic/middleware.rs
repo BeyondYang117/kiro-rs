@@ -135,7 +135,8 @@ pub(super) async fn limit_request(
                 return None;
             }
             let result = match timeout_at(deadline, body.next()).await {
-                Ok(Some(chunk)) => return Some((chunk, (body, permit, false))),
+                Ok(Some(Ok(chunk))) => return Some((Ok(chunk), (body, permit, false))),
+                Ok(Some(Err(error))) => Err(error),
                 Ok(None) => return None,
                 Err(_) if sse => Ok(bytes::Bytes::from(
                     super::stream::SseEvent::new(
@@ -158,4 +159,116 @@ pub(super) async fn limit_request(
         },
     );
     Response::from_parts(parts, Body::from_stream(stream))
+}
+
+#[cfg(test)]
+mod request_guard_tests {
+    use super::*;
+    use axum::{Router, body::to_bytes, routing::get};
+    use futures::{StreamExt, stream};
+    use std::time::Duration;
+    use tower::ServiceExt;
+
+    fn app(timeout: Duration) -> (Router, Arc<tokio::sync::Semaphore>) {
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let app = Router::new()
+            .route("/ok", get(|| async { "ok" }))
+            .route(
+                "/slow",
+                get(|| async { std::future::pending::<Response>().await }),
+            )
+            .route(
+                "/sse",
+                get(|| async {
+                    (
+                        [("content-type", "text/event-stream")],
+                        Body::from_stream(
+                            stream::once(async { Ok::<_, std::io::Error>("data: start\n\n") })
+                                .chain(stream::pending()),
+                        ),
+                    )
+                        .into_response()
+                }),
+            )
+            .route(
+                "/broken",
+                get(|| async {
+                    Body::from_stream(
+                        stream::once(async {
+                            Err::<bytes::Bytes, _>(std::io::Error::other("broken body"))
+                        })
+                        .chain(stream::pending()),
+                    )
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                RequestGuard {
+                    slots: slots.clone(),
+                    timeout,
+                },
+                limit_request,
+            ));
+        (app, slots)
+    }
+
+    async fn call(app: &Router, path: &str) -> Response {
+        app.clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn body_consumption_and_disconnect_release_admission_capacity() {
+        let (app, slots) = app(Duration::from_secs(1));
+        let response = call(&app, "/ok").await;
+        assert_eq!(slots.available_permits(), 0);
+        let rejection = call(&app, "/ok").await;
+        assert_eq!(rejection.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(rejection.headers()["retry-after"], "1");
+        let error: serde_json::Value =
+            serde_json::from_slice(&to_bytes(rejection.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(error["error"]["type"], "rate_limit_error");
+        assert_eq!(to_bytes(response.into_body(), 4096).await.unwrap(), "ok");
+        assert_eq!(slots.available_permits(), 1);
+        let response = call(&app, "/sse").await;
+        assert_eq!(slots.available_permits(), 0);
+        drop(response);
+        assert_eq!(slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn handler_timeout_and_cancellation_release_capacity() {
+        let (app, slots) = app(Duration::from_millis(25));
+        let response = call(&app, "/slow").await;
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(slots.available_permits(), 1);
+        let mut pending = Box::pin(call(&app, "/slow"));
+        assert!(futures::poll!(pending.as_mut()).is_pending());
+        assert_eq!(slots.available_permits(), 0);
+        drop(pending);
+        assert_eq!(slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn sse_deadline_emits_terminal_error_and_releases_without_another_poll() {
+        let (app, slots) = app(Duration::from_millis(25));
+        let mut body = call(&app, "/sse").await.into_body().into_data_stream();
+        assert_eq!(body.next().await.unwrap().unwrap(), "data: start\n\n");
+        let error = body.next().await.unwrap().unwrap();
+        let error = std::str::from_utf8(&error).unwrap();
+        assert!(error.starts_with("event: error\n"));
+        assert!(error.contains("Request total deadline exceeded"));
+        assert_eq!(slots.available_permits(), 1);
+        assert!(body.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn broken_body_releases_capacity_before_stream_is_dropped() {
+        let (app, slots) = app(Duration::from_secs(1));
+        let mut body = call(&app, "/broken").await.into_body().into_data_stream();
+        assert!(body.next().await.unwrap().is_err());
+        assert_eq!(slots.available_permits(), 1);
+        assert!(body.next().await.is_none());
+    }
 }

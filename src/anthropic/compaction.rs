@@ -2988,6 +2988,7 @@ mod tests {
                         1
                     );
                     assert!(message["usage"]["output_tokens"].as_i64().unwrap() > 0);
+                    assert_eq!(upstream.manager.snapshot().entries[0].success_count, 1);
                     let requests = upstream.requests.lock().unwrap();
                     assert_eq!(requests.len(), 1);
                     assert_eq!(requests[0]["method"], "tools/call");
@@ -3032,6 +3033,7 @@ mod tests {
                     let error: Value = serde_json::from_slice(&body).unwrap();
                     assert_eq!(error["error"]["type"], "api_error");
                     assert!(error.get("content").is_none());
+                    assert_eq!(upstream.manager.snapshot().entries[0].success_count, 0);
                     assert_eq!(upstream.requests.lock().unwrap().len(), 1);
                 }
             }

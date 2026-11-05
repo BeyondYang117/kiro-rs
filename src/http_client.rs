@@ -7,6 +7,46 @@ use std::time::Duration;
 
 use crate::model::config::TlsBackend;
 
+/// Read JSON/text bodies without trusting Content-Length or buffering an unbounded stream.
+/// Empty chunks do not extend the first-byte or idle deadline.
+pub(crate) async fn read_bounded_text(
+    response: reqwest::Response,
+    max_bytes: usize,
+    first_byte_timeout: Duration,
+    idle_timeout: Duration,
+) -> anyhow::Result<String> {
+    use anyhow::Context;
+    use futures::StreamExt;
+    use tokio::time::{Instant, timeout_at};
+
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        anyhow::bail!("Upstream response byte limit exceeded ({max_bytes} bytes)");
+    }
+    let mut stream = response.bytes_stream();
+    let mut buffer = Vec::new();
+    let mut deadline = Instant::now() + first_byte_timeout.min(idle_timeout);
+    loop {
+        let next = timeout_at(deadline, stream.next())
+            .await
+            .context("Upstream response body timeout exceeded")?;
+        let Some(chunk) = next else { break };
+        let chunk = chunk.context("Failed to read upstream response body")?;
+        if chunk.len() > max_bytes.saturating_sub(buffer.len()) {
+            anyhow::bail!("Upstream response byte limit exceeded ({max_bytes} bytes)");
+        }
+        if !chunk.is_empty() {
+            buffer.extend_from_slice(&chunk);
+            deadline = Instant::now() + idle_timeout;
+        }
+    }
+    // These endpoints return UTF-8 JSON. Match reqwest's lossy text decoding and BOM removal.
+    let text = String::from_utf8_lossy(&buffer);
+    Ok(text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned())
+}
+
 /// 代理配置
 #[derive(Clone, Default, PartialEq, Eq, Hash)]
 pub struct ProxyConfig {
@@ -140,5 +180,90 @@ mod tests {
         let debug = format!("{proxy:?}");
         assert!(!debug.contains("hidden-user"));
         assert!(!debug.contains("hidden-password"));
+    }
+}
+
+#[cfg(test)]
+mod bounded_body_tests {
+    use super::*;
+    use futures::{StreamExt, stream};
+
+    fn response(body: reqwest::Body, length: Option<usize>) -> reqwest::Response {
+        let mut response = http::Response::builder();
+        if let Some(length) = length {
+            response = response.header("content-length", length);
+        }
+        reqwest::Response::from(response.body(body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn exact_byte_limit_accepts_split_utf8_and_strips_bom() {
+        let bytes = "\u{feff}你好".as_bytes();
+        let body = reqwest::Body::wrap_stream(stream::iter(
+            bytes
+                .iter()
+                .map(|byte| Ok::<_, std::io::Error>(vec![*byte]))
+                .collect::<Vec<_>>(),
+        ));
+        let text = read_bounded_text(
+            response(body, None),
+            bytes.len(),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(text, "你好");
+    }
+
+    #[tokio::test]
+    async fn advertised_and_chunked_oversize_bodies_are_rejected() {
+        for advertised in [false, true] {
+            let body = if advertised {
+                reqwest::Body::from("12345")
+            } else {
+                reqwest::Body::wrap_stream(
+                    stream::iter([Ok::<_, std::io::Error>("1234"), Ok("5")])
+                        .chain(stream::pending()),
+                )
+            };
+            // In particular, chunked bodies must be rejected without waiting for EOF.
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                read_bounded_text(
+                    response(body, advertised.then_some(5)),
+                    4,
+                    Duration::from_secs(2),
+                    Duration::from_secs(2),
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(result.unwrap_err().to_string().contains("byte limit"));
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_bodies_and_empty_keepalives_time_out() {
+        for prefix in [false, true] {
+            let initial = stream::iter(prefix.then_some(Ok::<_, std::io::Error>("x")));
+            let empty_chunks = stream::unfold((), |()| async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                Some((Ok::<_, std::io::Error>(""), ()))
+            });
+            let body = reqwest::Body::wrap_stream(initial.chain(empty_chunks));
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                read_bounded_text(
+                    response(body, None),
+                    100,
+                    Duration::from_millis(25),
+                    Duration::from_millis(25),
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(result.unwrap_err().to_string().contains("timeout"));
+        }
     }
 }

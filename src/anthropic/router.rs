@@ -94,3 +94,62 @@ pub fn create_router_with_provider(
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .with_state(state)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{kiro::token_manager::MultiTokenManager, model::config::Config};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use std::{collections::HashMap, sync::Arc};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn endpoint_groups_share_capacity_and_authentication_precedes_admission() {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "requestLimits": {"maxConcurrentRequests": 1}
+        }))
+        .unwrap();
+        let manager = Arc::new(MultiTokenManager::new(config, vec![], None, None, true).unwrap());
+        let endpoints = HashMap::from([(
+            "ide".into(),
+            Arc::new(crate::kiro::endpoint::IdeEndpoint::new())
+                as Arc<dyn crate::kiro::endpoint::KiroEndpoint>,
+        )]);
+        let provider = KiroProvider::with_proxy(manager, None, endpoints, "ide".into());
+        let app = create_router_with_provider("test-key", Some(provider), true, true);
+        let request = |path: &str, key: &str| {
+            Request::builder()
+                .uri(path)
+                .header("x-api-key", key)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let active = app
+            .clone()
+            .oneshot(request("/v1/models", "test-key"))
+            .await
+            .unwrap();
+        assert_eq!(active.status(), StatusCode::OK);
+        let unauthorized = app
+            .clone()
+            .oneshot(request("/cc/v1/models", "wrong"))
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let rejected = app
+            .clone()
+            .oneshot(request("/cc/v1/models", "test-key"))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
+        drop(active);
+        let response = app
+            .oneshot(request("/cc/v1/models", "test-key"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}

@@ -402,6 +402,7 @@ async fn call_mcp_api(
     tracing::debug!(request_bytes = request_body.len(), "MCP request prepared");
 
     let response = provider.call_mcp(&request_body).await?;
+    let credential_id = response.credential_id();
 
     let body = response.text().await?;
     tracing::debug!(response_bytes = body.len(), "MCP response received");
@@ -411,7 +412,9 @@ async fn call_mcp_api(
     if mcp_response.jsonrpc != "2.0" || mcp_response.id != request.id {
         bail!("Invalid MCP response version or request ID");
     }
-    parse_search_results(&mcp_response)
+    let results = parse_search_results(&mcp_response)?;
+    provider.report_response_success(credential_id, None);
+    Ok(results)
 }
 
 #[cfg(test)]

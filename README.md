@@ -38,6 +38,7 @@
 - **负载均衡**: 默认 `balanced`（按在途请求数、历史成功次数、优先级依次选择），支持 `priority`（优先复用当前账号，满载/冷却时分流）模式
 - **会话软亲和**: 默认优先复用同一会话上次成功的账号，满载/冷却或不符合模型资格时立即分流，保留公平排队
 - **并发保护**: 全局/单账号在途上限、有界等待及账号级 429 冷却，取消和流结束自动释放名额
+- **请求保护**: 限制完整请求的并发与总耗时，约束上游响应大小、首内容等待和空闲时间；覆盖对话及 WebSearch/MCP
 - **智能重试**: 每轮上游 HTTP 尝试最多 `min(凭据数 × 3, 9)` 次；空回复另有最多 2 次重试
 - **凭据回写**: 自动原子回写刷新后的 Token 和管理变更，支持单凭据与多凭据格式
 - **Thinking 模式**: 支持 Claude 的 extended thinking 功能
@@ -159,6 +160,8 @@ curl http://127.0.0.1:8990/v1/messages \
   }'
 ```
 
+存活探针 `GET /healthz` 固定返回 `200`；就绪探针 `GET /readyz` 在至少有一个启用的凭据时返回 `200`，否则返回 `503`。两者均无需 API Key，且不主动调用上游验证凭据。停机收到 SIGINT/SIGTERM 后最多等待 30 秒完成在途请求。
+
 ### Docker
 
 通过 Docker 从当前源码构建并启动（包含本地修改的管理页面和日志功能）：
@@ -220,9 +223,9 @@ docker login -u abu116
 | `loadBalancingMode` | string | `balanced` | `balanced` 按在途请求数、累计成功次数、优先级依次选择；`priority` 优先复用当前账号 |
 | `requestLimits.maxConcurrentRequests` | integer | `64` | 单进程 HTTP 请求并发上限；超限返回 `429` |
 | `requestLimits.totalTimeoutSeconds` | integer | `900` | 单次请求总截止时间，覆盖处理和响应体读取，范围 1～86400 |
-| `requestLimits.firstContentTimeoutSeconds` | integer | `180` | 上游首个有效内容的最长等待时间，范围 1～86400 |
+| `requestLimits.firstContentTimeoutSeconds` | integer | `180` | 对话等待上游首个有效内容的上限；MCP 等待首个非空数据块的上限，范围 1～86400 |
 | `requestLimits.idleTimeoutSeconds` | integer | `120` | 上游响应相邻数据块之间的最长空闲时间，范围 1～86400 |
-| `requestLimits.maxResponseBytes` | integer | `33554432` | 单次上游响应的字节上限，范围 1024～1073741824 |
+| `requestLimits.maxResponseBytes` | integer | `33554432` | 上游响应的字节上限，覆盖对话与 MCP；错误正文最多读取此值与 64 KiB 中较小者，范围 1024～1073741824 |
 | `requestLimits.maxResponseEvents` | integer | `100000` | 单次响应生成的事件上限，范围 1～1000000 |
 | `sessionAffinity.enabled` | boolean | `true` | 两种调度模式均优先复用会话上次成功的账号；设为 `false` 恢复原调度规则 |
 | `sessionAffinity.ttlSeconds` | integer | `1800` | 绑定自上次成功响应起的有效秒数，范围 1～86400 |
