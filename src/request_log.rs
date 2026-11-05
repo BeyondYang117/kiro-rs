@@ -11,7 +11,7 @@ use std::{
 use axum::{
     Json,
     body::Body,
-    extract::{Extension, Path as AxumPath, Query, State},
+    extract::{Extension, Path as AxumPath, State},
     http::{HeaderValue, Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -134,9 +134,9 @@ tokio::task_local! { static CURRENT: RequestContext; }
 pub(crate) fn redact(message: &str) -> String {
     static PATTERNS: OnceLock<Vec<regex::Regex>> = OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| [
-        r#"(?i)(?:\b(?:authorization|x-api-key|(?:access|refresh)[_-]?token|client[_-]?secret|(?:admin)?api[_-]?key|proxy[_-]?password|password)\b)[\s"':=]+(?:bearer\s+)?[^\s,;"'}]+"#,
+        r#"(?i)\b(?:authorization|x-api-key|(?:access|refresh)[_-]?token|client[_-]?secret|(?:(?:admin|kiro)[_-]?)?api[_-]?key|proxy[_-]?password|password)\b["']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*(?:"|\\?$)|'(?:\\.|[^'\\])*(?:'|\\?$)|(?:(?:bearer|basic)\s+)?[^\s,;"'}]+)"#,
         r#"(?i)\bbearer\s+[^\s,;"}]+"#,
-        r"\b(?:sk-|aik_)[A-Za-z0-9_\-]+",
+        r"\b(?:sk-|aik_|ksk_)[A-Za-z0-9_\-]+",
         r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
         r"(?i)(?:https?|socks5h?)://[^\s/@]+:[^\s/@]+@",
     ].iter().map(|pattern| regex::Regex::new(pattern).expect("valid redaction regex")).collect());
@@ -145,6 +145,21 @@ pub(crate) fn redact(message: &str) -> String {
         result = pattern.replace_all(&result, "[REDACTED]").into_owned();
     }
     result
+}
+
+/// Apply the same redaction to JSON and SSE errors; bound untrusted diagnostic text.
+pub(crate) fn public_error_message(message: &str) -> String {
+    redact(message)
+        .chars()
+        .take(4096)
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 pub fn request_metadata(model: &str, stream: bool) {
@@ -482,7 +497,7 @@ fn query_error(error: impl std::fmt::Display) -> Response {
 
 pub async fn list(
     Extension(store): Extension<Arc<LogStore>>,
-    Query(query): Query<LogQuery>,
+    crate::admin::extract::AdminQuery(query): crate::admin::extract::AdminQuery<LogQuery>,
 ) -> Response {
     if query.from.zip(query.to).is_some_and(|(from, to)| from > to) {
         return (

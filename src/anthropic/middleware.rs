@@ -53,12 +53,16 @@ pub async fn auth_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    match auth::extract_api_key(&request) {
-        Some(key) if auth::constant_time_eq(&key, &state.api_key) => next.run(request).await,
-        _ => {
-            let error = ErrorResponse::authentication_error();
-            (StatusCode::UNAUTHORIZED, Json(error)).into_response()
-        }
+    if auth::authenticate(&request, &state.api_key) {
+        next.run(request).await
+    } else {
+        let error = ErrorResponse::authentication_error();
+        (
+            StatusCode::UNAUTHORIZED,
+            [("www-authenticate", "Bearer")],
+            Json(error),
+        )
+            .into_response()
     }
 }
 

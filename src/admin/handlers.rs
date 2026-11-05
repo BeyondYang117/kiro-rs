@@ -1,12 +1,9 @@
 //! Admin API HTTP 处理器
 
-use axum::{
-    Json,
-    extract::{Path, Query, State},
-    response::IntoResponse,
-};
+use axum::{Json, extract::State, response::IntoResponse};
 
 use super::{
+    extract::{AdminJson, AdminPath, AdminQuery},
     middleware::AdminState,
     types::{
         AddCredentialRequest, BalanceQuery, SetDisabledRequest, SetLoadBalancingModeRequest,
@@ -25,8 +22,8 @@ pub async fn get_all_credentials(State(state): State<AdminState>) -> impl IntoRe
 /// 设置凭据禁用状态
 pub async fn set_credential_disabled(
     State(state): State<AdminState>,
-    Path(id): Path<u64>,
-    Json(payload): Json<SetDisabledRequest>,
+    AdminPath(id): AdminPath<u64>,
+    AdminJson(payload): AdminJson<SetDisabledRequest>,
 ) -> impl IntoResponse {
     match state.service.set_disabled(id, payload.disabled) {
         Ok(_) => {
@@ -41,8 +38,8 @@ pub async fn set_credential_disabled(
 /// 设置凭据优先级
 pub async fn set_credential_priority(
     State(state): State<AdminState>,
-    Path(id): Path<u64>,
-    Json(payload): Json<SetPriorityRequest>,
+    AdminPath(id): AdminPath<u64>,
+    AdminJson(payload): AdminJson<SetPriorityRequest>,
 ) -> impl IntoResponse {
     match state.service.set_priority(id, payload.priority) {
         Ok(_) => Json(SuccessResponse::new(format!(
@@ -58,7 +55,7 @@ pub async fn set_credential_priority(
 /// 重置失败计数并重新启用
 pub async fn reset_failure_count(
     State(state): State<AdminState>,
-    Path(id): Path<u64>,
+    AdminPath(id): AdminPath<u64>,
 ) -> impl IntoResponse {
     match state.service.reset_and_enable(id) {
         Ok(_) => Json(SuccessResponse::new(format!(
@@ -74,8 +71,8 @@ pub async fn reset_failure_count(
 /// 获取指定凭据的余额
 pub async fn get_credential_balance(
     State(state): State<AdminState>,
-    Path(id): Path<u64>,
-    Query(query): Query<BalanceQuery>,
+    AdminPath(id): AdminPath<u64>,
+    AdminQuery(query): AdminQuery<BalanceQuery>,
 ) -> impl IntoResponse {
     match state.service.get_balance(id, query.force).await {
         Ok(response) => Json(response).into_response(),
@@ -87,7 +84,7 @@ pub async fn get_credential_balance(
 /// 添加新凭据
 pub async fn add_credential(
     State(state): State<AdminState>,
-    Json(payload): Json<AddCredentialRequest>,
+    AdminJson(payload): AdminJson<AddCredentialRequest>,
 ) -> impl IntoResponse {
     match state.service.add_credential(payload).await {
         Ok(response) => Json(response).into_response(),
@@ -99,7 +96,7 @@ pub async fn add_credential(
 /// 删除凭据
 pub async fn delete_credential(
     State(state): State<AdminState>,
-    Path(id): Path<u64>,
+    AdminPath(id): AdminPath<u64>,
 ) -> impl IntoResponse {
     match state.service.delete_credential(id) {
         Ok(_) => Json(SuccessResponse::new(format!("凭据 #{} 已删除", id))).into_response(),
@@ -111,7 +108,7 @@ pub async fn delete_credential(
 /// 强制刷新凭据 Token
 pub async fn force_refresh_token(
     State(state): State<AdminState>,
-    Path(id): Path<u64>,
+    AdminPath(id): AdminPath<u64>,
 ) -> impl IntoResponse {
     match state.service.force_refresh_token(id).await {
         Ok(_) => Json(SuccessResponse::new(format!(
@@ -134,7 +131,7 @@ pub async fn get_load_balancing_mode(State(state): State<AdminState>) -> impl In
 /// 设置负载均衡模式
 pub async fn set_load_balancing_mode(
     State(state): State<AdminState>,
-    Json(payload): Json<SetLoadBalancingModeRequest>,
+    AdminJson(payload): AdminJson<SetLoadBalancingModeRequest>,
 ) -> impl IntoResponse {
     match state.service.set_load_balancing_mode(payload) {
         Ok(response) => Json(response).into_response(),

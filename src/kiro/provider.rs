@@ -42,7 +42,8 @@ impl std::fmt::Display for UpstreamApiError {
         write!(
             formatter,
             "Kiro API 请求失败: {} {}",
-            self.status, self.body
+            self.status,
+            crate::request_log::redact(&self.body)
         )
     }
 }
@@ -307,7 +308,7 @@ impl KiroProvider {
                         "MCP 请求发送失败（尝试 {}/{}）: {}",
                         attempt + 1,
                         max_retries,
-                        e
+                        crate::request_log::redact(&e.to_string())
                     );
                     last_error = Some(e.into());
                     drop(ctx);
@@ -378,7 +379,7 @@ impl KiroProvider {
                             continue;
                         }
                         Err(error) => {
-                            tracing::warn!(credential_id = ctx.id, error = %format!("{error:#}"),
+                            tracing::warn!(credential_id = ctx.id, error = %crate::request_log::redact(&format!("{error:#}")),
                             "Token 强制刷新失败，计入失败")
                         }
                     }
@@ -399,7 +400,7 @@ impl KiroProvider {
                     attempt + 1,
                     max_retries,
                     status,
-                    body
+                    crate::request_log::redact(&body)
                 );
                 last_error = Some(UpstreamApiError { status, body }.into());
                 drop(ctx);
@@ -513,7 +514,7 @@ impl KiroProvider {
                         "API 请求发送失败（尝试 {}/{}）: {}",
                         attempt + 1,
                         max_retries,
-                        e
+                        crate::request_log::redact(&e.to_string())
                     );
                     // 网络错误通常是上游/链路瞬态问题，不应导致"禁用凭据"或"切换凭据"
                     // （否则一段时间网络抖动会把所有凭据都误禁用，需要重启才能恢复）
@@ -566,7 +567,7 @@ impl KiroProvider {
                     attempt + 1,
                     max_retries,
                     status,
-                    body
+                    crate::request_log::redact(&body)
                 );
 
                 let has_available = self.token_manager.report_quota_exhausted(ctx.id);
@@ -600,7 +601,7 @@ impl KiroProvider {
                     attempt + 1,
                     max_retries,
                     status,
-                    body
+                    crate::request_log::redact(&body)
                 );
 
                 // token 被上游失效：先尝试 force-refresh，每凭据仅一次机会
@@ -613,7 +614,7 @@ impl KiroProvider {
                             continue;
                         }
                         Err(error) => {
-                            tracing::warn!(credential_id = ctx.id, error = %format!("{error:#}"),
+                            tracing::warn!(credential_id = ctx.id, error = %crate::request_log::redact(&format!("{error:#}")),
                             "Token 强制刷新失败，计入失败")
                         }
                     }
@@ -646,7 +647,7 @@ impl KiroProvider {
                     attempt + 1,
                     max_retries,
                     status,
-                    body
+                    crate::request_log::redact(&body)
                 );
                 last_error = Some(UpstreamApiError { status, body }.into());
                 drop(ctx);
@@ -670,7 +671,7 @@ impl KiroProvider {
                 attempt + 1,
                 max_retries,
                 status,
-                body
+                crate::request_log::redact(&body)
             );
             last_error = Some(anyhow::anyhow!(
                 "{} API 请求失败: {} {}",

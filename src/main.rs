@@ -85,10 +85,14 @@ async fn main() {
     tracing::debug!("主凭证: {:?}", first_credentials);
 
     // 获取 API Key
-    let api_key = config.api_key.clone().unwrap_or_else(|| {
-        tracing::error!("配置文件中未设置 apiKey");
-        std::process::exit(1);
-    });
+    let api_key = config
+        .api_key
+        .clone()
+        .filter(|key| common::auth::is_valid_api_key(key))
+        .unwrap_or_else(|| {
+            tracing::error!("apiKey 必须为非空的可打印 ASCII 字符，不能包含空白或逗号");
+            std::process::exit(1);
+        });
 
     // 构建代理配置
     let proxy_config = config.proxy_url.as_ref().map(|url| {
@@ -186,17 +190,16 @@ async fn main() {
         config.cc_buffered_stream,
     );
 
-    // 构建 Admin API 路由（如果配置了非空的 admin_api_key）
-    // 安全检查：空字符串被视为未配置，防止空 key 绕过认证
+    // 仅在管理密钥可用作单个 HTTP 认证值时启用管理路由。
     let admin_key_valid = config
         .admin_api_key
         .as_ref()
-        .map(|k| !k.trim().is_empty())
+        .map(|k| common::auth::is_valid_api_key(k))
         .unwrap_or(false);
 
     let app = if let Some(admin_key) = &config.admin_api_key {
-        if admin_key.trim().is_empty() {
-            tracing::warn!("admin_api_key 配置为空，Admin API 未启用");
+        if !common::auth::is_valid_api_key(admin_key) {
+            tracing::warn!("adminApiKey 为空或包含无效字符，Admin API 未启用");
             anthropic_app
         } else {
             let admin_service =

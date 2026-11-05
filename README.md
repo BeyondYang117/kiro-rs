@@ -443,6 +443,10 @@ Social 和 IdC 刷新会拒绝空的访问令牌、空的轮换刷新令牌，�
    Authorization: Bearer sk-your-api-key
    ```
 
+`apiKey` 必须是非空的可打印 ASCII 字符串，不能含空白或逗号；无效配置会阻止服务启动。`adminApiKey` 使用相同规则，无效时不启用管理接口。Bearer scheme 不区分大小写。重复的 `x-api-key` 或 `Authorization`、空值、格式错误和两个认证头携带不同密钥时均返回 `401 authentication_error`；同时提供两个头时必须使用相同密钥。Cookie 和 URL 查询参数不参与认证。认证失败响应包含 `WWW-Authenticate: Bearer`。
+
+管理接口的 JSON、路径和查询参数解析失败统一返回 JSON `error` 对象，保留 `400`／`413`／`415`／`422` 状态码，不回显无效参数值；认证先于参数解析执行。客户端 JSON 与 SSE 错误中的常见令牌、密钥字段和代理认证信息统一脱敏，错误消息最多保留 4096 个字符。
+
 ### 环境变量
 
 可通过环境变量配置日志级别：

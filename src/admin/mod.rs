@@ -17,6 +17,7 @@
 //! ```
 
 mod error;
+pub(crate) mod extract;
 mod handlers;
 mod middleware;
 mod router;

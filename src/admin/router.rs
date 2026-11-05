@@ -70,6 +70,94 @@ mod tests {
     use tower::ServiceExt;
 
     #[tokio::test]
+    async fn extractor_errors_are_json_and_authentication_runs_before_parsing() {
+        let manager =
+            Arc::new(MultiTokenManager::new(Default::default(), vec![], None, None, true).unwrap());
+        let app = create_admin_router(AdminState::new(
+            "admin-key",
+            AdminService::new(manager.clone(), ["ide".into()]),
+        ))
+        .layer(axum::extract::DefaultBodyLimit::max(64));
+        for (path, content_type, body, expected) in [
+            ("/credentials", "application/json", "{", 400),
+            (
+                "/credentials",
+                "application/json",
+                r#"{"authMethod":123}"#,
+                422,
+            ),
+            ("/credentials", "text/plain", "{}", 415),
+            (
+                "/credentials/1/disabled",
+                "application/json",
+                r#"{"disabled":"private-invalid-value"}"#,
+                422,
+            ),
+            (
+                "/credentials/private-path-value/priority",
+                "application/json",
+                r#"{"priority":1}"#,
+                400,
+            ),
+            (
+                "/credentials/18446744073709551616/disabled",
+                "application/json",
+                r#"{"disabled":true}"#,
+                400,
+            ),
+            (
+                "/credentials/1/balance?force=private-query-value",
+                "application/json",
+                "",
+                400,
+            ),
+            ("/credentials", "application/json", &"x".repeat(65), 413),
+        ] {
+            let method = if path.contains("/balance") || path.starts_with("/logs") {
+                "GET"
+            } else {
+                "POST"
+            };
+            for authenticated in [false, true] {
+                let mut request = Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("content-type", content_type);
+                if authenticated {
+                    request = request.header("x-api-key", "admin-key");
+                }
+                let response = app
+                    .clone()
+                    .oneshot(request.body(Body::from(body.to_owned())).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status().as_u16(),
+                    if authenticated { expected } else { 401 },
+                    "{path}"
+                );
+                assert_eq!(response.headers()["content-type"], "application/json");
+                let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+                let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(
+                    value["error"]["type"],
+                    if authenticated {
+                        "invalid_request"
+                    } else {
+                        "authentication_error"
+                    }
+                );
+                assert!(
+                    !String::from_utf8(bytes.to_vec())
+                        .unwrap()
+                        .contains("private-")
+                );
+            }
+        }
+        assert_eq!(manager.total_count(), 0);
+    }
+
+    #[tokio::test]
     async fn credential_capacity_metrics_require_admin_auth_and_include_live_account_state() {
         let manager = Arc::new(
             MultiTokenManager::new(

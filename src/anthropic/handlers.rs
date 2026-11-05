@@ -34,6 +34,7 @@ use super::websearch;
 pub(super) fn map_provider_error(err: Error) -> Response {
     crate::request_log::error_details(format!("{err:#}"));
     let err_str = err.to_string();
+    let log_str = crate::request_log::redact(&err_str);
 
     if err.is::<crate::kiro::token_manager::CapacityError>() {
         return (
@@ -46,7 +47,7 @@ pub(super) fn map_provider_error(err: Error) -> Response {
 
     // 上下文窗口满了（对话历史累积超出模型上下文窗口限制）
     if err_str.contains("CONTENT_LENGTH_EXCEEDS_THRESHOLD") {
-        tracing::warn!(error = %err, "上游拒绝请求：上下文窗口已满（不应重试）");
+        tracing::warn!(error = %log_str, "上游拒绝请求：上下文窗口已满（不应重试）");
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(
@@ -59,7 +60,7 @@ pub(super) fn map_provider_error(err: Error) -> Response {
 
     // 单次输入太长（请求体本身超出上游限制）
     if err_str.contains("Input is too long") {
-        tracing::warn!(error = %err, "上游拒绝请求：输入过长（不应重试）");
+        tracing::warn!(error = %log_str, "上游拒绝请求：输入过长（不应重试）");
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(
@@ -72,14 +73,14 @@ pub(super) fn map_provider_error(err: Error) -> Response {
     if let Some(upstream) = err.downcast_ref::<crate::kiro::provider::UpstreamApiError>()
         && upstream.status == StatusCode::BAD_REQUEST
     {
-        tracing::warn!(error = %err, "Kiro 拒绝请求参数");
+        tracing::warn!(error = %log_str, "Kiro 拒绝请求参数");
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new("invalid_request_error", err_str)),
         )
             .into_response();
     }
-    tracing::error!("Kiro API 调用失败: {}", err);
+    tracing::error!("Kiro API 调用失败: {}", log_str);
     (
         StatusCode::BAD_GATEWAY,
         Json(ErrorResponse::new(
@@ -811,7 +812,9 @@ fn create_ping_sse() -> Bytes {
 
 fn upstream_error_event(error: Error) -> SseEvent {
     crate::request_log::error_details(format!("{error:#}"));
-    tracing::error!("Invalid upstream response: {error:#}");
+    let message =
+        crate::request_log::public_error_message(&format!("Upstream response failed: {error:#}"));
+    tracing::error!("{message}");
     let error_type = if error.is::<super::upstream::ToolCallError>()
         || error.is::<super::upstream::UpstreamRefusalError>()
     {
@@ -823,7 +826,7 @@ fn upstream_error_event(error: Error) -> SseEvent {
         "error",
         json!({
             "type": "error",
-            "error": {"type": error_type, "message": format!("Upstream response failed: {error:#}")}
+            "error": {"type": error_type, "message": message}
         }),
     )
 }
@@ -842,7 +845,10 @@ pub(super) fn upstream_error_response(error: Error) -> Response {
         (StatusCode::BAD_GATEWAY, "api_error")
     };
     crate::request_log::error_details(format!("{error:#}"));
-    tracing::error!("Invalid upstream response: {error:#}");
+    tracing::error!(
+        "Invalid upstream response: {}",
+        crate::request_log::redact(&format!("{error:#}"))
+    );
     (
         status,
         Json(ErrorResponse::new(
@@ -1565,6 +1571,42 @@ mod model_capability_tests {
                 assert_eq!(body["error"]["type"], "overloaded_error");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn provider_and_stream_errors_redact_credentials_and_bound_messages() {
+        use axum::body::to_bytes;
+        let message = format!(
+            "upstream failed: {{\"accessToken\":\"private-access\",\"kiroApiKey\":\"private-kiro\"}} Bearer private-bearer https://user:private-password@proxy.test ksk_private-key {}",
+            "中".repeat(6000),
+        );
+        let errors = [
+            super::map_provider_error(anyhow::anyhow!(message.clone())),
+            super::upstream_error_response(anyhow::anyhow!(message.clone())),
+            super::map_provider_error(
+                crate::kiro::provider::UpstreamApiError {
+                    status: axum::http::StatusCode::BAD_REQUEST,
+                    body: message.clone(),
+                }
+                .into(),
+            ),
+        ];
+        for response in errors {
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 32 * 1024).await.unwrap())
+                    .unwrap();
+            let error = body["error"]["message"].as_str().unwrap();
+            assert!(!error.contains("private-"), "{error}");
+            assert!(!error.contains("ksk_private"));
+            assert!(error.chars().count() <= 4096);
+            assert!(error.contains("upstream failed"));
+        }
+        let event = super::upstream_error_event(anyhow::anyhow!(message));
+        let encoded = event.to_sse_string();
+        assert!(encoded.starts_with("event: error\n"));
+        assert!(!encoded.contains("private-"));
+        assert!(!encoded.contains("ksk_private"));
+        assert!(encoded.len() < 16 * 1024);
     }
 
     #[test]

@@ -173,7 +173,10 @@ async fn read_refresh_response<T: serde::de::DeserializeOwned>(
             500..=599 => "服务器错误，OAuth 服务暂时不可用",
             _ => "Token 刷新失败",
         };
-        bail!("{method} {message}: {status} {body}");
+        bail!(
+            "{method} {message}: {status} {}",
+            crate::request_log::redact(&body)
+        );
     }
     Ok(serde_json::from_str(&body)?)
 }
@@ -420,7 +423,12 @@ pub(crate) async fn get_usage_limits(
             500..=599 => "服务器错误，AWS 服务暂时不可用",
             _ => "获取使用额度失败",
         };
-        bail!("{}: {} {}", error_msg, status, body_text);
+        bail!(
+            "{}: {} {}",
+            error_msg,
+            status,
+            crate::request_log::redact(&body_text)
+        );
     }
 
     let data: UsageLimitsResponse = serde_json::from_str(&body_text)?;

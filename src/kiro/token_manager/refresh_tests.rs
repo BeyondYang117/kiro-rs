@@ -213,6 +213,24 @@ async fn oversized_error_bodies_preserve_status_without_disabling_credentials() 
 }
 
 #[tokio::test]
+async fn refresh_errors_redact_upstream_credentials_before_they_can_be_logged() {
+    let body = r#"{"error":"invalid_client","accessToken":"private-access","kiroApiKey":"private-key","clientSecret":"private-secret"}"#;
+    for method in ["Social", "IdC"] {
+        let error = read_refresh_response::<RefreshResponse>(
+            response(401, body.into()),
+            &Config::default(),
+            method,
+        )
+        .await
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("401"));
+        assert!(!message.contains("private-"));
+        assert!(message.contains("invalid_client"));
+    }
+}
+
+#[tokio::test]
 async fn account_idle_timeout_releases_the_upstream_body() {
     struct OnDrop(Arc<AtomicBool>);
     impl Drop for OnDrop {

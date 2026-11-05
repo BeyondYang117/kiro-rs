@@ -38,13 +38,15 @@ pub async fn admin_auth_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let api_key = auth::extract_api_key(&request);
-
-    match api_key {
-        Some(key) if auth::constant_time_eq(&key, &state.admin_api_key) => next.run(request).await,
-        _ => {
-            let error = AdminErrorResponse::authentication_error();
-            (StatusCode::UNAUTHORIZED, Json(error)).into_response()
-        }
+    if auth::authenticate(&request, &state.admin_api_key) {
+        next.run(request).await
+    } else {
+        let error = AdminErrorResponse::authentication_error();
+        (
+            StatusCode::UNAUTHORIZED,
+            [("www-authenticate", "Bearer")],
+            Json(error),
+        )
+            .into_response()
     }
 }

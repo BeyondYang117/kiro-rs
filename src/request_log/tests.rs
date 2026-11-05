@@ -469,6 +469,32 @@ async fn log_list_and_detail_require_admin_auth_and_validate_dates() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
+    for authenticated in [false, true] {
+        let mut request = Request::builder().uri("/logs?page=private-query-value");
+        if authenticated {
+            request = request.header("x-api-key", "admin-test-key");
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status().as_u16(),
+            if authenticated { 400 } else { 401 }
+        );
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(
+            body["error"]["type"],
+            if authenticated {
+                "invalid_request"
+            } else {
+                "authentication_error"
+            }
+        );
+        assert!(!body.to_string().contains("private-query-value"));
+    }
     let response = app
         .clone()
         .oneshot(
@@ -515,6 +541,30 @@ fn errors_keep_causes_but_redact_tokens_and_proxy_auth() {
         );
     }
     assert!(redacted.contains("certificate verify failed"));
+}
+
+#[test]
+fn quoted_and_escaped_secret_values_are_redacted_as_complete_values() {
+    let message = r#"root cause {"kiroApiKey":"private kiro value","accessToken":"private\"escaped value","clientSecret":"private\\slash value"} refreshToken='private single quoted value' ksk_private_key ADMIN_API_KEY=private-admin KIRO_API_KEY=private-env Authorization: Basic private-basic"#;
+    let safe = redact(message);
+    assert!(safe.contains("root cause"));
+    assert!(!safe.contains("private"), "{safe}");
+    assert!(!safe.contains("escaped value"), "{safe}");
+    assert!(!safe.contains("slash value"), "{safe}");
+    assert!(!safe.contains("quoted value"), "{safe}");
+    let public = public_error_message(&format!("{message}\n\t{}", "中".repeat(6000)));
+    assert!(!public.contains("private"));
+    assert!(!public.chars().any(char::is_control));
+    assert_eq!(public.chars().count(), 4096);
+    let admin = crate::admin::types::AdminErrorResponse::api_error(message);
+    assert!(!admin.error.message.contains("private"));
+    for truncated in [
+        r#"{"accessToken":"private unterminated value"#,
+        "refreshToken='private unterminated value",
+        r#"{"accessToken":"private trailing escape\"#,
+    ] {
+        assert!(!redact(truncated).contains("private"), "{truncated}");
+    }
 }
 
 #[tokio::test]

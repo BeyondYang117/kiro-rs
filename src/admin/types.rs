@@ -249,7 +249,7 @@ impl AdminErrorResponse {
         Self {
             error: AdminError {
                 error_type: error_type.into(),
-                message: message.into(),
+                message: crate::request_log::public_error_message(&message.into()),
             },
         }
     }
