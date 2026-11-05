@@ -104,6 +104,9 @@ pub fn build_client(
     tls_backend: TlsBackend,
 ) -> anyhow::Result<Client> {
     let mut builder = Client::builder()
+        // Requests carry refresh tokens, client secrets or custom API-key headers.
+        // A redirect must never forward them to a different endpoint.
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(timeout_secs))
         .connect_timeout(Duration::from_secs(15))
         // Reuse upstream TCP/TLS connections to reduce first-byte latency.
@@ -182,6 +185,63 @@ mod tests {
         let debug = format!("{proxy:?}");
         assert!(!debug.contains("hidden-user"));
         assert!(!debug.contains("hidden-password"));
+    }
+
+    #[tokio::test]
+    async fn redirects_never_forward_auth_headers_or_secret_bodies() {
+        use axum::{Router, extract::Path, response::IntoResponse, routing::any};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let reached = Arc::new(AtomicUsize::new(0));
+        let target = {
+            let reached = reached.clone();
+            Router::new().fallback(any(move || {
+                reached.fetch_add(1, Ordering::SeqCst);
+                async { "should never receive credentials" }
+            }))
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let other_origin = format!("http://{}/target", listener.local_addr().unwrap());
+        let source = target.clone().route(
+            "/{status}/{scope}",
+            any(move |Path((status, scope)): Path<(u16, String)>| {
+                let location = if scope == "cross" {
+                    other_origin.clone()
+                } else {
+                    "/target".into()
+                };
+                async move {
+                    (
+                        http::StatusCode::from_u16(status).unwrap(),
+                        [("location", location)],
+                        "redirect",
+                    )
+                        .into_response()
+                }
+            }),
+        );
+        let target_task = tokio::spawn(async move { axum::serve(listener, target).await.unwrap() });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source_url = format!("http://{}", listener.local_addr().unwrap());
+        let source_task = tokio::spawn(async move { axum::serve(listener, source).await.unwrap() });
+        let client = build_client(None, 5, TlsBackend::Rustls).unwrap();
+        for status in [301, 302, 303, 307, 308] {
+            for scope in ["same", "cross"] {
+                let response = client.post(format!("{source_url}/{status}/{scope}"))
+                    .bearer_auth("private-access-token")
+                    .header("x-api-key", "private-api-key")
+                    .json(&serde_json::json!({"refreshToken":"private-refresh-token", "clientSecret":"private-secret"}))
+                    .send().await.unwrap();
+                assert_eq!(response.status().as_u16(), status, "{scope}");
+                assert!(response.headers().contains_key("location"));
+                assert_eq!(reached.load(Ordering::SeqCst), 0);
+            }
+        }
+        source_task.abort();
+        target_task.abort();
     }
 }
 

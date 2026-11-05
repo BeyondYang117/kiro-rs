@@ -473,6 +473,9 @@ impl AdminService {
 
     /// 分类添加凭据错误
     fn classify_add_error(&self, e: anyhow::Error) -> AdminServiceError {
+        if e.is::<crate::common::region::InvalidRegion>() {
+            return AdminServiceError::InvalidCredential(e.to_string());
+        }
         let msg = e.to_string();
 
         // 凭据验证失败（refreshToken 无效、格式错误等）

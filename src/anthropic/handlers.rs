@@ -45,6 +45,21 @@ pub(super) fn map_provider_error(err: Error) -> Response {
             .into_response();
     }
 
+    if err
+        .downcast_ref::<crate::kiro::provider::UpstreamApiError>()
+        .is_some_and(|upstream| upstream.status.is_redirection())
+    {
+        tracing::warn!(error = %log_str, "拒绝上游重定向");
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse::new(
+                "api_error",
+                "Upstream redirect rejected. Configure the final endpoint URL.",
+            )),
+        )
+            .into_response();
+    }
+
     // 上下文窗口满了（对话历史累积超出模型上下文窗口限制）
     if err_str.contains("CONTENT_LENGTH_EXCEEDS_THRESHOLD") {
         tracing::warn!(error = %log_str, "上游拒绝请求：上下文窗口已满（不应重试）");
@@ -1570,6 +1585,31 @@ mod model_capability_tests {
                 let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(body["error"]["type"], "overloaded_error");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn redirect_errors_keep_502_regardless_of_body_or_error_context() {
+        use axum::http::StatusCode;
+        for status in [301, 302, 303, 307, 308] {
+            let error = crate::kiro::provider::UpstreamApiError {
+                status: StatusCode::from_u16(status).unwrap(),
+                body: "CONTENT_LENGTH_EXCEEDS_THRESHOLD Input is too long private-value".into(),
+            };
+            let response = super::map_provider_error(anyhow::Error::new(error).context("provider"));
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["error"]["type"], "api_error");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("redirect")
+            );
+            assert!(!String::from_utf8_lossy(&bytes).contains("private-value"));
         }
     }
 

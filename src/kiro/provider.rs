@@ -352,6 +352,11 @@ impl KiroProvider {
                 upstream_id.as_deref(),
             );
 
+            // Redirects are endpoint configuration failures, not credential failures.
+            if status.is_redirection() {
+                return Err(UpstreamApiError { status, body }.into());
+            }
+
             // 402 额度用尽
             if status.as_u16() == 402 && endpoint.is_monthly_request_limit(&body) {
                 let has_available = self.token_manager.report_quota_exhausted(ctx.id);
@@ -559,6 +564,10 @@ impl KiroProvider {
                 Some(&body),
                 upstream_id.as_deref(),
             );
+
+            if status.is_redirection() {
+                return Err(UpstreamApiError { status, body }.into());
+            }
 
             // 402 Payment Required 且额度用尽：禁用凭据并故障转移
             if status.as_u16() == 402 && endpoint.is_monthly_request_limit(&body) {
@@ -1411,6 +1420,37 @@ mod retry_tests {
                     .id,
                 2
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn redirect_statuses_stop_without_retry_or_penalizing_credentials() {
+        for status in [301, 302, 303, 307, 308] {
+            let mock = mock(StatusCode::from_u16(status).unwrap(), None, false).await;
+            for (index, kind) in ["api", "stream", "mcp"].into_iter().enumerate() {
+                let result = timeout(Duration::from_secs(2), call(&mock.provider, kind))
+                    .await
+                    .unwrap();
+                let error = result.err().expect("redirects must fail");
+                assert_eq!(
+                    error
+                        .downcast_ref::<UpstreamApiError>()
+                        .unwrap()
+                        .status
+                        .as_u16(),
+                    status
+                );
+                assert_eq!(mock.calls.lock().len(), index + 1);
+                let snapshot = mock.provider.token_manager.snapshot();
+                assert_eq!(snapshot.concurrency.in_flight, 0);
+                assert_eq!(snapshot.available, 2);
+                assert!(
+                    snapshot
+                        .entries
+                        .iter()
+                        .all(|entry| entry.failure_count == 0)
+                );
+            }
         }
     }
 

@@ -208,6 +208,19 @@ impl CredentialsConfig {
 }
 
 impl KiroCredentials {
+    pub(crate) fn validate_regions(&self) -> anyhow::Result<()> {
+        for (field, value) in [
+            ("region", &self.region),
+            ("authRegion", &self.auth_region),
+            ("apiRegion", &self.api_region),
+        ] {
+            if let Some(region) = value {
+                crate::common::region::validate(field, region)?;
+            }
+        }
+        Ok(())
+    }
+
     /// 特殊值：显式不使用代理
     pub const PROXY_DIRECT: &'static str = "direct";
 

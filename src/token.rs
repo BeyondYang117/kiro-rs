@@ -199,9 +199,12 @@ async fn call_remote_count_tokens(
         .send()
         .await
         .map_err(|error| error.without_url())?;
-    let response = response
-        .error_for_status()
-        .map_err(|error| error.without_url())?;
+    // error_for_status() accepts 3xx. A redirect body is not a count result.
+    anyhow::ensure!(
+        response.status().is_success(),
+        "远程计数返回非成功状态: {}",
+        response.status()
+    );
     // The response only contains a count. A large or endless body must fall back
     // to the local estimator without allocating conversation-sized buffers.
     let timeout = std::time::Duration::from_secs(config.timeout_secs.max(1));
@@ -349,6 +352,12 @@ mod tests {
                     captured.lock().unwrap().push((peer, headers, body));
                     async move {
                         match mode.as_str() {
+                            "redirect" => (
+                                StatusCode::TEMPORARY_REDIRECT,
+                                [("location", "/ok")],
+                                r#"{"input_tokens":999}"#,
+                            )
+                                .into_response(),
                             "error" => (StatusCode::TOO_MANY_REQUESTS, "busy").into_response(),
                             "invalid" => {
                                 Json(serde_json::json!({"input_tokens":-1})).into_response()
@@ -469,6 +478,33 @@ mod tests {
             count_all_tokens("test", &None, &messages, &None).await,
             local
         );
+    }
+
+    #[tokio::test]
+    async fn remote_redirects_fall_back_without_accepting_body_or_forwarding_keys() {
+        use super::*;
+        let server = token_server().await;
+        let messages = vec![Message {
+            role: "user".into(),
+            content: serde_json::json!("hello"),
+        }];
+        let request = TokenCountRequest {
+            model: "test",
+            system: &None,
+            messages: &messages,
+            tools: &None,
+        };
+        for auth_type in ["x-api-key", "bearer"] {
+            let mut config = remote_config(format!("{}/redirect", server.url));
+            config.auth_type = auth_type.into();
+            config.api_key = Some("private-counting-key".into());
+            let service = CountTokensService::new(config);
+            assert_eq!(
+                service.count(&request).await,
+                count_all_tokens_local(None, &messages, None)
+            );
+        }
+        assert_eq!(server.requests.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

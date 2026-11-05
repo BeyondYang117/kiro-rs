@@ -17,6 +17,50 @@ fn credentials() -> KiroCredentials {
 }
 
 #[tokio::test]
+async fn standalone_account_calls_validate_regions_before_network_or_token_processing() {
+    for field in ["region", "authRegion", "apiRegion"] {
+        let invalid = serde_json::json!({field:"private.invalid/"});
+        let invalid_config: Config = serde_json::from_value(invalid.clone()).unwrap();
+        let invalid_credentials: KiroCredentials = serde_json::from_value(invalid).unwrap();
+        let config = Config::default();
+        let credential = credentials();
+        for (config, credential) in [
+            (&invalid_config, &credential),
+            (&config, &invalid_credentials),
+        ] {
+            let error = refresh_token(credential, config, None).await.unwrap_err();
+            assert!(error.is::<crate::common::region::InvalidRegion>());
+            let error = get_usage_limits(credential, config, "private-token", None)
+                .await
+                .unwrap_err();
+            assert!(error.is::<crate::common::region::InvalidRegion>());
+        }
+    }
+}
+
+#[tokio::test]
+async fn oauth_redirect_bodies_never_replace_tokens_or_invalidate_credentials() {
+    for status in [301, 302, 303, 307, 308] {
+        for method in ["Social", "IdC"] {
+            let error = read_refresh_response::<RefreshResponse>(
+                response(
+                    status,
+                    r#"{"accessToken":"attacker-token","expiresIn":3600,"error":"invalid_grant"}"#
+                        .into(),
+                ),
+                &Config::default(),
+                method,
+            )
+            .await
+            .unwrap_err();
+            assert!(!error.is::<RefreshTokenInvalidError>());
+            assert!(error.to_string().contains(&status.to_string()));
+            assert!(!error.to_string().contains("attacker-token"));
+        }
+    }
+}
+
+#[tokio::test]
 async fn social_and_idc_responses_rotate_credentials_and_expiration() {
     let config = Config::default();
     let original = credentials();

@@ -401,6 +401,17 @@ impl Default for Config {
 }
 
 impl Config {
+    pub(crate) fn validate_regions(&self) -> anyhow::Result<()> {
+        crate::common::region::validate("region", &self.region)?;
+        if let Some(region) = &self.auth_region {
+            crate::common::region::validate("authRegion", region)?;
+        }
+        if let Some(region) = &self.api_region {
+            crate::common::region::validate("apiRegion", region)?;
+        }
+        Ok(())
+    }
+
     /// 获取默认配置文件路径
     pub fn default_config_path() -> &'static str {
         "config.json"
@@ -432,6 +443,7 @@ impl Config {
             Err(error) => return Err(error.into()),
         };
         let mut config: Config = serde_json::from_str(&content)?;
+        config.validate_regions()?;
         config.config_path = Some(path.to_path_buf());
         Ok(config)
     }
@@ -458,6 +470,41 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_regions_fail_startup_including_disabled_credentials() {
+        use crate::kiro::{model::credentials::KiroCredentials, token_manager::MultiTokenManager};
+        for field in ["region", "authRegion", "apiRegion"] {
+            let invalid = serde_json::json!({field:"private.invalid/path?key=value"});
+            let config: Config = serde_json::from_value(invalid.clone()).unwrap();
+            let error = MultiTokenManager::new(config, vec![], None, None, false)
+                .err()
+                .unwrap();
+            assert!(error.is::<crate::common::region::InvalidRegion>());
+            assert!(!error.to_string().contains("private.invalid"));
+
+            let mut credential: KiroCredentials = serde_json::from_value(invalid).unwrap();
+            credential.disabled = true;
+            let error =
+                MultiTokenManager::new(Config::default(), vec![credential], None, None, false)
+                    .err()
+                    .unwrap();
+            assert!(error.is::<crate::common::region::InvalidRegion>());
+        }
+    }
+
+    #[test]
+    fn config_loading_rejects_url_fragments_in_regions() {
+        let path = std::env::temp_dir().join(format!("kiro-region-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&path, r#"{"authRegion":"private.invalid/"}"#).unwrap();
+        let result = Config::load(&path);
+        std::fs::remove_file(path).unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .is::<crate::common::region::InvalidRegion>()
+        );
+    }
 
     #[test]
     fn tool_output_recovery_defaults_and_roundtrip() {

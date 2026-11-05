@@ -70,6 +70,48 @@ mod tests {
     use tower::ServiceExt;
 
     #[tokio::test]
+    async fn invalid_regions_are_rejected_before_adding_or_refreshing_credentials() {
+        let manager =
+            Arc::new(MultiTokenManager::new(Default::default(), vec![], None, None, true).unwrap());
+        let app = create_admin_router(AdminState::new(
+            "admin-key",
+            AdminService::new(manager.clone(), ["ide".into()]),
+        ));
+        for field in ["region", "authRegion", "apiRegion"] {
+            for method in ["api_key", "social", "idc"] {
+                let body = serde_json::json!({
+                    "authMethod":method, "kiroApiKey": if method == "api_key" { Some("ksk_test") } else { None },
+                    "refreshToken":"test-refresh", field:"private-host.invalid/path?secret=value"
+                });
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/credentials")
+                            .header("x-api-key", "admin-key")
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::BAD_REQUEST,
+                    "{field} {method}"
+                );
+                let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+                let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(value["error"]["type"], "invalid_request");
+                assert!(value["error"]["message"].as_str().unwrap().contains(field));
+                assert!(!String::from_utf8_lossy(&bytes).contains("private-host"));
+                assert_eq!(manager.total_count(), 0);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn extractor_errors_are_json_and_authentication_runs_before_parsing() {
         let manager =
             Arc::new(MultiTokenManager::new(Default::default(), vec![], None, None, true).unwrap());

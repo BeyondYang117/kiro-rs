@@ -224,6 +224,8 @@ pub(crate) async fn refresh_token(
     config: &Config,
     proxy: Option<&ProxyConfig>,
 ) -> anyhow::Result<KiroCredentials> {
+    config.validate_regions()?;
+    credentials.validate_regions()?;
     // API Key 凭据不支持 Token 刷新：底层契约级拦截
     // 其他调用点（try_ensure_token / 活跃路径 / add_credential）在调用前已显式分流 API Key；
     // 仅 force_refresh_token_for 未分流，此处 bail 让错误自然传播为 400 BAD_REQUEST。
@@ -368,6 +370,8 @@ pub(crate) async fn get_usage_limits(
     token: &str,
     proxy: Option<&ProxyConfig>,
 ) -> anyhow::Result<UsageLimitsResponse> {
+    config.validate_regions()?;
+    credentials.validate_regions()?;
     tracing::debug!("正在获取使用额度信息...");
 
     // 优先级：凭据.api_region > config.api_region > config.region
@@ -690,6 +694,10 @@ impl MultiTokenManager {
         credentials_path: Option<PathBuf>,
         is_multiple_format: bool,
     ) -> anyhow::Result<Self> {
+        config.validate_regions()?;
+        for credential in &credentials {
+            credential.validate_regions()?;
+        }
         config.concurrency.validate()?;
         config.request_limits.validate()?;
         config.session_affinity.validate()?;
@@ -1941,6 +1949,7 @@ impl MultiTokenManager {
     /// - `Ok(u64)` - 新凭据 ID
     /// - `Err(_)` - 验证失败或添加失败
     pub async fn add_credential(&self, new_cred: KiroCredentials) -> anyhow::Result<u64> {
+        new_cred.validate_regions()?;
         // 1. 基本验证
         if new_cred.is_api_key_credential() {
             let api_key = new_cred
