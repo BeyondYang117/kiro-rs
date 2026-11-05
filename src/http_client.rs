@@ -90,6 +90,27 @@ impl ProxyConfig {
     }
 }
 
+/// Admin status only needs the proxy address, never URL authentication or extras.
+pub(crate) fn proxy_display_url(value: &str) -> String {
+    if value.eq_ignore_ascii_case("direct") {
+        return "direct".into();
+    }
+    let Ok(mut url) = reqwest::Url::parse(value) else {
+        return "[REDACTED]".into();
+    };
+    if !matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h") || url.host_str().is_none()
+    {
+        return "[REDACTED]".into();
+    }
+    if url.set_username("").is_err() || url.set_password(None).is_err() {
+        return "[REDACTED]".into();
+    }
+    url.set_path("");
+    url.set_query(None);
+    url.set_fragment(None);
+    url.as_str().trim_end_matches('/').to_owned()
+}
+
 /// 构建 HTTP Client
 ///
 /// # Arguments
@@ -104,6 +125,9 @@ pub fn build_client(
     tls_backend: TlsBackend,
 ) -> anyhow::Result<Client> {
     let mut builder = Client::builder()
+        // Proxy routing is controlled exclusively by config. In particular,
+        // credential-level `direct` must also bypass OS and environment proxies.
+        .no_proxy()
         // Requests carry refresh tokens, client secrets or custom API-key headers.
         // A redirect must never forward them to a different endpoint.
         .redirect(reqwest::redirect::Policy::none())
@@ -185,6 +209,158 @@ mod tests {
         let debug = format!("{proxy:?}");
         assert!(!debug.contains("hidden-user"));
         assert!(!debug.contains("hidden-password"));
+    }
+
+    #[test]
+    fn proxy_display_keeps_address_and_discards_all_other_url_components() {
+        for (value, expected) in [
+            (
+                "http://private-user:private-password@proxy.test:8080/private-path?private-query#private-fragment",
+                "http://proxy.test:8080",
+            ),
+            ("https://private-user@proxy.test/", "https://proxy.test"),
+            (
+                "socks5://private%40user:private%3Apassword@[::1]:1080",
+                "socks5://[::1]:1080",
+            ),
+            ("socks5h://proxy.test:1080", "socks5h://proxy.test:1080"),
+            ("DIRECT", "direct"),
+            ("private-malformed-value", "[REDACTED]"),
+            ("file:///private-path", "[REDACTED]"),
+            ("data:text/plain,private-content", "[REDACTED]"),
+        ] {
+            assert_eq!(proxy_display_url(value), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_routing_ignores_environment_proxies() {
+        const TARGET: &str = "KIRO_PROXY_TEST_TARGET_URL";
+        const PROXY: &str = "KIRO_PROXY_TEST_EXPLICIT_URL";
+        if let Ok(target_url) = std::env::var(TARGET) {
+            // This branch runs in an isolated process: never mutate global env
+            // while other tests or HTTP clients are running.
+            let environment_client = Client::builder()
+                .use_rustls_tls()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap();
+            assert_eq!(
+                environment_client
+                    .get(&target_url)
+                    .send()
+                    .await
+                    .unwrap()
+                    .text()
+                    .await
+                    .unwrap(),
+                "environment-proxy"
+            );
+            for backend in [TlsBackend::Rustls, TlsBackend::NativeTls] {
+                if backend == TlsBackend::NativeTls && !cfg!(feature = "native-tls") {
+                    continue;
+                }
+                let credentials = crate::kiro::model::credentials::KiroCredentials {
+                    proxy_url: Some("direct".into()),
+                    ..Default::default()
+                };
+                let global = ProxyConfig::new("http://127.0.0.1:1");
+                let direct = credentials.effective_proxy(Some(&global));
+                let client = build_client(direct.as_ref(), 5, backend).unwrap();
+                assert_eq!(
+                    client
+                        .get(&target_url)
+                        .send()
+                        .await
+                        .unwrap()
+                        .text()
+                        .await
+                        .unwrap(),
+                    "direct-target"
+                );
+
+                let explicit = ProxyConfig::new(std::env::var(PROXY).unwrap());
+                let client = build_client(Some(&explicit), 5, backend).unwrap();
+                assert_eq!(
+                    client
+                        .get(&target_url)
+                        .send()
+                        .await
+                        .unwrap()
+                        .text()
+                        .await
+                        .unwrap(),
+                    "environment-proxy"
+                );
+            }
+            return;
+        }
+
+        use axum::{Router, routing::any};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let target_hits = Arc::new(AtomicUsize::new(0));
+        let proxy_hits = Arc::new(AtomicUsize::new(0));
+        let target_app = {
+            let hits = target_hits.clone();
+            Router::new().fallback(any(move || {
+                hits.fetch_add(1, Ordering::SeqCst);
+                async { "direct-target" }
+            }))
+        };
+        let proxy_app = {
+            let hits = proxy_hits.clone();
+            Router::new().fallback(any(move || {
+                hits.fetch_add(1, Ordering::SeqCst);
+                async { "environment-proxy" }
+            }))
+        };
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_url = format!("http://{}/", target_listener.local_addr().unwrap());
+        let proxy_url = format!("http://{}", proxy_listener.local_addr().unwrap());
+        let target_task =
+            tokio::spawn(async move { axum::serve(target_listener, target_app).await.unwrap() });
+        let proxy_task =
+            tokio::spawn(async move { axum::serve(proxy_listener, proxy_app).await.unwrap() });
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .kill_on_drop(true)
+            .args([
+                "--exact",
+                "http_client::tests::configured_routing_ignores_environment_proxies",
+                "--nocapture",
+            ])
+            .env(TARGET, target_url)
+            .env(PROXY, &proxy_url);
+        for name in [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ] {
+            command.env(name, &proxy_url);
+        }
+        for name in ["NO_PROXY", "no_proxy"] {
+            command.env(name, "");
+        }
+        let result = tokio::time::timeout(Duration::from_secs(30), command.output()).await;
+        target_task.abort();
+        proxy_task.abort();
+        let output = result.expect("proxy subprocess timed out").unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let backends = if cfg!(feature = "native-tls") { 2 } else { 1 };
+        assert_eq!(target_hits.load(Ordering::SeqCst), backends);
+        assert_eq!(proxy_hits.load(Ordering::SeqCst), backends + 1);
     }
 
     #[tokio::test]

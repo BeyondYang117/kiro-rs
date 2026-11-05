@@ -147,7 +147,7 @@ pub(crate) fn redact(message: &str) -> String {
         r#"(?i)\bbearer\s+[^\s,;"}]+"#,
         r"\b(?:sk-|aik_|ksk_)[A-Za-z0-9_\-]+",
         r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
-        r"(?i)(?:https?|socks5h?)://[^\s/@]+:[^\s/@]+@",
+        r"(?i)(?:https?|socks5h?)://[^\s/@]+@",
     ].iter().map(|pattern| regex::Regex::new(pattern).expect("valid redaction regex")).collect());
     let mut result = message.to_owned();
     for pattern in patterns {

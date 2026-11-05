@@ -70,6 +70,57 @@ mod tests {
     use tower::ServiceExt;
 
     #[tokio::test]
+    async fn credential_status_never_exposes_proxy_authentication_or_url_extras() {
+        let original = "http://private-user:private-password@proxy.test:8080/private-path?private-query#private-fragment";
+        let credential = KiroCredentials {
+            id: Some(1),
+            kiro_api_key: Some("ksk_test".into()),
+            proxy_url: Some(original.into()),
+            proxy_username: Some("private-separate-user".into()),
+            proxy_password: Some("private-separate-password".into()),
+            ..Default::default()
+        };
+        let manager = Arc::new(
+            MultiTokenManager::new(Default::default(), vec![credential], None, None, true).unwrap(),
+        );
+        let app = create_admin_router(AdminState::new(
+            "admin-key",
+            AdminService::new(manager.clone(), ["ide".into()]),
+        ));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/credentials")
+                    .header("x-api-key", "admin-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["credentials"][0]["hasProxy"], true);
+        assert_eq!(
+            value["credentials"][0]["proxyUrl"],
+            "http://proxy.test:8080"
+        );
+        assert!(!String::from_utf8_lossy(&bytes).contains("private-"));
+        // Display sanitization must not alter the actual connection credentials.
+        let context = manager.acquire_context(None).await.unwrap();
+        let stored = context.credentials;
+        assert_eq!(stored.proxy_url.as_deref(), Some(original));
+        assert_eq!(
+            stored.proxy_username.as_deref(),
+            Some("private-separate-user")
+        );
+        assert_eq!(
+            stored.proxy_password.as_deref(),
+            Some("private-separate-password")
+        );
+    }
+
+    #[tokio::test]
     async fn invalid_regions_are_rejected_before_adding_or_refreshing_credentials() {
         let manager =
             Arc::new(MultiTokenManager::new(Default::default(), vec![], None, None, true).unwrap());
@@ -179,6 +230,8 @@ mod tests {
                     "{path}"
                 );
                 assert_eq!(response.headers()["content-type"], "application/json");
+                assert_eq!(response.headers()["cache-control"], "no-store");
+                assert_eq!(response.headers()["x-content-type-options"], "nosniff");
                 let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
                 let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
                 assert_eq!(

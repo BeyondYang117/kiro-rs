@@ -60,7 +60,7 @@ pub struct CredentialStatusItem {
     pub last_used_at: Option<String>,
     /// 是否配置了凭据级代理
     pub has_proxy: bool,
-    /// 代理 URL（用于前端展示）
+    /// 代理地址（已移除 URL 认证、路径、查询和片段，仅用于展示）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
     /// Token 刷新连续失败次数

@@ -4,6 +4,23 @@ use tower::ServiceExt;
 use tracing::instrument::WithSubscriber;
 use tracing_subscriber::prelude::*;
 
+#[test]
+fn proxy_url_redaction_covers_username_only_and_encoded_authentication() {
+    for url in [
+        "http://private-user@proxy.test:8080",
+        "https://private-user:private-password@proxy.test",
+        "socks5://private%40user:private%3Apassword@proxy.test:1080",
+        "SOCKS5H://private-user@[::1]:1080",
+        "http://:private-password@proxy.test",
+    ] {
+        let message = format!("proxy connection failed: {url}");
+        assert!(!redact(&message).contains("private"));
+        assert!(!public_error_message(&message).contains("private"));
+        assert!(redact(&message).contains("proxy connection failed"));
+    }
+    assert_eq!(redact("http://proxy.test:8080"), "http://proxy.test:8080");
+}
+
 struct TestStore {
     store: Arc<LogStore>,
     path: std::path::PathBuf,

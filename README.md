@@ -410,6 +410,8 @@ Social 和 IdC 刷新会拒绝空的访问令牌、空的轮换刷新令牌，�
 | `direct` | 显式不使用代理（即使全局配置了代理） |
 | 未配置（留空） | 回退到全局代理配置 |
 
+出站连接仅使用上述显式配置，不自动读取 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY` 或操作系统代理。`direct` 会跳过全局、环境和系统代理；需要代理的部署请设置 `proxyUrl`。管理接口中的 `proxyUrl` 仅展示协议、主机与端口，移除 URL 用户名、密码、路径、查询和片段；实际连接及持久化配置保留原值。日志脱敏也覆盖只有用户名的代理 URL。
+
 凭据级代理示例：
 
 ```json
@@ -450,6 +452,8 @@ Social 和 IdC 刷新会拒绝空的访问令牌、空的轮换刷新令牌，�
 `apiKey` 必须是非空的可打印 ASCII 字符串，不能含空白或逗号；无效配置会阻止服务启动。`adminApiKey` 使用相同规则，无效时不启用管理接口。Bearer scheme 不区分大小写。重复的 `x-api-key` 或 `Authorization`、空值、格式错误和两个认证头携带不同密钥时均返回 `401 authentication_error`；同时提供两个头时必须使用相同密钥。Cookie 和 URL 查询参数不参与认证。认证失败响应包含 `WWW-Authenticate: Bearer`。
 
 管理接口的 JSON、路径和查询参数解析失败统一返回 JSON `error` 对象，保留 `400`／`413`／`415`／`422` 状态码，不回显无效参数值；认证先于参数解析执行。客户端 JSON 与 SSE 错误中的常见令牌、密钥字段和代理认证信息统一脱敏，错误消息最多保留 4096 个字符。
+
+认证接口的成功及错误响应均设置 `Cache-Control: no-store` 和 `X-Content-Type-Options: nosniff`，包含 SSE；不影响流式传输。管理页面设置 CSP，脚本及 API 连接仅允许同源，禁止内联脚本、动态代码执行、外部页面嵌入及表单原生提交，并设置 `X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`。组件定位需要的内联样式保留，静态资源沿用原有缓存策略。
 
 ### 环境变量
 

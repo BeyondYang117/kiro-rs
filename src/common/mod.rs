@@ -4,3 +4,4 @@ pub mod auth;
 
 pub(crate) mod persistence;
 pub(crate) mod region;
+pub(crate) mod security;

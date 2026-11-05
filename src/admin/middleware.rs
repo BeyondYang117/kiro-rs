@@ -38,7 +38,7 @@ pub async fn admin_auth_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    if auth::authenticate(&request, &state.admin_api_key) {
+    let response = if auth::authenticate(&request, &state.admin_api_key) {
         next.run(request).await
     } else {
         let error = AdminErrorResponse::authentication_error();
@@ -48,5 +48,6 @@ pub async fn admin_auth_middleware(
             Json(error),
         )
             .into_response()
-    }
+    };
+    crate::common::security::private_api_response(response)
 }

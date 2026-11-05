@@ -53,7 +53,7 @@ pub async fn auth_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    if auth::authenticate(&request, &state.api_key) {
+    let response = if auth::authenticate(&request, &state.api_key) {
         next.run(request).await
     } else {
         let error = ErrorResponse::authentication_error();
@@ -63,7 +63,8 @@ pub async fn auth_middleware(
             Json(error),
         )
             .into_response()
-    }
+    };
+    crate::common::security::private_api_response(response)
 }
 
 /// CORS 中间件层
@@ -274,5 +275,79 @@ mod request_guard_tests {
         assert!(body.next().await.unwrap().is_err());
         assert_eq!(slots.available_permits(), 1);
         assert!(body.next().await.is_none());
+    }
+}
+
+#[cfg(test)]
+mod security_headers_tests {
+    use super::*;
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+        routing::get,
+    };
+    use futures::StreamExt;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn no_store_overrides_handler_caching_and_preserves_streaming_responses() {
+        let state = super::AppState::new("client-key", true);
+        let app = Router::new()
+            .route(
+                "/events",
+                get(|| async {
+                    Response::builder()
+                        .header("cache-control", "public, max-age=600")
+                        .header("content-type", "text/event-stream")
+                        .body(Body::from_stream(
+                            futures::stream::once(async {
+                                Ok::<_, std::io::Error>("data: first\n\n")
+                            })
+                            .chain(futures::stream::pending()),
+                        ))
+                        .unwrap()
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                state,
+                super::auth_middleware,
+            ));
+        for authenticated in [false, true] {
+            let mut request = Request::builder().uri("/events");
+            if authenticated {
+                request = request.header("x-api-key", "client-key");
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if authenticated {
+                    StatusCode::OK
+                } else {
+                    StatusCode::UNAUTHORIZED
+                }
+            );
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+            if authenticated {
+                assert_eq!(response.headers()["content-type"], "text/event-stream");
+                let mut stream = response.into_body().into_data_stream();
+                let chunk = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(chunk, "data: first\n\n");
+            } else {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap())
+                        .unwrap();
+                assert_eq!(value["error"]["type"], "authentication_error");
+            }
+        }
     }
 }

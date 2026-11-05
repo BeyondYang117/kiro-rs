@@ -1360,8 +1360,13 @@ mod retry_tests {
                 .into_iter()
                 .map(move |kind| (status, kind))
         });
-        futures::future::join_all(cases.map(|(status, kind)| async move {
-            let mock = mock(status, Some("3"), true).await;
+        // Client construction can synchronously load system TLS roots. Finish
+        // setup before starting any 2-second backoff assertion on this runtime.
+        let mut prepared = Vec::new();
+        for (status, kind) in cases {
+            prepared.push((mock(status, Some("3"), true).await, kind));
+        }
+        futures::future::join_all(prepared.into_iter().map(|(mock, kind)| async move {
             let provider = mock.provider.clone();
             let task =
                 tokio::spawn(

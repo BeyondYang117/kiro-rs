@@ -194,6 +194,8 @@ mod tests {
                     );
                 }
                 let response = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(response.headers()["cache-control"], "no-store");
+                assert_eq!(response.headers()["x-content-type-options"], "nosniff");
                 assert_eq!(
                     response.status().as_u16(),
                     if *accepted { 200 } else { 401 },
