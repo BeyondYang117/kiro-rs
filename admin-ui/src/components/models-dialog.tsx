@@ -66,6 +66,7 @@ export function ModelsDialog({
           <DialogTitle>凭据 #{credentialId} 可用模型</DialogTitle>
           <DialogDescription>
             从该账号的 Kiro 服务查询授权模型。代理支持状态用于区分已适配的模型。
+            成功查询的目录在 5 分钟内用于账号选路，过期或刷新失败后恢复订阅规则。
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">

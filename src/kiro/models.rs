@@ -17,6 +17,7 @@ use crate::{
 const MAX_PAGES: usize = 10;
 const MAX_MODELS: usize = 1000;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const CATALOG_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

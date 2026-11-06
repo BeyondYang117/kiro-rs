@@ -71,9 +71,10 @@ impl AdminService {
             .token_manager
             .model_catalog_key(id)
             .ok_or(AdminServiceError::NotFound { id })?;
-        let response = self
+        let requested_at = std::time::Instant::now();
+        let result = self
             .model_catalog
-            .load(id, key, force, || async {
+            .load(id, key.clone(), force, || async {
                 let (key, catalog) = self.token_manager.available_models_for(id).await?;
                 anyhow::ensure!(
                     self.token_manager.model_catalog_key(id).as_deref() == Some(&key),
@@ -81,7 +82,15 @@ impl AdminService {
                 );
                 Ok((key, catalog))
             })
-            .await?;
+            .await;
+        let response = match result {
+            Ok(response) => response,
+            Err(error) => {
+                self.token_manager
+                    .invalidate_model_catalog(id, &key, requested_at);
+                return Err(error);
+            }
+        };
         // A deleted account must not remain queryable through an in-flight fetch.
         match self.token_manager.model_catalog_key(id) {
             None => return Err(AdminServiceError::NotFound { id }),
@@ -92,6 +101,13 @@ impl AdminService {
             }
             _ => {}
         }
+        self.token_manager.update_model_catalog(
+            id,
+            &response.scope_key,
+            &response.catalog,
+            response.fetched_at,
+            response.stale,
+        );
         Ok(response)
     }
 
@@ -872,7 +888,7 @@ mod tests {
             .unwrap(),
         );
         let key = manager.model_catalog_key(7).unwrap();
-        let service = AdminService::new(manager, ["ide".into()]);
+        let service = AdminService::new(manager.clone(), ["ide".into()]);
         service
             .model_catalog
             .load(7, key.clone(), false, || async {
@@ -904,11 +920,22 @@ mod tests {
         let body = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(!body.contains("private-test-key"));
         assert!(!body.contains(&key));
+        assert!(!body.contains("fetchedAt"));
         let value: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(value["credentialId"], 7);
         assert_eq!(value["region"], "us-east-1");
         assert_eq!(value["cached"], true);
         assert_eq!(value["stale"], false);
         assert_eq!(value["models"], serde_json::json!([]));
+        // Even a cached HTTP response must publish the complete catalog to routing.
+        // This empty catalog denies generation, while model-free tools remain eligible.
+        assert!(
+            manager
+                .acquire_context(Some("claude-sonnet-4.6"))
+                .await
+                .is_err()
+        );
+        assert!(manager.acquire_context(None).await.is_ok());
+        assert_eq!(manager.available_count(), 1);
     }
 }

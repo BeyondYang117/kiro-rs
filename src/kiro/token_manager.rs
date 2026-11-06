@@ -29,6 +29,7 @@ use crate::model::config::Config;
 
 mod affinity;
 mod concurrency;
+mod model_routing;
 mod protection;
 mod protection_state;
 #[cfg(test)]
@@ -479,6 +480,7 @@ struct CredentialEntry {
     refresh_backoff_failures: u32,
     request_times: VecDeque<Instant>,
     adaptive_limit: concurrency::AdaptiveLimit,
+    model_catalog: Option<Arc<model_routing::RoutingCatalog>>,
     /// 最后一次 API 调用时间（RFC3339 格式）
     last_used_at: Option<String>,
 }
@@ -779,6 +781,7 @@ impl MultiTokenManager {
                     cooldown: None,
                     refresh_backoff: None,
                     refresh_backoff_failures: 0,
+                    model_catalog: None,
                     request_times: VecDeque::new(),
                     adaptive_limit: concurrency::AdaptiveLimit::new(
                         config.concurrency.max_in_flight_per_credential,
@@ -915,12 +918,15 @@ impl MultiTokenManager {
     }
 
     /// 复用当前凭据和重新选择凭据时使用相同的模型资格检查。
-    fn eligible_for_model(entry: &CredentialEntry, model: Option<&str>) -> bool {
-        !entry.disabled && (!Self::requires_opus(model) || entry.credentials.supports_opus())
+    fn eligible_for_model(&self, entry: &CredentialEntry, model: Option<&str>) -> bool {
+        !entry.disabled
+            && self
+                .catalog_support(entry, model)
+                .unwrap_or_else(|| !Self::requires_opus(model) || entry.credentials.supports_opus())
     }
 
     fn dispatchable(&self, entry: &CredentialEntry, model: Option<&str>, now: Instant) -> bool {
-        Self::eligible_for_model(entry, model)
+        self.eligible_for_model(entry, model)
             && entry.in_flight.load(Ordering::Relaxed) < self.effective_concurrency_limit(entry)
             && self
                 .protection_ready_at(entry)
@@ -944,9 +950,7 @@ impl MultiTokenManager {
                 entry.request_times.pop_front();
             }
         }
-        let eligible = entries
-            .iter()
-            .filter(|e| Self::eligible_for_model(e, model));
+        let eligible = entries.iter().filter(|e| self.eligible_for_model(e, model));
         if eligible.clone().next().is_none() {
             let available = entries.iter().filter(|e| !e.disabled).count();
             if available > 0 {
@@ -963,6 +967,11 @@ impl MultiTokenManager {
         let ready_at = eligible
             .clone()
             .filter_map(|entry| self.protection_ready_at(entry))
+            .chain(
+                entries
+                    .iter()
+                    .filter_map(|entry| self.catalog_expiry(entry)),
+            )
             .filter(|ready| *ready > now)
             .min();
         // 按到达顺序服务可调度的等待者；模型不匹配/账号满载/冷却不阻塞后续请求。
@@ -970,10 +979,16 @@ impl MultiTokenManager {
             return Ok((None, ready_at));
         }
         if !earlier_waiters.is_empty() {
-            let has_general_waiter = earlier_waiters.iter().any(|waiter| !waiter.requires_opus);
-            if entries.iter().any(|entry| {
-                self.dispatchable(entry, None, now)
-                    && (has_general_waiter || entry.credentials.supports_opus())
+            // Account catalogs distinguish individual models, including within Opus/Sonnet.
+            // Deduplicate identical models to avoid rescanning for every queued request.
+            let earlier_models: std::collections::HashSet<_> = earlier_waiters
+                .iter()
+                .map(|waiter| waiter.model.as_deref())
+                .collect();
+            if earlier_models.iter().any(|model| {
+                entries
+                    .iter()
+                    .any(|entry| self.dispatchable(entry, *model, now))
             }) {
                 return Ok((None, ready_at));
             }
@@ -993,6 +1008,7 @@ impl MultiTokenManager {
             .min_by_key(|e| {
                 if balanced {
                     (
+                        u8::from(self.catalog_support(e, model) != Some(true)),
                         u8::from(preferred.is_some_and(|id| e.id != id)),
                         e.in_flight.load(Ordering::Relaxed),
                         e.success_count,
@@ -1001,6 +1017,7 @@ impl MultiTokenManager {
                 } else {
                     // 保留 priority 对当前账号的偏好；满载/冷却时使用其他账号。
                     (
+                        u8::from(self.catalog_support(e, model) != Some(true)),
                         u8::from(preferred.is_some_and(|id| e.id != id)),
                         u64::from(e.id != current_id),
                         0,
@@ -2104,6 +2121,7 @@ impl MultiTokenManager {
                 cooldown: None,
                 refresh_backoff: None,
                 refresh_backoff_failures: 0,
+                model_catalog: None,
                 request_times: VecDeque::new(),
                 adaptive_limit: concurrency::AdaptiveLimit::new(
                     self.config.concurrency.max_in_flight_per_credential,

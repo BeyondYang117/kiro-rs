@@ -155,7 +155,8 @@ fn histogram_percentile(
 
 pub(super) struct Waiter {
     ticket: Arc<()>,
-    /// 当前账号模型资格分为 Opus 和通用两类，避免每次唤醒做队列×账号的扫描。
+    /// Full model identity is needed for account-specific authorization.
+    pub(super) model: Option<String>,
     pub(super) requires_opus: bool,
     started: Instant,
 }
@@ -276,7 +277,7 @@ impl MultiTokenManager {
             available_slots = available_slots
                 .saturating_add(remaining)
                 .min(global_available_slots);
-            if entry.credentials.supports_opus() {
+            if self.catalog_supports_opus(entry) {
                 available_opus_slots = available_opus_slots
                     .saturating_add(remaining)
                     .min(global_available_slots);
@@ -430,6 +431,7 @@ impl MultiTokenManager {
                     let started = Instant::now();
                     queue.push(Waiter {
                         ticket: ticket.clone(),
+                        model: model.map(str::to_owned),
                         requires_opus: MultiTokenManager::requires_opus(model),
                         started,
                     });

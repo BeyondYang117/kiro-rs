@@ -16,9 +16,9 @@ use super::{
     extract::{AdminPath, AdminQuery},
     middleware::AdminState,
 };
-use crate::kiro::models::ModelCatalog;
+use crate::kiro::models::{CATALOG_TTL, ModelCatalog};
 
-const CACHE_TTL: Duration = Duration::from_secs(300);
+const CACHE_TTL: Duration = CATALOG_TTL;
 const STALE_TTL: Duration = Duration::from_secs(3600);
 
 #[derive(Clone, Serialize)]
@@ -26,6 +26,8 @@ const STALE_TTL: Duration = Duration::from_secs(3600);
 pub(super) struct CatalogResponse {
     #[serde(skip)]
     pub scope_key: String,
+    #[serde(skip)]
+    pub fetched_at: Instant,
     pub credential_id: u64,
     #[serde(flatten)]
     pub catalog: ModelCatalog,
@@ -117,8 +119,10 @@ impl CatalogCache {
         .await;
         match result {
             Ok(Ok((key, catalog))) => {
+                let fetched_at = Instant::now();
                 let response = CatalogResponse {
                     scope_key: key.clone(),
+                    fetched_at,
                     credential_id: id,
                     catalog,
                     updated_at: chrono::Utc::now().to_rfc3339(),
@@ -128,7 +132,7 @@ impl CatalogCache {
                 };
                 *cached = Some(CachedCatalog {
                     key,
-                    fetched_at: Instant::now(),
+                    fetched_at,
                     response: response.clone(),
                 });
                 Ok(response)
