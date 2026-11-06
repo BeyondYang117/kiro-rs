@@ -125,9 +125,41 @@ async fn body_failures_preserve_http_metadata_and_old_records_remain_readable() 
         .as_object_mut()
         .unwrap()
         .remove("responseDiagnostics");
+    for field in [
+        "responseHeadersMs",
+        "firstByteMs",
+        "durationMs",
+        "bodyBytes",
+        "bodyComplete",
+    ] {
+        old["upstreamAttempts"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+    }
     let decoded: Record = serde_json::from_value(old).unwrap();
     assert!(decoded.upstream_attempts[0].response_diagnostics.is_none());
+    assert!(decoded.upstream_attempts[0].response_headers_ms.is_none());
+    assert!(decoded.upstream_attempts[0].body_complete.is_none());
     assert!(decoded.response.is_none());
+}
+
+#[test]
+fn response_diagnostics_read_old_boolean_and_new_unknown_frame_states() {
+    for incomplete in [json!(false), json!(true), Value::Null] {
+        let diagnostic: UpstreamResponseDiagnostics = serde_json::from_value(json!({
+            "outcome":"refusal", "incompleteFrame":incomplete,
+        }))
+        .unwrap();
+        assert_eq!(diagnostic.incomplete_frame, incomplete.as_bool());
+        assert_eq!(diagnostic.buffered_bytes, None);
+        assert_eq!(diagnostic.refusal_category, None);
+        assert_eq!(diagnostic.refusal_explanation, None);
+        assert_eq!(
+            serde_json::to_value(diagnostic).unwrap()["incompleteFrame"],
+            incomplete
+        );
+    }
 }
 
 #[tokio::test]
@@ -551,6 +583,12 @@ fn completed_calls_cannot_be_overwritten_by_late_active_snapshots_and_filter_mat
         status: Some(402),
         error: Some("quota exhausted".into()),
         upstream_request_id: None,
+        response_headers_ms: None,
+        first_byte_ms: None,
+        duration_ms: None,
+        body_bytes: None,
+        body_complete: None,
+        started: None,
         response_diagnostics: None,
     }];
     fixture.store.save(&record).unwrap();
@@ -705,40 +743,9 @@ fn quoted_and_escaped_secret_values_are_redacted_as_complete_values() {
 #[tokio::test]
 async fn real_provider_records_api_and_search_retries_with_full_upstream_errors() {
     use crate::kiro::{
-        endpoint::{KiroEndpoint, RequestContext as EndpointContext},
-        model::credentials::KiroCredentials,
-        provider::KiroProvider,
+        endpoint::KiroEndpoint, model::credentials::KiroCredentials, provider::KiroProvider,
         token_manager::MultiTokenManager,
     };
-    struct Endpoint(String);
-    impl KiroEndpoint for Endpoint {
-        fn name(&self) -> &'static str {
-            "ide"
-        }
-        fn api_url(&self, _: &EndpointContext<'_>) -> String {
-            self.0.clone()
-        }
-        fn mcp_url(&self, _: &EndpointContext<'_>) -> String {
-            self.0.clone()
-        }
-        fn decorate_api(
-            &self,
-            r: reqwest::RequestBuilder,
-            _: &EndpointContext<'_>,
-        ) -> reqwest::RequestBuilder {
-            r
-        }
-        fn decorate_mcp(
-            &self,
-            r: reqwest::RequestBuilder,
-            _: &EndpointContext<'_>,
-        ) -> reqwest::RequestBuilder {
-            r
-        }
-        fn transform_api_body(&self, body: &str, _: &EndpointContext<'_>) -> String {
-            body.into()
-        }
-    }
     for (search, streaming) in [(false, false), (false, true), (true, false), (true, true)] {
         let fixture = TestStore::new();
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -773,7 +780,7 @@ async fn real_provider_records_api_and_search_retries_with_full_upstream_errors(
         .unwrap();
         let endpoints: std::collections::HashMap<String, Arc<dyn KiroEndpoint>> = [(
             "ide".into(),
-            Arc::new(Endpoint(format!("http://{address}/"))) as Arc<dyn KiroEndpoint>,
+            Arc::new(LogTestEndpoint(format!("http://{address}/"))) as Arc<dyn KiroEndpoint>,
         )]
         .into();
         let provider = KiroProvider::with_proxy(Arc::new(manager), None, endpoints, "ide".into());
@@ -805,6 +812,13 @@ async fn real_provider_records_api_and_search_retries_with_full_upstream_errors(
         assert_eq!(record.stream, streaming);
         assert_eq!(record.upstream_attempts[0].status, Some(429));
         assert_eq!(record.upstream_attempts[1].status, Some(400));
+        for attempt in &record.upstream_attempts {
+            assert!(attempt.response_headers_ms.is_some());
+            assert!(attempt.first_byte_ms.is_some());
+            assert!(attempt.duration_ms.is_some());
+            assert!(attempt.body_bytes.unwrap() > 0);
+            assert_eq!(attempt.body_complete, Some(true));
+        }
         assert_eq!(
             record.upstream_attempts[1].upstream_request_id.as_deref(),
             Some("upstream-2")
@@ -829,5 +843,197 @@ async fn real_provider_records_api_and_search_retries_with_full_upstream_errors(
         assert!(record.diagnostics.iter().any(|d| d.message.contains("429")));
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
         server.abort();
+    }
+}
+
+struct LogTestEndpoint(String);
+impl crate::kiro::endpoint::KiroEndpoint for LogTestEndpoint {
+    fn name(&self) -> &'static str {
+        "ide"
+    }
+    fn api_url(&self, _: &crate::kiro::endpoint::RequestContext<'_>) -> String {
+        self.0.clone()
+    }
+    fn mcp_url(&self, _: &crate::kiro::endpoint::RequestContext<'_>) -> String {
+        self.0.clone()
+    }
+    fn decorate_api(
+        &self,
+        r: reqwest::RequestBuilder,
+        _: &crate::kiro::endpoint::RequestContext<'_>,
+    ) -> reqwest::RequestBuilder {
+        r
+    }
+    fn decorate_mcp(
+        &self,
+        r: reqwest::RequestBuilder,
+        _: &crate::kiro::endpoint::RequestContext<'_>,
+    ) -> reqwest::RequestBuilder {
+        r
+    }
+    fn transform_api_body(
+        &self,
+        body: &str,
+        _: &crate::kiro::endpoint::RequestContext<'_>,
+    ) -> String {
+        body.into()
+    }
+}
+
+#[tokio::test]
+async fn provider_progress_survives_cancellation_before_downstream_headers() {
+    use crate::kiro::{
+        endpoint::KiroEndpoint, model::credentials::KiroCredentials, provider::KiroProvider,
+        token_manager::MultiTokenManager,
+    };
+    use futures::StreamExt;
+
+    // Exercise both raw event streaming and the bounded MCP/text body reader.
+    for stream_body in [false, true] {
+        for phase in ["sending", "headers", "partial", "complete"] {
+            let fixture = TestStore::new();
+            let upstream = Router::new().route(
+                "/",
+                post(move || async move {
+                    if phase == "sending" {
+                        return futures::future::pending::<Response>().await;
+                    }
+                    let prefix = if phase == "headers" { "" } else { "hello" };
+                    let body = futures::stream::once(async move {
+                        Ok::<_, std::io::Error>(bytes::Bytes::from_static(prefix.as_bytes()))
+                    });
+                    let body = if phase == "complete" {
+                        body.boxed()
+                    } else {
+                        body.chain(futures::stream::pending()).boxed()
+                    };
+                    Response::builder()
+                        .header("x-request-id", "pending-upstream")
+                        .body(Body::from_stream(body))
+                        .unwrap()
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server =
+                tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+            let manager = Arc::new(
+                MultiTokenManager::new(
+                    Default::default(),
+                    vec![KiroCredentials {
+                        id: Some(176),
+                        kiro_api_key: Some("test-key".into()),
+                        ..Default::default()
+                    }],
+                    None,
+                    None,
+                    false,
+                )
+                .unwrap(),
+            );
+            let endpoints = std::collections::HashMap::from([(
+                "ide".into(),
+                Arc::new(LogTestEndpoint(format!("http://{address}/"))) as Arc<dyn KiroEndpoint>,
+            )]);
+            let provider = Arc::new(KiroProvider::with_proxy(
+                manager.clone(),
+                None,
+                endpoints,
+                "ide".into(),
+            ));
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let sender = Arc::new(Mutex::new(Some(sender)));
+            let app = Router::new()
+                .route(
+                    "/cc/v1/messages",
+                    post(move || {
+                        let provider = provider.clone();
+                        let sender = sender.clone();
+                        async move {
+                            request_metadata("test-model", false);
+                            let context = CURRENT.with(Clone::clone);
+                            let _ = sender.lock().take().unwrap().send(context);
+                            let response = provider.call_api("{}").await.unwrap();
+                            if stream_body {
+                                let mut body = response.bytes_stream();
+                                while let Some(chunk) = body.next().await {
+                                    chunk.unwrap();
+                                }
+                            } else {
+                                response.text().await.unwrap();
+                            }
+                            Json(json!({"ok":true}))
+                        }
+                    }),
+                )
+                .layer(from_fn_with_state(fixture.store.clone(), middleware));
+            let task = tokio::spawn(app.oneshot(request("/cc/v1/messages")));
+            let context: RequestContext = receiver.await.unwrap();
+            let id = context.lock().id.clone();
+            if phase == "complete" {
+                let response = task.await.unwrap().unwrap();
+                to_bytes(response.into_body(), 100_000).await.unwrap();
+            } else {
+                tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    loop {
+                        let ready =
+                            context
+                                .lock()
+                                .upstream_attempts
+                                .last()
+                                .is_some_and(|attempt| {
+                                    if phase == "sending" {
+                                        attempt.status.is_none()
+                                    } else {
+                                        attempt.status == Some(200)
+                                            && (phase != "partial" || attempt.body_bytes == Some(5))
+                                    }
+                                });
+                        if ready {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            }
+            let record = fixture.record(&id).await;
+            let attempt = &record.upstream_attempts[0];
+            assert!(attempt.duration_ms.is_some());
+            if phase == "complete" {
+                assert_eq!(record.status, "success");
+                assert_eq!(attempt.body_complete, Some(true));
+                assert!(attempt.error.is_none());
+            } else {
+                assert_eq!(record.status, "interrupted");
+                assert_eq!(record.http_status, 0);
+                assert!(record.first_byte_ms.is_none());
+                assert!(record.error.as_deref().unwrap().contains("响应头前被取消"));
+                assert!(attempt.error.is_some());
+            }
+            assert_eq!(attempt.response_headers_ms.is_some(), phase != "sending");
+            assert_eq!(
+                attempt.first_byte_ms.is_some(),
+                matches!(phase, "partial" | "complete")
+            );
+            assert_eq!(
+                attempt.body_bytes,
+                match phase {
+                    "sending" => None,
+                    "headers" => Some(0),
+                    _ => Some(5),
+                }
+            );
+            if let (Some(headers), Some(first)) =
+                (attempt.response_headers_ms, attempt.first_byte_ms)
+            {
+                assert!(headers <= first && first <= attempt.duration_ms.unwrap());
+            }
+            assert_eq!(manager.snapshot().concurrency.in_flight, 0);
+            server.abort();
+        }
     }
 }

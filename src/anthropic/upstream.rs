@@ -38,6 +38,20 @@ impl UpstreamRefusalError {
                 message.push_str(explanation);
             }
         }
+        if let Some(reason) = &metadata.stop_reason {
+            message.push_str(&format!(" [stopReason: {}]", diagnostic_label(reason)));
+        }
+        if metadata
+            .stop_details
+            .as_ref()
+            .and_then(|details| details.refusal.as_ref())
+            .and_then(|refusal| refusal.explanation.as_deref())
+            .is_none_or(|explanation| explanation.trim().is_empty())
+        {
+            message.push_str(
+                ". Review the request and conversation history; start a new conversation or select a different model if appropriate.",
+            );
+        }
         Self(
             crate::request_log::redact(&message)
                 .chars()
@@ -499,6 +513,7 @@ fn has_meaningful_text(text: &str, thinking_enabled: bool) -> bool {
 #[derive(Default)]
 pub(super) struct UpstreamResponseDecoder {
     frames: EventStreamDecoder,
+    decoding_stopped_early: bool,
     pending_tools: HashMap<String, PendingTool>,
     required_fields: HashMap<String, Vec<String>>,
     tool_events: Vec<Event>,
@@ -559,7 +574,12 @@ impl UpstreamResponseDecoder {
         UpstreamResponseDiagnostics {
             outcome: outcome.into(),
             content: crate::request_log::redact(&self.diagnostics.content),
-            incomplete_frame: self.frames.has_pending_data(),
+            incomplete_frame: if self.decoding_stopped_early && self.frames.has_pending_data() {
+                None
+            } else {
+                Some(self.frames.has_pending_data())
+            },
+            buffered_bytes: Some(self.frames.pending_bytes() as u64),
             pending_tool_calls: self.pending_tools.len(),
             ..self.diagnostics.clone()
         }
@@ -587,6 +607,9 @@ impl UpstreamResponseDecoder {
     pub fn feed(&mut self, chunk: &[u8]) -> anyhow::Result<Vec<Event>> {
         self.diagnostics.body_bytes += chunk.len() as u64;
         self.diagnostics.chunks += 1;
+        // An early error may leave complete frames in the buffer. Only call
+        // them incomplete after the decode loop has examined all available frames.
+        self.decoding_stopped_early = true;
         self.frames.feed(chunk)?;
         let mut events = Vec::new();
         // Response content must not silently skip corrupt frames or payloads.
@@ -657,6 +680,21 @@ impl UpstreamResponseDecoder {
             }
             match &event {
                 Event::Metadata(metadata) if metadata.is_refusal() => {
+                    if let Some(refusal) = metadata
+                        .stop_details
+                        .as_ref()
+                        .and_then(|details| details.refusal.as_ref())
+                    {
+                        self.diagnostics.refusal_category =
+                            refusal.category.as_deref().map(diagnostic_label);
+                        self.diagnostics.refusal_explanation =
+                            refusal.explanation.as_deref().map(|explanation| {
+                                crate::request_log::public_error_message(explanation)
+                                    .chars()
+                                    .take(2048)
+                                    .collect()
+                            });
+                    }
                     return Err(UpstreamRefusalError::from_metadata(metadata).into());
                 }
                 Event::ContextUsage(usage) if usage.context_usage_percentage >= 100.0 => {
@@ -776,6 +814,7 @@ impl UpstreamResponseDecoder {
                 events.push(event);
             }
         }
+        self.decoding_stopped_early = false;
         Ok(events)
     }
 

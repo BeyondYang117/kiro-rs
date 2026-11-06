@@ -53,12 +53,17 @@ pub struct UpstreamResponseDiagnostics {
     pub reasoning_bytes: u64,
     pub redacted_reasoning_bytes: u64,
     pub tool_input_bytes: u64,
-    pub incomplete_frame: bool,
+    /// None when decoding stopped early with unexamined bytes remaining.
+    pub incomplete_frame: Option<bool>,
+    /// None for older records that did not distinguish buffered from partial frames.
+    pub buffered_bytes: Option<u64>,
     pub pending_tool_calls: usize,
     pub thinking_enabled: bool,
     pub content: String,
     pub content_truncated: bool,
     pub stop_reason: Option<String>,
+    pub refusal_category: Option<String>,
+    pub refusal_explanation: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -79,6 +84,19 @@ pub struct Attempt {
     status: Option<u16>,
     error: Option<String>,
     upstream_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    response_headers_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    first_byte_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    body_bytes: Option<u64>,
+    /// Transport EOF only; response validation can still fail afterward.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    body_complete: Option<bool>,
+    #[serde(skip)]
+    started: Option<Instant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     response_diagnostics: Option<UpstreamResponseDiagnostics>,
 }
@@ -199,6 +217,12 @@ pub fn attempt_started(credential_id: u64, endpoint: &str) {
             status: None,
             error: None,
             upstream_request_id: None,
+            response_headers_ms: None,
+            first_byte_ms: None,
+            duration_ms: None,
+            body_bytes: None,
+            body_complete: None,
+            started: Some(Instant::now()),
             response_diagnostics: None,
         });
     });
@@ -207,9 +231,49 @@ pub fn attempt_started(credential_id: u64, endpoint: &str) {
 pub fn attempt_result(status: Option<u16>, error: Option<&str>, upstream_id: Option<&str>) {
     let _ = CURRENT.try_with(|context| {
         if let Some(attempt) = context.lock().upstream_attempts.last_mut() {
+            if status.is_some() && attempt.response_headers_ms.is_none() {
+                attempt.response_headers_ms = attempt.elapsed_ms();
+                attempt.body_bytes = Some(0);
+                attempt.body_complete = Some(false);
+            }
+            if error.is_some() {
+                attempt.duration_ms = attempt.elapsed_ms();
+            }
             attempt.status = status;
             attempt.error = error.map(redact);
             attempt.upstream_request_id = upstream_id.map(redact);
+        }
+    });
+}
+
+impl Attempt {
+    fn elapsed_ms(&self) -> Option<u64> {
+        self.started
+            .map(|started| started.elapsed().as_millis() as u64)
+    }
+}
+
+/// Track raw upstream bytes independently of decoded content or downstream SSE pings.
+pub(crate) fn attempt_body_chunk(chunk: &[u8]) {
+    let _ = CURRENT.try_with(|context| {
+        if let Some(attempt) = context.lock().upstream_attempts.last_mut() {
+            if !chunk.is_empty() && attempt.first_byte_ms.is_none() {
+                attempt.first_byte_ms = attempt.elapsed_ms();
+            }
+            let bytes = attempt.body_bytes.get_or_insert(0);
+            *bytes = bytes.saturating_add(chunk.len() as u64);
+        }
+    });
+}
+
+pub(crate) fn attempt_body_finished(error: Option<&str>) {
+    let _ = CURRENT.try_with(|context| {
+        if let Some(attempt) = context.lock().upstream_attempts.last_mut() {
+            attempt.duration_ms = attempt.elapsed_ms();
+            attempt.body_complete = Some(error.is_none());
+            if let Some(error) = error {
+                attempt.error = Some(redact(error));
+            }
         }
     });
 }
@@ -218,6 +282,7 @@ pub fn attempt_result(status: Option<u16>, error: Option<&str>, upstream_id: Opt
 pub fn attempt_response_finished(diagnostics: UpstreamResponseDiagnostics, error: Option<&str>) {
     let _ = CURRENT.try_with(|context| {
         if let Some(attempt) = context.lock().upstream_attempts.last_mut() {
+            attempt.duration_ms = attempt.elapsed_ms();
             attempt.response_diagnostics = Some(diagnostics);
             if let Some(error) = error {
                 attempt.error = Some(redact(error));
@@ -668,7 +733,11 @@ impl Observer {
             if record.status != "error" {
                 record.status = if (self.is_sse && !self.stop) || (!eof && !self.stop) {
                     if record.error.is_none() {
-                        record.error = Some("响应未完整结束：客户端断开或流被取消".into());
+                        record.error = Some(if record.http_status == 0 {
+                            "请求在返回客户端响应头前被取消；请检查客户端或反向代理超时（非流式请求需等待完整生成）".into()
+                        } else {
+                            "响应未完整结束：客户端/反向代理断开或流被取消".into()
+                        });
                     }
                     "interrupted"
                 } else {
@@ -678,6 +747,19 @@ impl Observer {
             }
             if record.status == "error" && record.error.is_none() {
                 record.error = Some(format!("HTTP {}，响应未提供错误详情", record.http_status));
+            }
+            let interrupted = record.status == "interrupted";
+            if let Some(attempt) = record.upstream_attempts.last_mut()
+                && attempt.duration_ms.is_none()
+            {
+                attempt.duration_ms = attempt.elapsed_ms();
+                if interrupted && attempt.error.is_none() {
+                    attempt.error = Some(if attempt.status.is_none() {
+                        "调用结束时尚未取得上游响应头".into()
+                    } else {
+                        "调用结束时上游响应体尚未完整读取".into()
+                    });
+                }
             }
             record.clone()
         };

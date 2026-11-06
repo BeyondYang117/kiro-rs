@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::time::sleep;
 
-use crate::http_client::{ProxyConfig, build_client, read_bounded_text};
+use crate::http_client::{ProxyConfig, build_client, read_bounded_text_observed};
 use crate::kiro::endpoint::{KiroEndpoint, RequestContext};
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
@@ -83,12 +83,19 @@ impl UpstreamResponse {
             |(mut stream, mut context, manager)| async move {
                 context.as_ref()?;
                 let Some(chunk) = stream.next().await else {
+                    crate::request_log::attempt_body_finished(None);
                     manager.report_transport_success(context.as_ref().unwrap());
                     return None;
                 };
-                if chunk.is_err() {
-                    // An errored body cannot make further progress; release immediately.
-                    context.take();
+                match &chunk {
+                    Ok(bytes) => crate::request_log::attempt_body_chunk(bytes),
+                    Err(error) => {
+                        crate::request_log::attempt_body_finished(Some(
+                            &crate::request_log::error_chain(error),
+                        ));
+                        // An errored body cannot make further progress; release immediately.
+                        context.take();
+                    }
                 }
                 Some((chunk, (stream, context, manager)))
             },
@@ -98,13 +105,21 @@ impl UpstreamResponse {
 
     pub async fn text(self) -> anyhow::Result<String> {
         let limits = &self.token_manager.config().request_limits;
-        let result = read_bounded_text(
+        let result = read_bounded_text_observed(
             self.response,
             limits.max_response_bytes,
             Duration::from_secs(limits.first_content_timeout_seconds),
             Duration::from_secs(limits.idle_timeout_seconds),
+            crate::request_log::attempt_body_chunk,
         )
         .await;
+        crate::request_log::attempt_body_finished(
+            result
+                .as_ref()
+                .err()
+                .map(|error| format!("{error:#}"))
+                .as_deref(),
+        );
         if result.is_ok() {
             self.token_manager.report_transport_success(&self.context);
         }
@@ -231,14 +246,22 @@ impl KiroProvider {
 
     async fn read_error_body(&self, response: reqwest::Response) -> String {
         let limits = self.request_limits();
-        read_bounded_text(
+        let result = read_bounded_text_observed(
             response,
             limits.max_response_bytes.min(64 * 1024),
             Duration::from_secs(limits.first_content_timeout_seconds),
             Duration::from_secs(limits.idle_timeout_seconds),
+            crate::request_log::attempt_body_chunk,
         )
-        .await
-        .unwrap_or_else(|error| format!("读取上游错误响应失败: {error:#}"))
+        .await;
+        crate::request_log::attempt_body_finished(
+            result
+                .as_ref()
+                .err()
+                .map(|error| format!("{error:#}"))
+                .as_deref(),
+        );
+        result.unwrap_or_else(|error| format!("读取上游错误响应失败: {error:#}"))
     }
 
     /// 内部方法：带重试逻辑的 MCP API 调用

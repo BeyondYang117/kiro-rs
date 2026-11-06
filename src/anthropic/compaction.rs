@@ -1221,14 +1221,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filtered_stop_reasons_without_details_are_terminal() {
+        for reason in ["CONTENT_FILTERED", "guardrail_intervened", "REFUSAL"] {
+            for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+                for streaming in [false, true] {
+                    let bytes = frame("metadataEvent", json!({"stopReason":reason}));
+                    let mut upstream = mock_scripted(vec![bytes, recovered_write()]).await;
+                    upstream.state.cc_buffered_stream = buffered;
+                    let record = logged_completion_mode(&upstream, streaming, cc).await;
+                    assert_eq!(record["status"], "error", "{record}");
+                    assert_eq!(record["httpStatus"], if streaming { 200 } else { 400 });
+                    let attempts = record["upstreamAttempts"].as_array().unwrap();
+                    assert_eq!(attempts.len(), 1);
+                    let diagnostic = &attempts[0]["responseDiagnostics"];
+                    assert_eq!(diagnostic["outcome"], "refusal");
+                    assert_eq!(diagnostic["stopReason"], reason);
+                    assert_eq!(diagnostic["incompleteFrame"], false);
+                    assert_eq!(diagnostic["bufferedBytes"], 0);
+                    assert!(attempts[0]["error"].as_str().unwrap().contains(reason));
+                    assert!(record["response"]["stopReason"].is_null());
+                    assert_eq!(upstream.requests.lock().unwrap().len(), 1);
+                    assert_eq!(upstream.manager.snapshot().entries[0].success_count, 0);
+                    assert_eq!(upstream.manager.snapshot().available, 1);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn content_before_filtered_metadata_does_not_turn_refusal_into_success() {
+        for streaming in [false, true] {
+            let mut bytes = frame("assistantResponseEvent", json!({"content":"prefix"}));
+            bytes.extend(frame(
+                "metadataEvent",
+                json!({"stopReason":"CONTENT_FILTERED"}),
+            ));
+            let upstream = mock_scripted(vec![bytes, recovered_write()]).await;
+            let record = logged_completion(&upstream, streaming).await;
+            assert_eq!(record["status"], "error");
+            assert_eq!(
+                record["upstreamAttempts"][0]["responseDiagnostics"]["outcome"],
+                "refusal"
+            );
+            assert!(record["response"]["stopReason"].is_null());
+            assert_eq!(upstream.requests.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn refusal_leaves_trailing_bytes_unclassified_and_unforwarded() {
+        let trailing = recovered_write();
+        // Neither complete nor partial trailing frames should be called truncated
+        // when the decoder intentionally stops at an earlier refusal.
+        for suffix in [trailing.as_slice(), &trailing[..trailing.len() - 3]] {
+            for streaming in [false, true] {
+                let mut bytes = refusal_response();
+                bytes.extend_from_slice(suffix);
+                let upstream = mock_scripted(vec![bytes, recovered_write()]).await;
+                let record = logged_completion(&upstream, streaming).await;
+                let diagnostic = &record["upstreamAttempts"][0]["responseDiagnostics"];
+                assert_eq!(record["status"], "error");
+                assert_eq!(diagnostic["outcome"], "refusal");
+                assert!(diagnostic["incompleteFrame"].is_null(), "{diagnostic}");
+                assert_eq!(diagnostic["bufferedBytes"], suffix.len());
+                assert_eq!(diagnostic["toolInputBytes"], 0);
+                assert_eq!(diagnostic["pendingToolCalls"], 0);
+                assert!(
+                    record["response"]["content"]
+                        .as_array()
+                        .is_none_or(|blocks| blocks.iter().all(|block| {
+                            block["type"] != "tool_use"
+                                && block["text"].as_str().is_none_or(str::is_empty)
+                        })),
+                    "{record}"
+                );
+                assert_eq!(upstream.requests.lock().unwrap().len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn refusal_logs_identify_the_cause_and_redact_secrets() {
         for streaming in [false, true] {
             let bytes = frame(
                 "metadataEvent",
                 json!({
-                    "stopReason":"refusal",
+                    "stopReason":"CONTENT_FILTERED",
                     "stopDetails":{"refusal":{
-                        "category":"CONTENT_POLICY",
+                        "category":"CYBER",
                         "explanation":"Blocked. accessToken=private-token-sentinel"
                     }}
                 }),
@@ -1242,17 +1322,53 @@ mod tests {
             assert_eq!(attempts[0]["status"], 200);
             assert_eq!(attempts[0]["responseDiagnostics"]["outcome"], "refusal");
             assert_eq!(
+                attempts[0]["responseDiagnostics"]["refusalCategory"],
+                "CYBER"
+            );
+            assert!(
+                attempts[0]["responseDiagnostics"]["refusalExplanation"]
+                    .as_str()
+                    .unwrap()
+                    .contains("[REDACTED]")
+            );
+            assert_eq!(attempts[0]["responseDiagnostics"]["incompleteFrame"], false);
+            assert_eq!(
                 attempts[0]["responseDiagnostics"]["eventTypes"]["metadataEvent"],
                 1
             );
             let error = attempts[0]["error"].as_str().unwrap();
-            assert!(error.contains("CONTENT_POLICY"), "{error}");
+            assert!(error.contains("CYBER"), "{error}");
             assert!(error.contains("Blocked."), "{error}");
             assert!(error.contains("[REDACTED]"), "{error}");
             let encoded = record.to_string();
             assert!(!encoded.contains("private-token-sentinel"));
             assert!(!encoded.contains("private-prompt-sentinel"));
         }
+    }
+
+    #[tokio::test]
+    async fn structured_refusal_details_are_bounded_and_sanitized() {
+        let bytes = frame(
+            "metadataEvent",
+            json!({
+                "stopReason":"CONTENT_FILTERED",
+                "stopDetails":{"refusal":{
+                    "category":format!("CYBER\n{}", "类".repeat(200)),
+                    "explanation":format!("Blocked.\naccessToken=private-token-sentinel {}", "说".repeat(5000)),
+                }},
+            }),
+        );
+        let upstream = mock_scripted(vec![bytes]).await;
+        let record = logged_completion(&upstream, true).await;
+        let diagnostic = &record["upstreamAttempts"][0]["responseDiagnostics"];
+        let category = diagnostic["refusalCategory"].as_str().unwrap();
+        let explanation = diagnostic["refusalExplanation"].as_str().unwrap();
+        assert!(category.chars().count() <= 96);
+        assert!(explanation.chars().count() <= 2048);
+        assert!(!category.chars().any(char::is_control));
+        assert!(!explanation.chars().any(char::is_control));
+        assert!(explanation.contains("[REDACTED]"));
+        assert!(!record.to_string().contains("private-token-sentinel"));
     }
 
     #[tokio::test]

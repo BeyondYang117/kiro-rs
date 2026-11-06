@@ -15,12 +15,15 @@ export interface UpstreamResponseDiagnostics {
   reasoningBytes: number
   redactedReasoningBytes: number
   toolInputBytes: number
-  incompleteFrame: boolean
+  incompleteFrame: boolean | null
+  bufferedBytes?: number | null
   pendingToolCalls: number
   thinkingEnabled: boolean
   content?: string
   contentTruncated?: boolean
   stopReason?: string | null
+  refusalCategory?: string | null
+  refusalExplanation?: string | null
 }
 
 export interface LogRecord {
@@ -52,6 +55,11 @@ export interface LogRecord {
     status: number | null
     error: string | null
     upstreamRequestId: string | null
+    responseHeadersMs?: number
+    firstByteMs?: number
+    durationMs?: number
+    bodyBytes?: number
+    bodyComplete?: boolean
     responseDiagnostics?: UpstreamResponseDiagnostics
   }[]
   diagnostics?: { timestamp: number; level: string; target: string; message: string }[]

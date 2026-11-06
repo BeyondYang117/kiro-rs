@@ -677,9 +677,17 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
 
 每条记录包含时间、请求 ID、接口、模型、是否流式、HTTP 状态、总耗时、首个响应数据块耗时、输入/输出 Token、凭据 ID、上游调用次数、上游请求 ID及错误详情。详情展示各次调用的上游 HTTP 状态和错误响应，以及该请求中的警告、错误和底层错误链（如 DNS、连接、TLS、超时、帧校验失败）。`RUST_LOG=off` 不影响调用明细和诊断的采集。
 
+每次上游调用还记录 `responseHeadersMs`（发送至收到响应头）、`firstByteMs`（发送至首个非空响应数据块）、`durationMs`（发送至读取结束、失败或取消）、`bodyBytes`（实际接收字节数）和 `bodyComplete`（是否读到响应体 EOF）。耗时使用单调时钟，均以该次上游调用为起点，不包含此前排队和退避；管理页另展示每次调用相对于整个请求的开始时间。`bodyComplete: true` 只代表传输读完，内容校验仍可能失败。字段缺失表示未取得或旧日志未记录，取消时仍保存已有进度。
+
+顶层 `firstByteMs` 是返回客户端的首个数据块耗时，流式 ping 也会计入；非流式请求需等待完整生成，不能用它判断上游是否已经开始返回数据。`httpStatus: 0` 表示处理被取消前未生成客户端响应头；最后一次上游 `status: 200` 仅代表收到上游响应头。若非流式请求总是在约 60 秒中断，应检查客户端总超时及反向代理等待超时，并按需要改用流式请求或延长下游超时；服务端 `requestLimits.totalTimeoutSeconds` 无法延长下游的超时。`INSUFFICIENT_MODEL_CAPACITY` 表示上游模型容量不足，已有账号冷却和重试可能增加等待时间，增加重试次数不能解决下游超时。
+
 普通对话和压缩请求的每次上游响应还会保存 `upstreamAttempts[].responseDiagnostics`：响应类型和声明长度、实际接收字节数、数据块数、事件类型计数、各类事件首帧的字段路径、文本/非空白文本/推理/工具参数的字节数，以及不完整帧和未完成工具调用数量。可据此区分零字节、仅元数据、空白文本、未知事件、解码失败和传输中断。HTTP 200 后的响应体错误也会回填到对应调用的 `error`，每次重试单独保留；失败诊断同时输出到终端。字段路径只采样对象结构，最多 32 类事件（另有溢出汇总项）、每类 32 个字段路径、深度 3 层，不保存字段值。更新后的新调用才有这些数据，历史记录仍可读取。
 
 调用状态分为成功、失败、中断、进行中。SSE 返回 HTTP 200 后收到 `error` 事件仍记为失败；流未完整结束、客户端取消或断开记为中断。服务重启后，未结束的记录标为中断、结果未知，避免把未完成请求算作成功。流式调用的用量仅包含已收到的 usage；未取得用量时显示 `—`，不会编造为零。Token 使用服务已有计数/估算；压缩请求累计 `usage.iterations`，`count_tokens` 的计数结果也纳入输入统计，这些数字不等同于上游账单。
+
+上游 `metadataEvent` 包含 `stopDetails.refusal`，或 `stopReason` 为 `refusal`、`CONTENT_FILTERED`、`guardrail_intervened`（不区分大小写）时，记录为 `refusal` 并终止，不自动重试或轮换凭据。非流式返回 `400 invalid_request_error`；已建立的流式响应通过 SSE `error` 返回同类错误，不发送正常完成事件。诊断中的 `refusalCategory`、`refusalExplanation` 分别保存脱敏并限长的拒绝类别（96 字符）、说明（2048 字符），管理页会显示处理建议；例如 `CYBER` 表示网络安全相关类别，具体触发内容仍需结合请求和历史消息判断。
+
+`bufferedBytes` 记录解码器剩余字节数。解码提前终止且仍有残留时，`incompleteFrame` 为 `null`（未判定），这些字节可能包含完整帧，不能据此认定传输截断；解码已检查全部可用帧时，该字段为布尔值。旧记录缺少 `bufferedBytes`，页面会注明残留帧类型未经区分，历史诊断无法补录。
 
 详情还保存最终响应的 `response.content`、`response.stopReason`（客户端的 `stop_reason`）及 `response.truncated`。流式响应合并 content 块和增量，工具参数尽量还原为 JSON；未完整接收或被截断的参数保留为字符串预览。预览中的字符串和字段名共用 16 KiB 预算，另限制结构节点、嵌套深度和数组长度，超出会标记截断。每次上游尝试的 `responseDiagnostics.content` 保存最多 4 KiB 的助手文本，`contentTruncated` 表示是否截断，`stopReason` 保存上游 metadata 的原始停止原因；它可能与转换后返回客户端的停止原因不同。管理页直接展示这些字段，导出 JSON 同样包含；列表不携带正文预览。正常短回答不会仅因 Token 少而自动重试。旧记录无法补录这些字段。
 

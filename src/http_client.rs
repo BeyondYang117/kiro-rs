@@ -15,6 +15,24 @@ pub(crate) async fn read_bounded_text(
     first_byte_timeout: Duration,
     idle_timeout: Duration,
 ) -> anyhow::Result<String> {
+    read_bounded_text_observed(
+        response,
+        max_bytes,
+        first_byte_timeout,
+        idle_timeout,
+        |_| {},
+    )
+    .await
+}
+
+/// Observe raw chunks before applying text decoding or response size limits.
+pub(crate) async fn read_bounded_text_observed(
+    response: reqwest::Response,
+    max_bytes: usize,
+    first_byte_timeout: Duration,
+    idle_timeout: Duration,
+    mut observe: impl FnMut(&[u8]),
+) -> anyhow::Result<String> {
     use anyhow::Context;
     use futures::StreamExt;
     use tokio::time::{Instant, timeout_at};
@@ -36,6 +54,7 @@ pub(crate) async fn read_bounded_text(
         let chunk = chunk
             .map_err(|error| error.without_url())
             .context("Failed to read upstream response body")?;
+        observe(&chunk);
         if chunk.len() > max_bytes.saturating_sub(buffer.len()) {
             anyhow::bail!("Upstream response byte limit exceeded ({max_bytes} bytes)");
         }

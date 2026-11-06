@@ -224,6 +224,10 @@ impl EventStreamDecoder {
         !self.buffer.is_empty()
     }
 
+    pub fn pending_bytes(&self) -> usize {
+        self.buffer.len()
+    }
+
     /// 尝试容错恢复
     ///
     /// 根据错误类型采用不同的恢复策略（参考 kiro-kt 的设计）：

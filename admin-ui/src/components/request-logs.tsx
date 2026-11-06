@@ -19,10 +19,35 @@ function Status({ record }: { record: LogRecord }) {
   return <Badge variant={record.status === 'success' ? 'success' : record.status === 'error' ? 'destructive' : record.status === 'interrupted' ? 'warning' : 'secondary'}>{labels[record.status]}</Badge>
 }
 
+function AttemptProgress({ attempt, requestTimestamp }: {
+  attempt: NonNullable<LogRecord['upstreamAttempts']>[number]
+  requestTimestamp: number
+}) {
+  if (attempt.durationMs == null && attempt.responseHeadersMs == null) return null
+  const bodyState = attempt.bodyComplete == null ? '未取得响应体'
+    : attempt.bodyComplete ? '响应体已读完' : '响应体未读完'
+  return <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+    <p>距请求开始：{formatDuration(Math.max(0, attempt.timestamp - requestTimestamp))} · 上游耗时：{formatDuration(attempt.durationMs)}</p>
+    <p>上游响应头 / 首字节：{formatDuration(attempt.responseHeadersMs)} / {formatDuration(attempt.firstByteMs)} · 已接收 {formatNumber(attempt.bodyBytes)} B · {bodyState}</p>
+    {attempt.status === 200 && <p>HTTP 200 表示已收到上游响应头，完整响应仍需读取并校验。</p>}
+  </div>
+}
+
 function ResponseDiagnostics({ data }: { data: UpstreamResponseDiagnostics }) {
   const outcomes: Record<string, string> = { empty: '无有效内容', refusal: '上游拒绝', decode_error: '解码失败', read_error: '读取失败', incomplete: '响应不完整', prefix_limit: '空内容超出限制', limited: '达到上游限制', success: '成功' }
+  const incompleteFrame = data.incompleteFrame == null
+    ? '未判定（解码提前终止或未记录）'
+    : data.incompleteFrame && data.bufferedBytes == null
+      ? '有残留（旧记录未区分完整帧）'
+      : data.incompleteFrame ? '是' : '否'
   return <div className="mt-3 space-y-2 rounded-md bg-muted/30 p-3 text-xs">
     <p className="font-medium">响应诊断 · {outcomes[data.outcome] ?? data.outcome}</p>
+    {data.outcome === 'refusal' && <div className="space-y-1 rounded-md border border-destructive/30 bg-destructive/5 p-2">
+      <p>上游模型拒绝了当前对话。本次拒绝不会触发自动重试或凭据切换。</p>
+      <p>请检查当前请求及历史消息；对于合法任务，可新建会话、回退到触发前或选择其他模型后重试。</p>
+      {data.refusalCategory && <p className="break-all">拒绝类别：{data.refusalCategory === 'CYBER' ? 'CYBER（网络安全相关）' : data.refusalCategory}</p>}
+      {data.refusalExplanation && <p className="whitespace-pre-wrap break-words">上游说明：{data.refusalExplanation}</p>}
+    </div>}
     <dl className="grid gap-2 sm:grid-cols-2">
       {[
         ['响应类型 / 声明长度', `${data.contentType ?? '未提供'} / ${data.contentLength == null ? '未提供' : `${formatNumber(data.contentLength)} B`}`],
@@ -30,7 +55,8 @@ function ResponseDiagnostics({ data }: { data: UpstreamResponseDiagnostics }) {
         ['文本 / 非空白文本', `${formatNumber(data.textBytes)} B / ${formatNumber(data.nonWhitespaceTextBytes)} B`],
         ['推理 / 脱敏推理 / 工具参数', `${formatNumber(data.reasoningBytes)} B / ${formatNumber(data.redactedReasoningBytes)} B / ${formatNumber(data.toolInputBytes)} B`],
         ['未知事件 / 未完成工具调用', `${formatNumber(data.unknownEvents)} / ${formatNumber(data.pendingToolCalls)}`],
-        ['残留不完整帧 / 启用思考', `${data.incompleteFrame ? '是' : '否'} / ${data.thinkingEnabled ? '是' : '否'}`],
+        ['残留不完整帧 / 启用思考', `${incompleteFrame} / ${data.thinkingEnabled ? '是' : '否'}`],
+        ['未解析缓冲字节', data.bufferedBytes == null ? '未记录' : `${formatNumber(data.bufferedBytes)} B`],
         ['上游 stopReason', data.stopReason ?? '未提供'],
       ].map(([label, value]) => <div key={label}><dt className="text-muted-foreground">{label}</dt><dd className="mt-1 break-all">{value}</dd></div>)}
     </dl>
@@ -140,19 +166,20 @@ export function RequestLogs({ onBack, onLogout }: { onBack: () => void; onLogout
         <DialogHeader><DialogTitle>调用详情</DialogTitle><DialogDescription className="break-all font-mono">{selectedId}</DialogDescription></DialogHeader>
         {detail.isLoading ? <p>正在加载详情…</p> : detail.error ? <div className="space-y-3"><p className="text-destructive">{extractErrorMessage(detail.error)}</p><Button onClick={() => detail.refetch()}>重试</Button></div> : detail.data && <>
           <div className="flex flex-wrap items-center justify-between gap-2"><Status record={detail.data} /><Button size="sm" variant="outline" onClick={() => exportDetail(detail.data!)}><Download className="mr-2 h-4 w-4" />导出详情 JSON</Button></div>
+          {detail.data.stream && detail.data.httpStatus === 200 && detail.data.status === 'error' && <p className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm">流式连接已建立（HTTP 200），随后响应处理失败。请查看 SSE error 和下方错误原因；HTTP 200 不代表生成成功。</p>}
           <dl className="grid gap-3 rounded-lg bg-muted/30 p-4 text-sm sm:grid-cols-2">
             {[
               ['时间', formatTime(detail.data.timestamp)], ['接口', `${detail.data.method} ${detail.data.path}`],
               ['模型', detail.data.model ?? '—'], ['HTTP / 模式', `${detail.data.httpStatus || '—'} / ${detail.data.stream ? '流式' : '非流式'}`],
-              ['总耗时 / 首包', `${formatDuration(detail.data.durationMs)} / ${formatDuration(detail.data.firstByteMs)}`],
+              ['总耗时 / 返回客户端首包', `${formatDuration(detail.data.durationMs)} / ${formatDuration(detail.data.firstByteMs)}`],
               ['会话亲和（最后一次调度）', detail.data.affinity === 'hit' ? '复用绑定账号' : detail.data.affinity === 'fallback' ? '绑定账号不可用，已分流' : detail.data.affinity === 'miss' ? '无有效绑定' : '—'],
               ['输入 / 输出 Token', `${formatNumber(detail.data.inputTokens)} / ${formatNumber(detail.data.outputTokens)}`],
-              ['返回客户端的 stop_reason', detail.data.response?.stopReason ?? '未记录'],
+              ['返回客户端的 stop_reason', detail.data.response?.stopReason ?? (detail.data.upstreamAttempts?.some(attempt => attempt.responseDiagnostics?.outcome === 'refusal') ? '无（上游拒绝，以错误结束）' : '未记录')],
             ].map(([key, value]) => <div key={key}><dt className="text-muted-foreground">{key}</dt><dd className="mt-1 break-all">{value}</dd></div>)}
           </dl>
           {detail.data.response && <section><h3 className="mb-2 font-medium">返回客户端的 content{detail.data.response.truncated ? '（预览已截断）' : ''}</h3><pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border p-3 text-xs">{JSON.stringify(detail.data.response.content, null, 2)}</pre></section>}
           {detail.data.error && <section><h3 className="mb-2 font-medium text-destructive">错误原因</h3><pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs">{detail.data.error}</pre></section>}
-          <section><h3 className="mb-2 font-medium">上游调用（{detail.data.attempts} 次）</h3><div className="space-y-2">{detail.data.upstreamAttempts?.length ? detail.data.upstreamAttempts.map((attempt, index) => <div key={index} className="rounded-md border p-3 text-sm"><div className="flex flex-wrap justify-between gap-2"><span>#{index + 1} · 凭据 #{attempt.credentialId} · {attempt.endpoint}</span><span className="text-muted-foreground">{formatTime(attempt.timestamp)} · {attempt.status == null ? '未取得 HTTP 响应' : `HTTP ${attempt.status}`}</span></div>{attempt.upstreamRequestId && <p className="mt-2 break-all font-mono text-xs">上游请求 ID：{attempt.upstreamRequestId}</p>}{attempt.responseDiagnostics && <ResponseDiagnostics data={attempt.responseDiagnostics} />}{attempt.error && <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-destructive">{attempt.error}</pre>}</div>) : <p className="text-sm text-muted-foreground">未向上游发起请求</p>}</div></section>
+          <section><h3 className="mb-2 font-medium">上游调用（{detail.data.attempts} 次）</h3><div className="space-y-2">{detail.data.upstreamAttempts?.length ? detail.data.upstreamAttempts.map((attempt, index) => <div key={index} className="rounded-md border p-3 text-sm"><div className="flex flex-wrap justify-between gap-2"><span>#{index + 1} · 凭据 #{attempt.credentialId} · {attempt.endpoint}</span><span className="text-muted-foreground">{formatTime(attempt.timestamp)} · {attempt.status == null ? '未取得 HTTP 响应' : `HTTP ${attempt.status}`}</span></div><AttemptProgress attempt={attempt} requestTimestamp={detail.data!.timestamp} />{attempt.upstreamRequestId && <p className="mt-2 break-all font-mono text-xs">上游请求 ID：{attempt.upstreamRequestId}</p>}{attempt.responseDiagnostics && <ResponseDiagnostics data={attempt.responseDiagnostics} />}{attempt.error && <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-destructive">{attempt.error}</pre>}</div>) : <p className="text-sm text-muted-foreground">未向上游发起请求</p>}</div></section>
           <section><h3 className="mb-2 font-medium">诊断记录</h3>{detail.data.diagnostics?.length ? <div className="space-y-2">{detail.data.diagnostics.map((diagnostic, index) => <div key={index} className="rounded-md border p-3"><p className="mb-2 break-all text-xs text-muted-foreground">{formatTime(diagnostic.timestamp)} · {diagnostic.level} · {diagnostic.target}</p><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{diagnostic.message}</pre></div>)}</div> : <p className="text-sm text-muted-foreground">本次调用没有警告或错误</p>}</section>
         </>}
       </DialogContent>

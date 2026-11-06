@@ -30,10 +30,11 @@ impl MetadataEvent {
         self.stop_details
             .as_ref()
             .is_some_and(|details| details.refusal.is_some())
-            || self
-                .stop_reason
-                .as_deref()
-                .is_some_and(|reason| reason.eq_ignore_ascii_case("refusal"))
+            || self.stop_reason.as_deref().is_some_and(|reason| {
+                ["refusal", "content_filtered", "guardrail_intervened"]
+                    .iter()
+                    .any(|value| reason.eq_ignore_ascii_case(value))
+            })
     }
 
     pub fn output_limited(&self) -> bool {
@@ -53,6 +54,9 @@ mod tests {
         for value in [
             json!({"stopReason":"refusal"}),
             json!({"stopReason":"REFUSAL", "stopDetails":null}),
+            json!({"stopReason":"CONTENT_FILTERED"}),
+            json!({"stopReason":"content_filtered", "stopDetails":{"refusal":null}}),
+            json!({"stopReason":"GUARDRAIL_INTERVENED"}),
             json!({"stopDetails":{"refusal":{}}}),
         ] {
             let metadata: MetadataEvent = serde_json::from_value(value).unwrap();
