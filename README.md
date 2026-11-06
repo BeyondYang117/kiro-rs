@@ -655,6 +655,7 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
   - `POST /api/admin/credentials/:id/priority` - 设置凭据优先级
   - `POST /api/admin/credentials/:id/reset` - 重置失败计数
   - `GET /api/admin/credentials/:id/balance` - 获取凭据余额
+  - `GET /api/admin/credentials/:id/models` - 查询该账号在当前 API 区域的可用模型及参数（`?force=true` 刷新）
   - `GET /api/admin/settings` - 获取系统设置、当前运行值、默认值及待重启项
   - `PUT /api/admin/settings` - 校验并保存系统设置
   - `GET /api/admin/settings/kiro-version` - 查询 Kiro 官方最新稳定版
@@ -664,6 +665,12 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
 
 - **Admin UI**
   - `GET /admin` - 访问管理页面（需要在编译前构建 `admin-ui/dist`）
+
+### 账号可用模型
+
+凭据右侧更多操作 → **查看可用模型**，可查询该账号当前 API 区域中的模型、输入/输出 token 上限、计费倍率、effort 与 thinking 能力，并按名称、ID 或提供商搜索。列表区分“账号默认”“代理已适配”和“代理待适配”；上游未提供的参数显示“未上报”。支持 OAuth、IdC 和 API Key 凭据，使用凭据的代理与区域。
+
+目录缓存 5 分钟，可手动刷新。刷新失败时展示旧记录并标明过期；账号身份、Profile ARN、区域或端点变化会隔离缓存。分页失败时不返回不完整的授权表。该功能不会自动切换模型，GPT/Kimi 等待适配模型暂不能通过 messages 调用；普通 `/v1/models` 仍是本地兼容表。完整行为及限制见 [兼容性记录](docs/KIRO_COMPATIBILITY.md)。
 
 ### 系统设置
 

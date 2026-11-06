@@ -16,6 +16,32 @@ fn credentials() -> KiroCredentials {
     }
 }
 
+#[test]
+fn model_catalog_scope_changes_with_account_profile_region_and_endpoint() {
+    let manager =
+        MultiTokenManager::new(Config::default(), vec![credentials()], None, None, true).unwrap();
+    let original = manager.model_catalog_key(7).unwrap();
+    assert!(manager.model_catalog_key(999).is_none());
+    for field in ["profile", "region", "endpoint", "identity"] {
+        let previous = manager.entries.lock()[0].credentials.clone();
+        {
+            let mut entries = manager.entries.lock();
+            let credential = &mut entries[0].credentials;
+            match field {
+                "profile" => credential.profile_arn = Some("different-profile".into()),
+                "region" => credential.api_region = Some("eu-west-1".into()),
+                "endpoint" => credential.endpoint = Some("custom".into()),
+                _ => credential.refresh_token = Some("different-account".into()),
+            }
+        }
+        assert_ne!(manager.model_catalog_key(7).unwrap(), original, "{field}");
+        manager.entries.lock()[0].credentials = previous;
+    }
+    // Access-token refresh alone keeps an OAuth account's catalog identity stable.
+    manager.entries.lock()[0].credentials.access_token = Some("rotated-access".into());
+    assert_eq!(manager.model_catalog_key(7).unwrap(), original);
+}
+
 #[tokio::test]
 async fn refresh_errors_preserve_status_and_retry_after_for_shared_backoff() {
     for status in [429, 503] {

@@ -1838,8 +1838,9 @@ impl MultiTokenManager {
         })
     }
 
-    /// 获取指定凭据的使用额度。
-    pub async fn get_usage_limits_for(&self, id: u64) -> anyhow::Result<UsageLimitsResponse> {
+    /// Shared account metadata authentication. OAuth refreshes use the managed
+    /// per-credential lock; API keys never enter the refresh path.
+    async fn account_credentials(&self, id: u64) -> anyhow::Result<(KiroCredentials, String)> {
         let credentials = {
             let entries = self.entries.lock();
             entries
@@ -1881,6 +1882,56 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
         };
 
+        Ok((credentials, token))
+    }
+
+    /// Fingerprint account and routing scope without exposing credentials to the admin API.
+    pub(crate) fn model_catalog_key(&self, id: u64) -> Option<String> {
+        let entries = self.entries.lock();
+        let credentials = &entries.iter().find(|entry| entry.id == id)?.credentials;
+        Some(self.model_catalog_key_for(credentials))
+    }
+
+    fn model_catalog_key_for(&self, credentials: &KiroCredentials) -> String {
+        let scope = serde_json::json!([
+            credentials.kiro_api_key,
+            credentials.auth_method,
+            credentials.refresh_token,
+            if credentials.refresh_token.is_none() {
+                credentials.access_token.as_deref()
+            } else {
+                None
+            },
+            credentials.profile_arn,
+            credentials.effective_api_region(&self.config),
+            credentials
+                .endpoint
+                .as_deref()
+                .unwrap_or(&self.config.default_endpoint)
+        ]);
+        sha256_hex(&scope.to_string())
+    }
+
+    pub(crate) async fn available_models_for(
+        &self,
+        id: u64,
+    ) -> anyhow::Result<(String, crate::kiro::models::ModelCatalog)> {
+        let (credentials, token) = self.account_credentials(id).await?;
+        let key = self.model_catalog_key_for(&credentials);
+        let effective_proxy = credentials.effective_proxy(self.proxy.as_ref());
+        let catalog = crate::kiro::models::discover(
+            &credentials,
+            &self.config,
+            &token,
+            effective_proxy.as_ref(),
+        )
+        .await?;
+        Ok((key, catalog))
+    }
+
+    /// 获取指定凭据的使用额度。
+    pub async fn get_usage_limits_for(&self, id: u64) -> anyhow::Result<UsageLimitsResponse> {
+        let (credentials, token) = self.account_credentials(id).await?;
         let effective_proxy = credentials.effective_proxy(self.proxy.as_ref());
         let usage_limits =
             get_usage_limits(&credentials, &self.config, &token, effective_proxy.as_ref()).await?;

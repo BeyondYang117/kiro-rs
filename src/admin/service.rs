@@ -55,12 +55,46 @@ impl CachedBalance {
 pub struct AdminService {
     token_manager: Arc<MultiTokenManager>,
     balance_cache: Mutex<HashMap<u64, CachedBalance>>,
+    model_catalog: super::models::CatalogCache,
     cache_path: Option<PathBuf>,
     /// 已注册的端点名称集合（用于 add_credential 校验）
     known_endpoints: HashSet<String>,
 }
 
 impl AdminService {
+    pub(super) async fn available_models(
+        &self,
+        id: u64,
+        force: bool,
+    ) -> Result<super::models::CatalogResponse, AdminServiceError> {
+        let key = self
+            .token_manager
+            .model_catalog_key(id)
+            .ok_or(AdminServiceError::NotFound { id })?;
+        let response = self
+            .model_catalog
+            .load(id, key, force, || async {
+                let (key, catalog) = self.token_manager.available_models_for(id).await?;
+                anyhow::ensure!(
+                    self.token_manager.model_catalog_key(id).as_deref() == Some(&key),
+                    "credential scope changed"
+                );
+                Ok((key, catalog))
+            })
+            .await?;
+        // A deleted account must not remain queryable through an in-flight fetch.
+        match self.token_manager.model_catalog_key(id) {
+            None => return Err(AdminServiceError::NotFound { id }),
+            Some(key) if key != response.scope_key => {
+                return Err(AdminServiceError::InvalidSettings(
+                    "账号认证或区域信息已变化，请重新查询模型".into(),
+                ));
+            }
+            _ => {}
+        }
+        Ok(response)
+    }
+
     pub(super) async fn latest_kiro_version(
         &self,
     ) -> Result<super::kiro_version::LatestVersion, AdminServiceError> {
@@ -114,6 +148,7 @@ impl AdminService {
         Self {
             token_manager,
             balance_cache: Mutex::new(balance_cache),
+            model_catalog: Default::default(),
             cache_path,
             known_endpoints: known_endpoints.into_iter().collect(),
         }
@@ -367,6 +402,7 @@ impl AdminService {
             cache.remove(&id);
         }
         self.save_balance_cache();
+        self.model_catalog.remove(id);
 
         Ok(())
     }
@@ -808,5 +844,71 @@ mod tests {
             AdminService::load_balance_cache_from(&service.cache_path).len(),
             1
         );
+    }
+    #[tokio::test]
+    async fn admin_catalog_returns_account_metadata_without_exposing_cache_identity() {
+        use crate::{
+            admin::{AdminService, AdminState, create_admin_router},
+            kiro::{model::credentials::KiroCredentials, token_manager::MultiTokenManager},
+            model::config::Config,
+        };
+        use axum::{
+            body::{Body, to_bytes},
+            http::Request,
+        };
+        use tower::ServiceExt;
+        let manager = Arc::new(
+            MultiTokenManager::new(
+                Config::default(),
+                vec![KiroCredentials {
+                    id: Some(7),
+                    kiro_api_key: Some("private-test-key".into()),
+                    ..Default::default()
+                }],
+                None,
+                None,
+                true,
+            )
+            .unwrap(),
+        );
+        let key = manager.model_catalog_key(7).unwrap();
+        let service = AdminService::new(manager, ["ide".into()]);
+        service
+            .model_catalog
+            .load(7, key.clone(), false, || async {
+                Ok((
+                    key.clone(),
+                    crate::kiro::models::ModelCatalog {
+                        models: vec![],
+                        default_model_id: None,
+                        region: "us-east-1".into(),
+                    },
+                ))
+            })
+            .await
+            .unwrap();
+        let app = create_admin_router(AdminState::new("admin", service));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/credentials/7/models")
+                    .header("x-api-key", "admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(!body.contains("private-test-key"));
+        assert!(!body.contains(&key));
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["credentialId"], 7);
+        assert_eq!(value["region"], "us-east-1");
+        assert_eq!(value["cached"], true);
+        assert_eq!(value["stale"], false);
+        assert_eq!(value["models"], serde_json::json!([]));
     }
 }

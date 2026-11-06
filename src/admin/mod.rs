@@ -22,6 +22,7 @@ pub(crate) mod extract;
 mod handlers;
 mod kiro_version;
 mod middleware;
+mod models;
 mod router;
 mod service;
 mod settings;

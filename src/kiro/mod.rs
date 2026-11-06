@@ -3,6 +3,7 @@
 pub mod endpoint;
 pub mod machine_id;
 pub mod model;
+pub(crate) mod models;
 pub mod parser;
 pub mod provider;
 pub(crate) mod retry_budget;

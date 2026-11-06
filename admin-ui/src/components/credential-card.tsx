@@ -9,6 +9,7 @@ import {
   MoreHorizontal,
   RotateCcw,
   Pencil,
+  Boxes,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -32,6 +33,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import type { CredentialStatusItem, BalanceResponse } from '@/types/api'
+import { ModelsDialog } from '@/components/models-dialog'
 import {
   useSetDisabled,
   useSetPriority,
@@ -90,6 +92,7 @@ export function CredentialCard({
   const [editingPriority, setEditingPriority] = useState(false)
   const [priorityValue, setPriorityValue] = useState(String(credential.priority))
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const [showModels, setShowModels] = useState(false)
 
   const setDisabled = useSetDisabled()
   const setPriority = useSetPriority()
@@ -400,6 +403,10 @@ export function CredentialCard({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
+                <DropdownMenuItem onSelect={() => setShowModels(true)}>
+                  <Boxes />
+                  查看可用模型
+                </DropdownMenuItem>
                 <DropdownMenuItem
                   onSelect={handleForceRefresh}
                   disabled={
@@ -508,6 +515,8 @@ export function CredentialCard({
           </form>
         </DialogContent>
       </Dialog>
+
+      {showModels && <ModelsDialog credentialId={credential.id} open={showModels} onOpenChange={setShowModels} />}
 
       <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
         <DialogContent>

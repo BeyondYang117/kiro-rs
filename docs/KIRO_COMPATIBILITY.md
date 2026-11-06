@@ -39,12 +39,22 @@
 
 保存沿用 `PUT /api/admin/settings` 的版本冲突校验和配置持久化，保留密钥与未纳入管理的字段。不下载或安装 Kiro IDE，也不替换 kiro-rs 程序。升级版本标识不等于实现新模型或新协议；协议适配依据仍为上述本机 1.4.86 的静态代码，1.4.121 尚未进行真实账号调用验证。
 
-## 已核对但未接入的范围
+## 按账号发现可用模型
+
+凭据管理 → 账号右侧更多操作 → **查看可用模型**，查询该账号在有效 API 区域中的上游模型目录。支持搜索名称、ID、提供商，展示账号默认模型、输入/输出 token 上限、计费倍率、effort 枚举及默认值、thinking 类型及默认值；上游未提供的参数标记为“未上报”。
+
+接口为 `GET /api/admin/credentials/{id}/models`，`?force=true` 强制刷新，需要管理员认证。沿用凭据自身的 API 区域、Profile ARN、代理与托管 OAuth 刷新；API Key 直接使用密钥，IdC 请求带 `SSO_OIDC` token 类型。端点依据本机新版 IDE 控制平面代码：`https://management.<apiRegion>.kiro.dev/List-Available-Models?origin=AI_EDITOR`。查询仅支持 IDE 凭据，未对真实账号发起验证。
+
+缓存仅驻留当前进程，按账号身份、Profile ARN、区域和端点隔离，5 分钟内复用，最多保存 128 个账号；每个账号的并发查询共用一次请求，全局最多 4 次目录查询。分页最多 10 页、1000 个模型、合计 4 MiB，单页最多 1 MiB；游标重复、分页中途失败、缺少 models 等情况整次查询失败，不把部分结果当成完整授权表。失败时最多保留 1 小时内同一账号的旧记录，返回 `stale: true` 和 `refreshError`；旧记录不延长新鲜期，也不能确认当前授权。删除账号时清除其缓存。
+
+目录从 `additionalModelRequestFieldsSchema` 提取参数，不向管理接口返回原始 schema、令牌、Profile ARN、分页游标或上游错误正文。`proxySupported` 仅在上游 ID 精确匹配现有代理映射时为 true，避免未知 Claude 新版本被宽松别名匹配误标为已适配。GPT/Kimi 可在账号目录出现并查看参数，但显示“代理待适配”。普通 `/v1/models` 和生成路由仍使用本地兼容表，目录查询不更改账号调度或模型路由。
+
+## 后续适配范围
 
 | 新特性 | 对本项目的影响 |
 |--------|----------------|
-| GPT-5.6 Sol / Terra / Luna、Kimi K3 | 官方已正式提供，但当前代理的模型路由仍只接受 Claude。本次未将新增名称简单加入模型列表；需要结合账号的 `ListAvailableModels` 验证模型 ID、授权、区域及 schema，再实现对应推理参数。GPT 使用 `reasoning.effort`，不能套用 Claude 的 `output_config.effort` |
-| 动态模型发现 | 新 IDE 从 `ListAvailableModels` 获取 `additionalModelRequestFieldsSchema`、输入上限、effort 级别与默认值；当前代理继续使用本地映射，后续新增模型仍需更新代码 |
+| GPT-5.6 Sol / Terra / Luna、Kimi K3 | 已能在账号目录发现并展示参数；生成路由仍只接受 Claude，需继续实现非 Claude 推理参数和生成协议。GPT 使用 `reasoning.effort`，不能套用 Claude 的 `output_config.effort` |
+| 动态模型路由与 schema 校验 | 已实现按账号目录查询与能力展示；尚未将目录接入生成时的账号资格判断、`/v1/models` 或请求参数校验，后续新增生成模型仍需更新代码 |
 | Runtime Responses 接口 | 新 IDE 除 `generateAssistantResponse` 外，还包含受功能开关控制的 `/v1/responses` 路径。本次保留现有 AWS Event Stream 通路，未声明支持新的 SSE 协议 |
 | CLI V3、Workflows、Memory、审批及 MCP elicitation | 属于 Kiro agent harness 和工具执行层。本项目提供模型 API 代理，未实现这些客户端工作流功能 |
 | 企业 credit pooling | 属于订阅及组织额度管理；现有 credits 日志不能替代共享额度池和成员级上限管理 |
