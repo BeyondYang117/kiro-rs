@@ -188,6 +188,7 @@ async fn main() {
         Some(kiro_provider),
         config.extract_thinking,
         config.cc_buffered_stream,
+        config.force_stream,
     );
 
     // 仅在管理密钥可用作单个 HTTP 认证值时启用管理路由。

@@ -281,8 +281,9 @@ fn streaming_previews_bound_content_and_redact_after_assembling_deltas() {
 #[tokio::test]
 async fn actual_api_records_auth_validation_and_provider_errors_without_conversation_bodies() {
     let fixture = TestStore::new();
-    let app = crate::anthropic::create_router_with_provider("test-api-key", None, true, true)
-        .layer(from_fn_with_state(fixture.store.clone(), middleware));
+    let app =
+        crate::anthropic::create_router_with_provider("test-api-key", None, true, true, false)
+            .layer(from_fn_with_state(fixture.store.clone(), middleware));
     for (kind, expected) in [("auth", 401), ("json", 400), ("provider", 503)] {
         let mut req = request("/v1/messages");
         if kind == "auth" {
@@ -789,6 +790,7 @@ async fn real_provider_records_api_and_search_retries_with_full_upstream_errors(
             Some(provider),
             true,
             true,
+            false,
         )
         .layer(from_fn_with_state(fixture.store.clone(), middleware));
         let mut payload = json!({"model":"claude-sonnet-4-6","max_tokens":10,"stream":streaming,

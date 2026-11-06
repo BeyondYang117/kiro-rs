@@ -98,7 +98,7 @@ mod tests {
     fn app_with_keys(api_key: &str, admin_key: &str) -> Router {
         let manager =
             Arc::new(MultiTokenManager::new(Config::default(), vec![], None, None, true).unwrap());
-        crate::anthropic::create_router_with_provider(api_key, None, true, true).nest(
+        crate::anthropic::create_router_with_provider(api_key, None, true, true, false).nest(
             "/api/admin",
             create_admin_router(AdminState::new(
                 admin_key,

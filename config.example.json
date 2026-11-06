@@ -8,6 +8,7 @@
   "defaultEndpoint": "ide",
   "requestLogRetentionDays": 30,
   "ccBufferedStream": true,
+  "forceStream": false,
   "extractThinking": true,
   "countTokensTimeoutSeconds": 10,
   "toolOutputRecoveryAttempts": 1,

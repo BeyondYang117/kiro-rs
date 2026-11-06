@@ -240,6 +240,7 @@ docker login -u abu116
 | `concurrency.refreshBackoffSeconds` | integer | `30` | 认证服务瞬态失败的初始退避秒数，带指数增长和抖动；范围 1～86400 |
 | `concurrency.adaptiveConcurrency` | boolean | `true` | 启用账号级自适应并发：429 后降低容量，冷却后单请求探测，再逐步恢复至配置上限 |
 | `ccBufferedStream` | boolean | `true` | `/cc/v1/messages` 是否缓冲完整流；设为 `false` 可实时返回内容 |
+| `forceStream` | boolean | `false` | 强制 `/v1/messages` 和 `/cc/v1/messages` 使用 SSE，覆盖 `stream: false` 或未指定 `stream` 的请求；重启后生效，客户端需支持 SSE |
 | `extractThinking` | boolean | `true` | 非流式响应的 thinking 块提取。启用后 `<thinking>` 标签会被解析为独立的 `thinking` 内容块 |
 | `defaultEndpoint` | string | `ide` | 默认 Kiro 端点。凭据未显式指定 `endpoint` 时使用。当前支持：`ide` |
 
@@ -504,6 +505,17 @@ RUST_LOG=debug ./target/release/kiro-rs
 > - 等待期间会每 25 秒发送 `ping` 事件保活
 
 设置 `"ccBufferedStream": false` 后，`/cc/v1/messages` 会与 `/v1/messages` 一样实时返回内容：首个 `message_start` 使用估算值，结束时的 `message_delta.usage.input_tokens` 使用上游上下文使用量计算的值（上游未提供时保留估算值）。默认仍为缓冲模式。代理侧上下文压缩仍会等待摘要及后续调用完成。
+
+若要通过服务端配置统一开启流式响应，可在配置文件中设置以下参数，或在管理后台“系统设置 → 响应处理与日志”中开启“强制流式响应”，保存并重启服务：
+
+```json
+{
+  "forceStream": true,
+  "ccBufferedStream": false
+}
+```
+
+`forceStream` 默认关闭；开启后，两个消息端点即使收到 `stream: false` 或未指定 `stream` 也会返回 `text/event-stream`，调用日志的 `stream` 记录实际采用的模式。该开关同样适用于客户端发起的上下文压缩请求，内部摘要调用仍使用所需的响应格式。`ccBufferedStream` 独立控制 `/cc` 的缓冲行为：开启时仍会等待完整内容并发送 ping 保活，关闭时实时返回内容。Token 计数与模型查询接口不受影响。调用端必须支持 SSE；若客户端设置了固定的请求总超时，仍需将其调长。
 
 远程 token 计数通过异步请求共享连接池，`countTokensTimeoutSeconds` 同时限制连接和响应体读取时间，响应体最多读取 64 KiB。超时、超大响应、HTTP 非 2xx（包括重定向）或无效计数会自动回退本地估算。
 

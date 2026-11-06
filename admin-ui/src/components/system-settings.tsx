@@ -201,6 +201,12 @@ const groups: {
     description: '设置流式响应行为、工具恢复策略和调用日志保留时间。',
     fields: [
       {
+        path: 'forceStream',
+        label: '强制流式响应',
+        help: '两个 messages 端点均返回 SSE，包括 stream=false 或未指定 stream 的请求。客户端需支持 SSE；实时输出可同时关闭 Claude Code 响应缓冲。',
+        type: 'switch',
+      },
+      {
         path: 'ccBufferedStream',
         label: 'Claude Code 响应缓冲',
         help: '缓冲完整响应以修正初始用量；关闭后直接流式输出。',

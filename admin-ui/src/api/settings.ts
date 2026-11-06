@@ -29,6 +29,7 @@ export interface SystemSettings {
   sessionAffinity: { enabled: boolean; ttlSeconds: number; maxEntries: number }
   extractThinking: boolean
   ccBufferedStream: boolean
+  forceStream: boolean
   toolOutputRecoveryAttempts: number
   countTokensTimeoutSeconds: number
   requestLogRetentionDays: number

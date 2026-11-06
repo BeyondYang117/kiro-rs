@@ -36,11 +36,13 @@ const MAX_BODY_SIZE: usize = 50 * 1024 * 1024;
 /// - `kiro_provider`: 可选的 KiroProvider，用于调用上游 API
 /// - `extract_thinking`: 是否从非流式响应中提取 thinking 块
 /// - `cc_buffered_stream`: 是否缓冲 Claude Code 流式响应以更正初始 usage
+/// - `force_stream`: 是否强制客户端消息请求使用 SSE
 pub fn create_router_with_provider(
     api_key: impl Into<String>,
     kiro_provider: Option<KiroProvider>,
     extract_thinking: bool,
     cc_buffered_stream: bool,
+    force_stream: bool,
 ) -> Router {
     let limits = kiro_provider
         .as_ref()
@@ -53,6 +55,7 @@ pub fn create_router_with_provider(
     };
     let mut state = AppState::new(api_key, extract_thinking);
     state.cc_buffered_stream = cc_buffered_stream;
+    state.force_stream = force_stream;
     if let Some(provider) = kiro_provider {
         state = state.with_kiro_provider(provider);
     }
@@ -112,7 +115,7 @@ mod tests {
         use axum::body::to_bytes;
         use serde_json::{Value, json};
 
-        let app = create_router_with_provider("test-key", None, true, true);
+        let app = create_router_with_provider("test-key", None, true, true, false);
         for path in ["/v1/messages", "/cc/v1/messages"] {
             for stream in [false, true] {
                 for (stop_sequences, error) in [
@@ -174,7 +177,7 @@ mod tests {
                 as Arc<dyn crate::kiro::endpoint::KiroEndpoint>,
         )]);
         let provider = KiroProvider::with_proxy(manager, None, endpoints, "ide".into());
-        let app = create_router_with_provider("test-key", Some(provider), true, true);
+        let app = create_router_with_provider("test-key", Some(provider), true, true, false);
         let request = |path: &str, key: &str| {
             Request::builder()
                 .uri(path)

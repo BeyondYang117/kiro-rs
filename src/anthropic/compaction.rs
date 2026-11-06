@@ -934,6 +934,133 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn force_stream_overrides_client_mode_on_both_routes_including_compaction() {
+        use tower::ServiceExt;
+
+        for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+            for force_stream in [false, true] {
+                for client_stream in [None, Some(false), Some(true)] {
+                    for compact in [false, true] {
+                        let mut upstream = mock(frame(
+                            "assistantResponseEvent",
+                            json!({"content":"<summary>streamed answer</summary>"}),
+                        ))
+                        .await;
+                        let provider = std::sync::Arc::into_inner(
+                            upstream.state.kiro_provider.take().unwrap(),
+                        )
+                        .unwrap();
+                        let app = crate::anthropic::create_router_with_provider(
+                            "test",
+                            Some(provider),
+                            true,
+                            buffered,
+                            force_stream,
+                        );
+                        let mut payload = json!({"model":"claude-sonnet-5", "max_tokens":1024,
+                            "messages":[{"role":"user","content":"hi"}]});
+                        if compact {
+                            payload["compaction"] = json!({"type":"summarize"});
+                        }
+                        if let Some(streaming) = client_stream {
+                            payload["stream"] = streaming.into();
+                        }
+                        let request = axum::http::Request::builder()
+                            .method("POST")
+                            .uri(if cc {
+                                "/cc/v1/messages"
+                            } else {
+                                "/v1/messages"
+                            })
+                            .header("x-api-key", "test")
+                            .header("content-type", "application/json")
+                            .body(Body::from(payload.to_string()))
+                            .unwrap();
+                        let response = app.clone().oneshot(request).await.unwrap();
+                        assert_eq!(response.status(), StatusCode::OK);
+                        let streaming = force_stream || client_stream == Some(true);
+                        assert_eq!(
+                            response.headers()["content-type"],
+                            if streaming {
+                                "text/event-stream"
+                            } else {
+                                "application/json"
+                            },
+                        );
+                        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                        let text = String::from_utf8(body.to_vec()).unwrap();
+                        assert!(text.contains("streamed answer"), "{text}");
+                        if streaming {
+                            assert!(text.contains("event: message_stop"), "{text}");
+                            assert!(!text.contains("event: error"), "{text}");
+                        } else {
+                            let value: Value = serde_json::from_str(&text).unwrap();
+                            assert_eq!(value["type"], "message");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn force_stream_returns_headers_and_first_chunk_before_upstream_completion() {
+        use tower::ServiceExt;
+
+        for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+            let completion = std::sync::Arc::new(tokio::sync::Notify::new());
+            let mut upstream = mock_controlled(
+                frame("assistantResponseEvent", json!({"content":"answer"})),
+                StatusCode::OK,
+                false,
+                Some(completion.clone()),
+            )
+            .await;
+            let provider =
+                std::sync::Arc::into_inner(upstream.state.kiro_provider.take().unwrap()).unwrap();
+            let app = crate::anthropic::create_router_with_provider(
+                "test",
+                Some(provider),
+                true,
+                buffered,
+                true,
+            );
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .uri(if cc {
+                    "/cc/v1/messages"
+                } else {
+                    "/v1/messages"
+                })
+                .header("x-api-key", "test")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"model":"claude-sonnet-5", "max_tokens":1024,
+                    "stream":false, "messages":[{"role":"user","content":"hi"}]})
+                    .to_string(),
+                ))
+                .unwrap();
+            let response =
+                tokio::time::timeout(std::time::Duration::from_secs(3), app.oneshot(request))
+                    .await
+                    .expect("headers must arrive before generation completes")
+                    .unwrap();
+            assert_eq!(response.headers()["content-type"], "text/event-stream");
+            let mut stream = response.into_body().into_data_stream();
+            let first = tokio::time::timeout(std::time::Duration::from_secs(3), stream.next())
+                .await
+                .expect("SSE must send content or ping before generation completes")
+                .unwrap()
+                .unwrap();
+            assert!(!first.is_empty());
+            completion.notify_one();
+            while let Some(chunk) = stream.next().await {
+                chunk.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn claude_code_effort_reaches_upstream_across_response_modes() {
         for (cc, buffered) in [(false, false), (true, false), (true, true)] {
             for streaming in [false, true] {

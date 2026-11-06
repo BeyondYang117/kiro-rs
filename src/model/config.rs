@@ -232,6 +232,10 @@ pub struct Config {
     #[serde(default = "default_count_tokens_timeout_seconds")]
     pub count_tokens_timeout_seconds: u64,
 
+    /// 强制客户端消息请求使用 SSE，包括 stream=false 或未指定 stream 的请求。
+    #[serde(default)]
+    pub force_stream: bool,
+
     /// Claude Code 端点是否缓冲完整响应以更正初始 usage。
     #[serde(default = "default_cc_buffered_stream")]
     pub cc_buffered_stream: bool,
@@ -316,6 +320,7 @@ impl std::fmt::Debug for Config {
             .field("concurrency", &self.concurrency)
             .field("session_affinity", &self.session_affinity)
             .field("cc_buffered_stream", &self.cc_buffered_stream)
+            .field("force_stream", &self.force_stream)
             .field("default_endpoint", &self.default_endpoint)
             .finish_non_exhaustive()
     }
@@ -404,6 +409,7 @@ impl Default for Config {
             count_tokens_api_key: None,
             count_tokens_auth_type: default_count_tokens_auth_type(),
             count_tokens_timeout_seconds: default_count_tokens_timeout_seconds(),
+            force_stream: false,
             cc_buffered_stream: default_cc_buffered_stream(),
             tool_output_recovery_attempts: default_tool_output_recovery_attempts(),
             proxy_url: None,
@@ -638,14 +644,18 @@ mod tests {
     fn streaming_and_token_timeout_settings_preserve_legacy_defaults_and_roundtrip() {
         let defaults: Config = serde_json::from_str("{}").unwrap();
         assert!(defaults.cc_buffered_stream);
+        assert!(!defaults.force_stream);
         assert_eq!(defaults.count_tokens_timeout_seconds, 10);
-        let config: Config =
-            serde_json::from_str(r#"{"ccBufferedStream":false,"countTokensTimeoutSeconds":3}"#)
-                .unwrap();
+        let config: Config = serde_json::from_str(
+            r#"{"ccBufferedStream":false,"forceStream":true,"countTokensTimeoutSeconds":3}"#,
+        )
+        .unwrap();
         assert!(!config.cc_buffered_stream);
+        assert!(config.force_stream);
         assert_eq!(config.count_tokens_timeout_seconds, 3);
         let encoded = serde_json::to_value(config).unwrap();
         assert_eq!(encoded["ccBufferedStream"], false);
+        assert_eq!(encoded["forceStream"], true);
         assert_eq!(encoded["countTokensTimeoutSeconds"], 3);
     }
 

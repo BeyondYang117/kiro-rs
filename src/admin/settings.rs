@@ -36,6 +36,7 @@ settings! {
     session_affinity: SessionAffinityConfig,
     extract_thinking: bool,
     cc_buffered_stream: bool,
+    force_stream: bool,
     tool_output_recovery_attempts: u8,
     count_tokens_timeout_seconds: u64,
     request_log_retention_days: u32,
@@ -411,6 +412,7 @@ mod tests {
         let mut settings = first["settings"].clone();
         settings["concurrency"]["maxInFlight"] = 12.into();
         settings["requestLogRetentionDays"] = 7.into();
+        settings["forceStream"] = true.into();
         settings["loadBalancingMode"] = "priority".into();
         let (status, saved) = fixture
             .call(
@@ -423,11 +425,17 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(saved["running"]["concurrency"]["maxInFlight"], 64);
         assert_eq!(saved["settings"]["concurrency"]["maxInFlight"], 12);
+        assert_eq!(saved["running"]["forceStream"], false);
+        assert_eq!(saved["settings"]["forceStream"], true);
         assert_eq!(saved["running"]["loadBalancingMode"], "priority");
         assert_eq!(fixture.manager.get_load_balancing_mode(), "priority");
         assert_eq!(
             saved["restartRequired"],
-            serde_json::json!(["concurrency.maxInFlight", "requestLogRetentionDays"])
+            serde_json::json!([
+                "concurrency.maxInFlight",
+                "forceStream",
+                "requestLogRetentionDays"
+            ])
         );
         let document: Value =
             serde_json::from_slice(&std::fs::read(fixture.path()).unwrap()).unwrap();
@@ -454,6 +462,7 @@ mod tests {
         .unwrap();
         let restarted_response = read(&restarted, &HashSet::from(["ide".into()])).unwrap();
         assert!(restarted_response.restart_required.is_empty());
+        assert!(restarted_response.running.force_stream);
         // 保存运行值即可取消待重启的修改。
         let (status, restored) = fixture
             .call(

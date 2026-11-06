@@ -632,6 +632,7 @@ pub async fn post_messages(
     State(state): State<AppState>,
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
+    payload.stream |= state.force_stream;
     crate::request_log::request_metadata(&payload.model, payload.stream);
     if let Err(message) = validate_and_normalize_request(&mut payload) {
         return super::compaction::invalid_request(message);
@@ -1205,6 +1206,7 @@ pub async fn post_messages_cc(
     State(state): State<AppState>,
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
+    payload.stream |= state.force_stream;
     crate::request_log::request_metadata(&payload.model, payload.stream);
     if let Err(message) = validate_and_normalize_request(&mut payload) {
         return super::compaction::invalid_request(message);

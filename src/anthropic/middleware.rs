@@ -25,6 +25,8 @@ pub struct AppState {
     pub kiro_provider: Option<Arc<KiroProvider>>,
     /// 是否开启非流式响应的 thinking 块提取
     pub extract_thinking: bool,
+    /// 对外消息请求强制返回 SSE；内部摘要调用仍按自身的响应模式处理。
+    pub force_stream: bool,
     /// 缓冲 Claude Code SSE，默认保持准确初始 usage 的行为。
     pub cc_buffered_stream: bool,
 }
@@ -36,6 +38,7 @@ impl AppState {
             api_key: api_key.into(),
             kiro_provider: None,
             extract_thinking,
+            force_stream: false,
             cc_buffered_stream: true,
         }
     }
