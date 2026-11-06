@@ -336,6 +336,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rate_limit_backoff_survives_restart_and_success_reset_is_durable() {
+        let directory = Directory::new();
+        let first = manager(&directory, vec![credential()]);
+        first.report_rate_limited(1, None);
+        let mut state = saved(&first);
+        state.saved_at_ms -= 60_000;
+        write_saved(&first, &state);
+        let reloaded = manager(&directory, vec![credential()]);
+        let probe = reloaded.acquire_context(None).await.unwrap();
+        reloaded.report_rate_limited_for_context(&probe, None);
+        assert_eq!(reloaded.entries.lock()[0].cooldown.unwrap().1.as_secs(), 60);
+        drop(probe);
+
+        let mut state = saved(&reloaded);
+        state.saved_at_ms -= 120_000;
+        write_saved(&reloaded, &state);
+        let recovered = manager(&directory, vec![credential()]);
+        let probe = recovered.acquire_context(None).await.unwrap();
+        recovered.report_transport_success(&probe);
+        drop(probe);
+        let again = manager(&directory, vec![credential()]);
+        again.report_rate_limited(1, None);
+        assert_eq!(again.entries.lock()[0].cooldown.unwrap().1.as_secs(), 30);
+    }
+
+    #[test]
+    fn legacy_protection_state_without_backoff_counter_still_loads() {
+        let directory = Directory::new();
+        let first = manager(&directory, vec![credential()]);
+        first.report_rate_limited(1, None);
+        let mut value = serde_json::to_value(saved(&first)).unwrap();
+        value["adaptive_limit"]
+            .as_object_mut()
+            .unwrap()
+            .remove("rate_limit_failures");
+        let legacy: ProtectionState = serde_json::from_value(value).unwrap();
+        write_saved(&first, &legacy);
+        let reloaded = manager(&directory, vec![credential()]);
+        assert!(reloaded.snapshot().entries[0].cooldown_remaining_ms > 0);
+        assert_eq!(
+            reloaded.snapshot().entries[0].adaptive_probe_target,
+            Some(4)
+        );
+    }
+
+    #[tokio::test]
     async fn expired_windows_clear_but_adaptive_recovery_remains() {
         let directory = Directory::new();
         let first = manager(&directory, vec![credential()]);

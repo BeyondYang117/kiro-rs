@@ -50,6 +50,8 @@ pub(super) struct AdaptiveLimit {
     limit: u64,
     probing: bool,
     successes: u64,
+    #[serde(default)]
+    rate_limit_failures: u32,
     #[serde(skip)]
     pub(super) epoch: Arc<()>,
 }
@@ -60,6 +62,7 @@ impl AdaptiveLimit {
             limit,
             probing: false,
             successes: 0,
+            rate_limit_failures: 0,
             epoch: Arc::new(()),
         }
     }
@@ -71,14 +74,26 @@ impl AdaptiveLimit {
         self
     }
 
-    pub(super) fn rate_limited(&mut self) -> bool {
+    pub(super) fn rate_limited(&mut self, adaptive: bool) -> bool {
+        self.rate_limit_failures = self.rate_limit_failures.saturating_add(1);
         let previous_limit = self.limit;
-        self.limit = (self.limit / 2).max(1);
-        self.probing = true;
-        self.successes = 0;
+        if adaptive {
+            self.limit = (self.limit / 2).max(1);
+            self.probing = true;
+            self.successes = 0;
+        }
         // 限流前已在途请求的迟到成功不能推动本轮恢复。
         self.epoch = Arc::new(());
         self.limit < previous_limit
+    }
+
+    pub(super) fn cooldown_seconds(&self, base: u64) -> u64 {
+        base.saturating_mul(1 << self.rate_limit_failures.saturating_sub(1).min(10))
+            .min(base.max(900))
+    }
+
+    fn reset_rate_limit_backoff(&mut self) -> bool {
+        std::mem::take(&mut self.rate_limit_failures) > 0
     }
 
     fn effective_limit(&self) -> u64 {
@@ -206,9 +221,6 @@ impl MultiTokenManager {
     /// 完整消费 2xx 响应体才恢复容量；丢弃、取消或读取错误不计成功。
     /// 与业务响应校验/成功统计分开，不把传输完成视为业务成功。
     pub(crate) fn report_transport_success(&self, context: &CallContext) {
-        if !self.config.concurrency.adaptive_concurrency {
-            return;
-        }
         let Some(reservation) = &context.reservation else {
             return;
         };
@@ -228,12 +240,15 @@ impl MultiTokenManager {
         }
         let before = self.effective_concurrency_limit(entry);
         let was_probing = entry.adaptive_limit.probing;
-        entry
-            .adaptive_limit
-            .succeeded(self.config.concurrency.max_in_flight_per_credential);
+        let backoff_reset = entry.adaptive_limit.reset_rate_limit_backoff();
+        if self.config.concurrency.adaptive_concurrency {
+            entry
+                .adaptive_limit
+                .succeeded(self.config.concurrency.max_in_flight_per_credential);
+        }
         let increased = self.effective_concurrency_limit(entry) > before;
         drop(entries);
-        if increased || was_probing {
+        if increased || was_probing || backoff_reset {
             self.save_protection_or_log(context.id);
         }
         if increased {

@@ -102,7 +102,7 @@ const groups: {
       {
         path: 'concurrency.rateLimitCooldownSeconds',
         label: '限流冷却（秒）',
-        help: '上游限流后账号的基础冷却时长。',
+        help: '首次限流的冷却时长；连续限流逐轮翻倍至 900 秒，配置更长时保留。',
         min: 1,
         max: 86400,
       },

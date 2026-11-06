@@ -20,6 +20,7 @@ pub struct ConcurrencyConfig {
     pub max_in_flight_per_credential: u64,
     pub max_waiting: usize,
     pub wait_timeout_seconds: u64,
+    /// 429 的基础冷却；连续限流按轮次翻倍，最高 max(基础值, 900) 秒。
     pub rate_limit_cooldown_seconds: u64,
     /// 429 后减小账号并发，并在响应体完整读取后逐步恢复。
     pub adaptive_concurrency: bool,

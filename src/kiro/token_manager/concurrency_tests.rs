@@ -781,6 +781,86 @@ fn expire_cooldown(manager: &MultiTokenManager, id: u64) {
 }
 
 #[tokio::test]
+async fn repeated_rate_limits_back_off_per_round_and_reset_only_on_current_success() {
+    for adaptive in [false, true] {
+        let manager = manager(
+            serde_json::json!({"loadBalancingMode": "priority", "concurrency": {
+                "adaptiveConcurrency": adaptive, "requestsPerMinute": 0
+            }}),
+            2,
+        );
+        let first = manager.acquire_context(None).await.unwrap();
+        let late = manager.acquire_context(None).await.unwrap();
+        assert_eq!(first.id, late.id);
+        manager.report_rate_limited_for_context(&first, None);
+        manager.report_rate_limited_for_context(&late, None);
+        assert_eq!(manager.entries.lock()[0].cooldown.unwrap().1.as_secs(), 30);
+        // A successful response already in flight before the 429 cannot reset backoff.
+        manager.report_transport_success(&late);
+        assert_eq!(
+            manager.entries.lock()[0]
+                .adaptive_limit
+                .cooldown_seconds(30),
+            30
+        );
+        assert_eq!(
+            manager.entries.lock()[1]
+                .adaptive_limit
+                .cooldown_seconds(30),
+            30
+        );
+        assert!(manager.entries.lock()[1].cooldown.is_none());
+        drop((first, late));
+
+        for seconds in [60, 120, 240, 480, 900, 900] {
+            expire_cooldown(&manager, 1);
+            let probe = manager.acquire_context(None).await.unwrap();
+            assert_eq!(probe.id, 1);
+            manager.report_rate_limited_for_context(&probe, None);
+            assert_eq!(
+                manager.entries.lock()[0].cooldown.unwrap().1.as_secs(),
+                seconds
+            );
+            drop(probe);
+        }
+
+        expire_cooldown(&manager, 1);
+        let probe = manager.acquire_context(None).await.unwrap();
+        manager.report_transport_success(&probe);
+        assert_eq!(
+            manager.entries.lock()[0]
+                .adaptive_limit
+                .cooldown_seconds(30),
+            30
+        );
+        drop(probe);
+        let next = manager.acquire_context(None).await.unwrap();
+        manager.report_rate_limited_for_context(&next, None);
+        assert_eq!(manager.entries.lock()[0].cooldown.unwrap().1.as_secs(), 30);
+    }
+}
+
+#[test]
+fn rate_limit_backoff_preserves_longer_configured_cooldowns_and_retry_after() {
+    let manager = manager(
+        serde_json::json!({"concurrency": {"rateLimitCooldownSeconds": 1800}}),
+        1,
+    );
+    for _ in 0..3 {
+        manager.report_rate_limited(1, None);
+        assert_eq!(
+            manager.entries.lock()[0].cooldown.unwrap().1.as_secs(),
+            1800
+        );
+    }
+    manager.report_rate_limited(1, Some(StdDuration::from_secs(3600)));
+    assert_eq!(
+        manager.entries.lock()[0].cooldown.unwrap().1.as_secs(),
+        3600
+    );
+}
+
+#[tokio::test]
 async fn adaptive_monitoring_counts_only_real_reductions_and_exposes_probe_target() {
     let manager = manager(
         serde_json::json!({"concurrency": {

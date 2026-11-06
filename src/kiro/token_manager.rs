@@ -1104,22 +1104,25 @@ impl MultiTokenManager {
         epoch: Option<&Arc<()>>,
         retry_after: Option<StdDuration>,
     ) {
-        let duration = retry_after.unwrap_or_default().max(StdDuration::from_secs(
-            self.config.concurrency.rate_limit_cooldown_seconds,
-        ));
         self.concurrency_metrics
             .rate_limited_total
             .fetch_add(1, Ordering::Relaxed);
         let mut entries = self.entries.lock();
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-            if self.config.concurrency.adaptive_concurrency
-                && epoch.is_none_or(|epoch| Arc::ptr_eq(epoch, &entry.adaptive_limit.epoch))
-                && entry.adaptive_limit.rate_limited()
+            if epoch.is_none_or(|epoch| Arc::ptr_eq(epoch, &entry.adaptive_limit.epoch))
+                && entry
+                    .adaptive_limit
+                    .rate_limited(self.config.concurrency.adaptive_concurrency)
             {
                 self.concurrency_metrics
                     .adaptive_reduction_total
                     .fetch_add(1, Ordering::Relaxed);
             }
+            let duration = retry_after.unwrap_or_default().max(StdDuration::from_secs(
+                entry
+                    .adaptive_limit
+                    .cooldown_seconds(self.config.concurrency.rate_limit_cooldown_seconds),
+            ));
             let remaining = entry
                 .cooldown
                 .map(|(started, duration)| duration.saturating_sub(started.elapsed()))
