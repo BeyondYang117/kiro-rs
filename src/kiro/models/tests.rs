@@ -26,7 +26,7 @@ fn discovers_provider_specific_schemas_without_promoting_unknown_models() {
         let mut value = model(id);
         value["rateMultiplier"] = 0.5.into();
         value["additionalModelRequestFieldsSchema"] = serde_json::json!({"properties":{
-            path:{"properties":{"effort":{"enum":["low","medium","high","low",9],"default":"medium"}}},
+            path:{"properties":{"effort":{"enum":["low","medium","high","low"],"default":"medium"}}},
             "thinking":{"properties":{"type":{"enum":["adaptive","disabled"],"default":"adaptive"}}}
         }});
         let model = normalize(&value).unwrap();
@@ -54,6 +54,28 @@ fn discovers_provider_specific_schemas_without_promoting_unknown_models() {
     assert_eq!(model.max_input_tokens, None);
     assert_eq!(model.default_effort, None);
     assert!(normalize(&serde_json::json!({"unknown":true})).is_err());
+}
+
+#[test]
+fn incomplete_or_oversized_enums_do_not_become_constraints() {
+    for values in [
+        serde_json::json!(["low", 9]),
+        serde_json::json!(["low", null]),
+        serde_json::json!(["low", ""]),
+        serde_json::json!(["low", "x".repeat(65)]),
+        serde_json::json!(vec!["low"; 33]),
+    ] {
+        let mut value = model("claude-sonnet-4.6");
+        value["additionalModelRequestFieldsSchema"] = serde_json::json!({"properties":{
+            "output_config":{"properties":{"effort":{"enum":values,"default":"low"}}},
+            "thinking":{"properties":{"type":{"enum":values,"default":"low"}}}
+        }});
+        let normalized = normalize(&value).unwrap();
+        assert!(normalized.effort_levels.is_empty());
+        assert!(normalized.thinking_types.is_empty());
+        assert!(normalized.default_effort.is_none());
+        assert!(normalized.default_thinking.is_none());
+    }
 }
 
 #[tokio::test]

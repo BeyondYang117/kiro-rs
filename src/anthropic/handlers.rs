@@ -36,6 +36,14 @@ pub(super) fn map_provider_error(err: Error) -> Response {
     let err_str = err.to_string();
     let log_str = crate::request_log::redact(&err_str);
 
+    if err.is::<crate::kiro::model_controls::ModelParameterError>() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new("invalid_request_error", err_str)),
+        )
+            .into_response();
+    }
+
     if err.is::<crate::kiro::token_manager::CapacityError>()
         || err.is::<crate::kiro::retry_budget::RetryBudgetExceeded>()
     {
@@ -891,6 +899,7 @@ fn upstream_error_event(error: Error) -> SseEvent {
     tracing::error!("{message}");
     let error_type = if error.is::<super::upstream::ToolCallError>()
         || error.is::<super::upstream::UpstreamRefusalError>()
+        || error.is::<crate::kiro::model_controls::ModelParameterError>()
     {
         "invalid_request_error"
     } else {
@@ -907,6 +916,7 @@ fn upstream_error_event(error: Error) -> SseEvent {
 
 pub(super) fn upstream_error_response(error: Error) -> Response {
     if error.is::<crate::kiro::token_manager::CapacityError>()
+        || error.is::<crate::kiro::model_controls::ModelParameterError>()
         || error.is::<crate::kiro::retry_budget::RetryBudgetExceeded>()
     {
         return map_provider_error(error);
@@ -1687,6 +1697,33 @@ mod model_capability_tests {
             );
             assert!(!error.contains("private-body-sentinel"));
         }
+    }
+
+    #[tokio::test]
+    async fn catalog_parameter_errors_keep_400_for_initial_and_buffered_responses() {
+        for response in [
+            super::map_provider_error(
+                anyhow::Error::new(crate::kiro::model_controls::ModelParameterError(
+                    "max_tokens",
+                ))
+                .context("provider"),
+            ),
+            super::upstream_error_response(
+                crate::kiro::model_controls::ModelParameterError("output_config.effort").into(),
+            ),
+        ] {
+            assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+            assert!(!response.headers().contains_key("retry-after"));
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["type"], "invalid_request_error");
+        }
+        let event = super::upstream_error_event(
+            crate::kiro::model_controls::ModelParameterError("thinking.type").into(),
+        );
+        assert!(event.to_sse_string().contains("invalid_request_error"));
     }
 
     #[tokio::test]

@@ -62,18 +62,22 @@ fn text(value: &Value, max_chars: usize) -> Option<String> {
 }
 
 fn choices(value: &Value) -> Vec<String> {
-    value
-        .as_array()
-        .map(|values| {
-            let mut seen = HashSet::new();
-            values
-                .iter()
-                .filter_map(|v| text(v, 64))
-                .filter(|s| seen.insert(s.clone()))
-                .take(32)
-                .collect()
-        })
-        .unwrap_or_default()
+    let Some(values) = value.as_array().filter(|values| values.len() <= 32) else {
+        return Vec::new();
+    };
+    // A truncated or partially parsed enum is unsafe as an authorization constraint.
+    let Some(values) = values
+        .iter()
+        .map(|value| text(value, 64))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    values
+        .into_iter()
+        .filter(|value| seen.insert(value.clone()))
+        .collect()
 }
 
 fn normalize(model: &Value) -> anyhow::Result<AvailableModel> {

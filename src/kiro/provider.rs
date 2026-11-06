@@ -497,18 +497,23 @@ impl KiroProvider {
         let api_type = if is_stream { "流式" } else { "非流式" };
 
         // 一次解析同时提取模型资格和会话亲和信息。
-        let (model, affinity_key) = Self::extract_routing_from_request(request_body);
+        let (model, affinity_key, controls) = Self::extract_routing_from_request(request_body);
 
         for attempt in 0..max_retries {
             // 获取调用上下文（绑定 index、credentials、token）
             let ctx = match self
                 .token_manager
-                .acquire_context_with_affinity(model.as_deref(), affinity_key.as_ref())
+                .acquire_context_with_controls(
+                    model.as_deref(),
+                    affinity_key.as_ref(),
+                    controls.as_ref(),
+                )
                 .await
             {
                 Ok(c) => c,
                 Err(e)
                     if e.is::<CapacityError>()
+                        || e.is::<crate::kiro::model_controls::ModelParameterError>()
                         || e.is::<crate::kiro::retry_budget::RetryBudgetExceeded>() =>
                 {
                     return Err(e);
@@ -770,11 +775,17 @@ impl KiroProvider {
     /// 从请求体中提取模型和会话亲和键。
     ///
     /// 模型和 conversationId 独立解析，缺失会话标识不影响模型资格检查。
-    fn extract_routing_from_request(request_body: &str) -> (Option<String>, Option<AffinityKey>) {
+    fn extract_routing_from_request(
+        request_body: &str,
+    ) -> (
+        Option<String>,
+        Option<AffinityKey>,
+        Option<crate::kiro::model_controls::ModelControls>,
+    ) {
         use serde_json::Value;
 
         let Ok(json) = serde_json::from_str::<Value>(request_body) else {
-            return (None, None);
+            return (None, None, None);
         };
         let model = json
             .pointer("/conversationState/currentMessage/userInputMessage/modelId")
@@ -784,7 +795,8 @@ impl KiroProvider {
             .pointer("/conversationState/conversationId")
             .and_then(Value::as_str)
             .and_then(session_key);
-        (model, key)
+        let controls = crate::kiro::model_controls::ModelControls::from_value(&json);
+        (model, key, controls)
     }
 
     fn retry_after(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<Duration> {
@@ -1411,6 +1423,85 @@ mod retry_tests {
         for (before, after) in before.entries.iter().zip(&after.entries) {
             assert_eq!(before.success_count, after.success_count);
         }
+    }
+
+    #[tokio::test]
+    async fn catalog_parameter_validation_blocks_invalid_requests_before_http_or_refresh() {
+        use crate::kiro::{
+            model_controls::ModelParameterError,
+            models::{AvailableModel, ModelCatalog},
+        };
+        let mock = mock(StatusCode::OK, None, false).await;
+        let manager = Arc::new(
+            MultiTokenManager::new(
+                serde_json::from_value(
+                    serde_json::json!({"endpoints":{"ide":{"nativeThinking":true}}}),
+                )
+                .unwrap(),
+                vec![KiroCredentials {
+                    id: Some(1),
+                    // Expired OAuth would require a network refresh if validation happened too late.
+                    access_token: Some("private-access-token".into()),
+                    refresh_token: Some("private-refresh-token".into()),
+                    expires_at: Some("2000-01-01T00:00:00Z".into()),
+                    ..Default::default()
+                }],
+                None,
+                None,
+                true,
+            )
+            .unwrap(),
+        );
+        let model = AvailableModel {
+            model_id: "claude-sonnet-4.6".into(),
+            model_name: "Sonnet".into(),
+            provider: None,
+            rate_multiplier: None,
+            rate_unit: None,
+            max_input_tokens: None,
+            max_output_tokens: Some(1000),
+            effort_levels: vec![],
+            effort_schema_path: None,
+            default_effort: None,
+            thinking_types: vec![],
+            default_thinking: None,
+            proxy_supported: true,
+        };
+        manager.update_model_catalog(
+            1,
+            &manager.model_catalog_key(1).unwrap(),
+            &ModelCatalog {
+                models: vec![model],
+                default_model_id: None,
+                region: "us-east-1".into(),
+            },
+            std::time::Instant::now(),
+            false,
+        );
+        let provider = KiroProvider::with_proxy(
+            manager.clone(),
+            None,
+            mock.provider.endpoints.clone(),
+            "mock".into(),
+        );
+        let body = serde_json::json!({"conversationState":{"currentMessage":{"userInputMessage":{"modelId":"claude-sonnet-4.6"}}},
+            "additionalModelRequestFields":{"max_tokens":1001}}).to_string();
+        for streaming in [false, true] {
+            let error = provider
+                .call_api_with_retry(&body, streaming)
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.downcast_ref::<ModelParameterError>().unwrap().0,
+                "max_tokens"
+            );
+        }
+        assert!(mock.calls.lock().is_empty());
+        let snapshot = manager.snapshot();
+        assert_eq!(snapshot.entries[0].refresh_failure_count, 0);
+        assert!(!snapshot.entries[0].disabled);
+        assert_eq!(snapshot.concurrency.admitted_total, 0);
     }
 
     #[tokio::test]

@@ -58,14 +58,24 @@
 - 未查询、过期、刷新失败或账号认证、Profile ARN、API 区域、端点变化时，不使用旧目录判断授权，恢复既有订阅规则。失败时展示的旧目录仅供查看；迟到的缓存响应不能恢复已标记失败的同一快照。
 - 排队按完整模型区分账号资格，同属 Sonnet/Opus 的不同版本也分别判断；不可调度的旧请求不占用其他模型可用的账号，已可调度的旧请求保留到达顺序。目录更新会唤醒等待者重新检查资格，目录到期也会触发重新检查。
 
-此功能只影响账号选择，不修改原生参数 schema、已在途请求或 `/v1/models`，也不把模型未授权计为账号故障。
+账号目录不修改已在途请求或 `/v1/models`，也不把模型未授权计为账号故障。
+
+## 原生参数校验与账号选择
+
+启用 `endpoints.ide.nativeThinking: true` 后，账号选择同时检查新鲜目录中的 `maxOutputTokens`、`output_config.effort` 枚举及 `thinking.type` 枚举。先按模型权限筛选，再选择参数兼容的账号；账号之间参数范围不同，不会因首选账号不兼容而直接拒绝整次请求。参数兼容的账号忙碌或冷却时，沿用排队和 HTTP 503 行为。
+
+所有具备模型权限的启用账号均由新鲜目录明确判定为参数不兼容时，在预留并发名额、刷新 Token、消耗重试预算和发送生成请求前返回 HTTP 400 `invalid_request_error`。错误只标明参数名称，不含账号信息或请求正文；不增加账号故障计数、不禁用账号、不自动降低 effort 或夹取输出上限。排队同样区分参数需求，等待大输出上限的请求不会挡住其他账号能执行的小输出请求。
+
+thinking 校验复用原生传输转换：现代 Claude 的 `enabled` 按 `adaptive` 检查，4.5 保留 `enabled`；Sonnet 5.5 的 `disabled` 按 `between_tools` 检查。`reasoning.effort` 不用于校验 Claude 的 `output_config.effort`。枚举不完整、含非法条目或超出解析上限时，整个枚举视为未上报，避免部分解析误拒绝合法参数。
+
+未查询、过期、刷新失败、能力字段缺失或旧协议模式时，不应用目录参数约束，继续使用既有本地校验及上游校验。目录参数校验不能放宽本地兼容表，也不执行完整 JSON Schema：条件分支、数值最小值、thinking budget/display 等其他 schema 约束仍由既有逻辑或上游校验；不根据估算输入长度拒绝请求。
 
 ## 后续适配范围
 
 | 新特性 | 对本项目的影响 |
 |--------|----------------|
 | GPT-5.6 Sol / Terra / Luna、Kimi K3 | 已能在账号目录发现并展示参数；生成路由仍只接受 Claude，需继续实现非 Claude 推理参数和生成协议。GPT 使用 `reasoning.effort`，不能套用 Claude 的 `output_config.effort` |
-| 动态模型路由与 schema 校验 | 已实现按账号目录展示及新鲜目录驱动的账号资格判断；`/v1/models` 与请求参数校验仍使用本地兼容表，后续新增生成模型仍需更新代码 |
+| 动态模型路由与 schema 校验 | 已实现账号目录、模型及原生参数感知的账号选择；支持输出上限、effort/thinking 枚举校验。`/v1/models` 仍使用本地兼容表，完整 JSON Schema 和新增生成模型仍需继续适配 |
 | Runtime Responses 接口 | 新 IDE 除 `generateAssistantResponse` 外，还包含受功能开关控制的 `/v1/responses` 路径。本次保留现有 AWS Event Stream 通路，未声明支持新的 SSE 协议 |
 | CLI V3、Workflows、Memory、审批及 MCP elicitation | 属于 Kiro agent harness 和工具执行层。本项目提供模型 API 代理，未实现这些客户端工作流功能 |
 | 企业 credit pooling | 属于订阅及组织额度管理；现有 credits 日志不能替代共享额度池和成员级上限管理 |

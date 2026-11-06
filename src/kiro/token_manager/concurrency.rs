@@ -157,6 +157,7 @@ pub(super) struct Waiter {
     ticket: Arc<()>,
     /// Full model identity is needed for account-specific authorization.
     pub(super) model: Option<String>,
+    pub(super) controls: Option<ModelControls>,
     pub(super) requires_opus: bool,
     started: Instant,
 }
@@ -362,11 +363,12 @@ impl MultiTokenManager {
         &self,
         model: Option<&str>,
         affinity_key: Option<&AffinityKey>,
+        controls: Option<&ModelControls>,
     ) -> anyhow::Result<ReservedCredential> {
         let mut waiting = None;
         let result: anyhow::Result<ReservedCredential> = async {
             let reserved = self
-                .reserve_credential_inner(model, affinity_key, &mut waiting)
+                .reserve_credential_inner(model, affinity_key, controls, &mut waiting)
                 .await?;
             // 不持有队列/entries 锁做磁盘 I/O；落盘前不获取 Token 或发送请求。
             // 失败时 reservation 自动释放，RPM 预留仍保留。
@@ -399,6 +401,7 @@ impl MultiTokenManager {
         &'a self,
         model: Option<&str>,
         affinity_key: Option<&AffinityKey>,
+        controls: Option<&ModelControls>,
         waiting: &mut Option<WaitingGuard<'a>>,
     ) -> anyhow::Result<ReservedCredential> {
         let deadline = tokio::time::Instant::now()
@@ -418,7 +421,7 @@ impl MultiTokenManager {
                         .expect("registered waiter remains in queue until dropped")
                 });
                 let (reserved, ready_at) =
-                    self.try_reserve_credential(model, affinity_key, &queue[..position])?;
+                    self.try_reserve_credential(model, affinity_key, controls, &queue[..position])?;
                 if let Some(reserved) = reserved {
                     return Ok(reserved);
                 }
@@ -432,6 +435,7 @@ impl MultiTokenManager {
                     queue.push(Waiter {
                         ticket: ticket.clone(),
                         model: model.map(str::to_owned),
+                        controls: controls.cloned(),
                         requires_opus: MultiTokenManager::requires_opus(model),
                         started,
                     });

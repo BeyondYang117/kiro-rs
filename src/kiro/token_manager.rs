@@ -25,6 +25,7 @@ use crate::kiro::model::token_refresh::{
     IdcRefreshRequest, IdcRefreshResponse, RefreshRequest, RefreshResponse,
 };
 use crate::kiro::model::usage_limits::UsageLimitsResponse;
+use crate::kiro::model_controls::ModelControls;
 use crate::model::config::Config;
 
 mod affinity;
@@ -938,6 +939,7 @@ impl MultiTokenManager {
         &self,
         model: Option<&str>,
         affinity_key: Option<&AffinityKey>,
+        controls: Option<&ModelControls>,
         earlier_waiters: &[Waiter],
     ) -> anyhow::Result<(Option<ReservedCredential>, Option<Instant>)> {
         let mut entries = self.entries.lock();
@@ -950,8 +952,17 @@ impl MultiTokenManager {
                 entry.request_times.pop_front();
             }
         }
-        let eligible = entries.iter().filter(|e| self.eligible_for_model(e, model));
+        let model_eligible = entries.iter().filter(|e| self.eligible_for_model(e, model));
+        let eligible = model_eligible
+            .clone()
+            .filter(|entry| self.validate_model_controls(entry, model, controls).is_ok());
         if eligible.clone().next().is_none() {
+            if let Some(error) = model_eligible
+                .clone()
+                .find_map(|entry| self.validate_model_controls(entry, model, controls).err())
+            {
+                return Err(error.into());
+            }
             let available = entries.iter().filter(|e| !e.disabled).count();
             if available > 0 {
                 anyhow::bail!(
@@ -983,12 +994,15 @@ impl MultiTokenManager {
             // Deduplicate identical models to avoid rescanning for every queued request.
             let earlier_models: std::collections::HashSet<_> = earlier_waiters
                 .iter()
-                .map(|waiter| waiter.model.as_deref())
+                .map(|waiter| (waiter.model.as_deref(), waiter.controls.as_ref()))
                 .collect();
-            if earlier_models.iter().any(|model| {
-                entries
-                    .iter()
-                    .any(|entry| self.dispatchable(entry, *model, now))
+            if earlier_models.iter().any(|(model, controls)| {
+                entries.iter().any(|entry| {
+                    self.dispatchable(entry, *model, now)
+                        && self
+                            .validate_model_controls(entry, *model, *controls)
+                            .is_ok()
+                })
             }) {
                 return Ok((None, ready_at));
             }
@@ -1145,6 +1159,16 @@ impl MultiTokenManager {
         model: Option<&str>,
         affinity_key: Option<&AffinityKey>,
     ) -> anyhow::Result<CallContext> {
+        self.acquire_context_with_controls(model, affinity_key, None)
+            .await
+    }
+
+    pub(crate) async fn acquire_context_with_controls(
+        &self,
+        model: Option<&str>,
+        affinity_key: Option<&AffinityKey>,
+        controls: Option<&ModelControls>,
+    ) -> anyhow::Result<CallContext> {
         let total = self.total_count();
         let max_attempts = (total * MAX_FAILURES_PER_CREDENTIAL as usize).max(1);
         let mut attempt_count = 0;
@@ -1162,7 +1186,9 @@ impl MultiTokenManager {
                 id,
                 credentials,
                 reservation,
-            } = self.reserve_credential(model, affinity_key).await?;
+            } = self
+                .reserve_credential(model, affinity_key, controls)
+                .await?;
 
             // 尝试获取/刷新 Token
             match self.try_ensure_token(id, &credentials).await {

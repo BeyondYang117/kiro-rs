@@ -135,13 +135,8 @@ fn native_model_body(body: &str) -> String {
         .to_owned();
     if let Some(thinking) = request.pointer_mut("/additionalModelRequestFields/thinking") {
         let kind = thinking.get("type").and_then(Value::as_str);
-        let normalized = match kind {
-            Some("disabled") if model == "claude-sonnet-5.5" => Some("between_tools"),
-            Some("enabled") if model.starts_with("claude-") && !model.ends_with("4.5") => {
-                Some("adaptive")
-            }
-            _ => None,
-        };
+        let normalized = kind
+            .map(|kind| crate::kiro::model_controls::native_thinking_type(&model, kind).to_owned());
         if let Some(kind) = normalized {
             thinking["type"] = kind.into();
         }

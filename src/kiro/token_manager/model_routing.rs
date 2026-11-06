@@ -1,14 +1,17 @@
 //! Fresh account catalogs refine routing without network I/O on the generation path.
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use super::*;
-use crate::kiro::models::{CATALOG_TTL, ModelCatalog};
+use crate::kiro::{
+    model_controls::{ModelControls, ModelParameterError},
+    models::{AvailableModel, CATALOG_TTL, ModelCatalog},
+};
 
 pub(super) struct RoutingCatalog {
     scope_key: String,
     fetched_at: Instant,
     stale: bool,
-    models: HashSet<String>,
+    models: HashMap<String, AvailableModel>,
 }
 
 impl MultiTokenManager {
@@ -23,7 +26,7 @@ impl MultiTokenManager {
                 scope_key: scope_key.to_owned(),
                 fetched_at: current.fetched_at,
                 stale: true,
-                models: HashSet::new(),
+                models: HashMap::new(),
             }));
         }
         drop(entries);
@@ -60,12 +63,12 @@ impl MultiTokenManager {
             fetched_at,
             stale,
             models: if stale {
-                HashSet::new()
+                HashMap::new()
             } else {
                 catalog
                     .models
                     .iter()
-                    .map(|model| model.model_id.clone())
+                    .map(|model| (model.model_id.clone(), model.clone()))
                     .collect()
             },
         }));
@@ -102,20 +105,20 @@ impl MultiTokenManager {
     ) -> Option<bool> {
         let model = model?;
         let catalog = self.fresh_catalog(entry)?;
-        if catalog.models.contains(model) {
+        if catalog.models.contains_key(model) {
             return Some(true);
         }
         // Match the same canonical ID that conversion sends upstream.
         let canonical =
             crate::anthropic::map_model(model).unwrap_or_else(|| model.to_ascii_lowercase());
-        Some(catalog.models.contains(&canonical))
+        Some(catalog.models.contains_key(&canonical))
     }
 
     pub(super) fn catalog_supports_opus(&self, entry: &CredentialEntry) -> bool {
         self.fresh_catalog(entry).map_or_else(
             || entry.credentials.supports_opus(),
             |catalog| {
-                catalog.models.iter().any(|id| {
+                catalog.models.keys().any(|id| {
                     Self::requires_opus(Some(id))
                         && crate::anthropic::map_model(id).as_deref() == Some(id.as_str())
                 })
@@ -126,6 +129,41 @@ impl MultiTokenManager {
     pub(super) fn catalog_expiry(&self, entry: &CredentialEntry) -> Option<Instant> {
         self.fresh_catalog(entry)
             .map(|catalog| catalog.fetched_at + CATALOG_TTL)
+    }
+
+    pub(super) fn validate_model_controls(
+        &self,
+        entry: &CredentialEntry,
+        model: Option<&str>,
+        controls: Option<&ModelControls>,
+    ) -> Result<(), ModelParameterError> {
+        // Catalog discovery and native controls currently apply only to IDE transport.
+        if entry
+            .credentials
+            .endpoint
+            .as_deref()
+            .unwrap_or(&self.config.default_endpoint)
+            != "ide"
+            || self
+                .config
+                .endpoints
+                .get("ide")
+                .and_then(|value| value.get("nativeThinking"))
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+        {
+            return Ok(());
+        }
+        if let (Some(model), Some(controls), Some(catalog)) =
+            (model, controls, self.fresh_catalog(entry))
+        {
+            let canonical =
+                crate::anthropic::map_model(model).unwrap_or_else(|| model.to_ascii_lowercase());
+            if let Some(capabilities) = catalog.models.get(&canonical) {
+                controls.validate(capabilities)?;
+            }
+        }
+        Ok(())
     }
 }
 
