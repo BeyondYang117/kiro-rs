@@ -27,6 +27,8 @@ use super::{
 /// - `GET /credentials/:id/balance` - 获取凭据余额
 /// - `GET /config/load-balancing` - 获取负载均衡模式
 /// - `PUT /config/load-balancing` - 设置负载均衡模式
+/// - `GET /settings` - 系统设置、运行值及待重启项
+/// - `PUT /settings` - 校验并保存系统设置
 ///
 /// # 认证
 /// 需要 Admin API Key 认证，支持：
@@ -34,6 +36,10 @@ use super::{
 /// - `Authorization: Bearer <token>` header
 pub fn create_admin_router(state: AdminState) -> Router {
     Router::new()
+        .route(
+            "/settings",
+            get(super::handlers::get_system_settings).put(super::handlers::save_system_settings),
+        )
         .route("/logs", get(crate::request_log::list))
         .route("/logs/{id}", get(crate::request_log::detail))
         .route(

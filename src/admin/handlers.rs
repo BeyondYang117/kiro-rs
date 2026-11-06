@@ -11,6 +11,23 @@ use super::{
     },
 };
 
+pub async fn get_system_settings(State(state): State<AdminState>) -> impl IntoResponse {
+    match state.service.read_settings() {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => (error.status_code(), Json(error.into_response())).into_response(),
+    }
+}
+
+pub async fn save_system_settings(
+    State(state): State<AdminState>,
+    AdminJson(request): AdminJson<super::settings::SaveSettingsRequest>,
+) -> impl IntoResponse {
+    match state.service.save_settings(request) {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => (error.status_code(), Json(error.into_response())).into_response(),
+    }
+}
+
 /// GET /api/admin/credentials
 /// 获取所有凭据状态
 pub async fn get_all_credentials(State(state): State<AdminState>) -> impl IntoResponse {

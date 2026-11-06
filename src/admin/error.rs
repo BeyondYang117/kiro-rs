@@ -10,7 +10,9 @@ use super::types::AdminErrorResponse;
 #[derive(Debug)]
 pub enum AdminServiceError {
     /// 凭据不存在
-    NotFound { id: u64 },
+    NotFound {
+        id: u64,
+    },
 
     /// 上游服务调用失败（网络、API 错误等）
     UpstreamError(String),
@@ -20,6 +22,9 @@ pub enum AdminServiceError {
 
     /// 凭据无效（验证失败）
     InvalidCredential(String),
+
+    InvalidSettings(String),
+    ConfigurationConflict,
 }
 
 impl fmt::Display for AdminServiceError {
@@ -31,6 +36,10 @@ impl fmt::Display for AdminServiceError {
             AdminServiceError::UpstreamError(msg) => write!(f, "上游服务错误: {}", msg),
             AdminServiceError::InternalError(msg) => write!(f, "内部错误: {}", msg),
             AdminServiceError::InvalidCredential(msg) => write!(f, "凭据无效: {}", msg),
+            AdminServiceError::InvalidSettings(msg) => write!(f, "设置无效: {}", msg),
+            AdminServiceError::ConfigurationConflict => {
+                write!(f, "设置已被其他操作修改，请重新加载后再保存")
+            }
         }
     }
 }
@@ -45,6 +54,8 @@ impl AdminServiceError {
             AdminServiceError::UpstreamError(_) => StatusCode::BAD_GATEWAY,
             AdminServiceError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AdminServiceError::InvalidCredential(_) => StatusCode::BAD_REQUEST,
+            AdminServiceError::InvalidSettings(_) => StatusCode::BAD_REQUEST,
+            AdminServiceError::ConfigurationConflict => StatusCode::CONFLICT,
         }
     }
 
@@ -56,7 +67,9 @@ impl AdminServiceError {
             AdminServiceError::InternalError(_) => {
                 AdminErrorResponse::internal_error(self.to_string())
             }
-            AdminServiceError::InvalidCredential(_) => {
+            AdminServiceError::InvalidCredential(_)
+            | AdminServiceError::InvalidSettings(_)
+            | AdminServiceError::ConfigurationConflict => {
                 AdminErrorResponse::invalid_request(self.to_string())
             }
         }

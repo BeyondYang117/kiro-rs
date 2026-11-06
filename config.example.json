@@ -7,8 +7,16 @@
   "adminApiKey": "sk-admin-your-secret-key",
   "defaultEndpoint": "ide",
   "requestLogRetentionDays": 30,
+  "ccBufferedStream": true,
+  "extractThinking": true,
+  "countTokensTimeoutSeconds": 10,
   "toolOutputRecoveryAttempts": 1,
   "loadBalancingMode": "balanced",
+  "sessionAffinity": {
+    "enabled": true,
+    "ttlSeconds": 1800,
+    "maxEntries": 10000
+  },
   "requestLimits": {
     "maxConcurrentRequests": 64,
     "maxUpstreamAttempts": 9,

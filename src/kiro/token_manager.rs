@@ -2120,6 +2120,12 @@ impl MultiTokenManager {
         self.load_balancing_mode.lock().clone()
     }
 
+    /// 与旧的负载均衡接口共用提交锁，避免配置读改写互相覆盖。
+    pub(crate) fn with_configuration<T>(&self, f: impl FnOnce(&Config, &mut String) -> T) -> T {
+        let mut mode = self.load_balancing_mode.lock();
+        f(&self.config, &mut mode)
+    }
+
     fn persist_load_balancing_mode(&self, mode: &str) -> anyhow::Result<()> {
         use anyhow::Context;
 
@@ -2131,11 +2137,16 @@ impl MultiTokenManager {
             }
         };
 
-        let mut config = Config::load(&config_path)
+        let config = Config::load(&config_path)
             .with_context(|| format!("重新加载配置失败: {}", config_path.display()))?;
-        config.load_balancing_mode = mode.to_string();
+        let mut document: serde_json::Value = match std::fs::read(&config_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+            Err(error) => return Err(error.into()),
+        };
+        document["loadBalancingMode"] = serde_json::Value::String(mode.to_owned());
         config
-            .save()
+            .save_document(&document)
             .with_context(|| format!("持久化负载均衡模式失败: {}", config_path.display()))?;
 
         Ok(())

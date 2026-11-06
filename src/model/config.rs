@@ -478,14 +478,14 @@ impl Config {
         self.config_path.as_deref()
     }
 
-    /// 将当前配置写回原始配置文件
-    pub fn save(&self) -> anyhow::Result<()> {
+    /// 将合并后的配置文档写回原始路径，调用方保留未管理的参数。
+    pub fn save_document(&self, document: &serde_json::Value) -> anyhow::Result<()> {
         let path = self
             .config_path
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("配置文件路径未知，无法保存配置"))?;
 
-        let content = serde_json::to_string_pretty(self).context("序列化配置失败")?;
+        let content = serde_json::to_string_pretty(document).context("序列化配置失败")?;
         crate::common::persistence::atomic_write(path, content.as_bytes())
             .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
         Ok(())
@@ -665,7 +665,9 @@ mod tests {
     fn missing_config_can_be_created_with_private_permissions() {
         let path = std::env::temp_dir().join(format!("kiro-config-{}.json", uuid::Uuid::new_v4()));
         let config = Config::load(&path).unwrap();
-        config.save().unwrap();
+        config
+            .save_document(&serde_json::to_value(&config).unwrap())
+            .unwrap();
         assert_eq!(Config::load(&path).unwrap().port, config.port);
         #[cfg(unix)]
         {

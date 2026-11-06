@@ -53,9 +53,10 @@ import { extractErrorMessage } from '@/lib/utils'
 interface DashboardProps {
   onLogout: () => void
   onShowLogs: () => void
+  onShowSettings: () => void
 }
 
-export function Dashboard({ onLogout, onShowLogs }: DashboardProps) {
+export function Dashboard({ onLogout, onShowLogs, onShowSettings }: DashboardProps) {
   const [selectedCredentialId, setSelectedCredentialId] = useState<number | null>(null)
   const [balanceDialogOpen, setBalanceDialogOpen] = useState(false)
   const [addDialogOpen, setAddDialogOpen] = useState(false)
@@ -638,6 +639,7 @@ export function Dashboard({ onLogout, onShowLogs }: DashboardProps) {
             <span className="font-semibold">Kiro Admin</span>
           </div>
           <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={onShowSettings}>系统设置</Button>
             <Button variant="outline" size="sm" onClick={onShowLogs}>
               调用日志
             </Button>

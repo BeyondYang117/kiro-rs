@@ -61,6 +61,19 @@ pub struct AdminService {
 }
 
 impl AdminService {
+    pub(super) fn read_settings(
+        &self,
+    ) -> Result<super::settings::SettingsResponse, AdminServiceError> {
+        super::settings::read(&self.token_manager, &self.known_endpoints)
+    }
+
+    pub(super) fn save_settings(
+        &self,
+        request: super::settings::SaveSettingsRequest,
+    ) -> Result<super::settings::SettingsResponse, AdminServiceError> {
+        super::settings::save(&self.token_manager, &self.known_endpoints, request)
+    }
+
     pub fn new(
         token_manager: Arc<MultiTokenManager>,
         known_endpoints: impl IntoIterator<Item = String>,
