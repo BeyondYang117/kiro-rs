@@ -23,6 +23,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
+import { ClientKeysPanel } from '@/components/client-keys'
 
 type Field = {
   path: string
@@ -40,6 +41,12 @@ const groups: {
   description: string
   fields: Field[]
 }[] = [
+  {
+    id: 'client-keys',
+    title: '调用密钥',
+    description: '管理分发给使用者的调用密钥。',
+    fields: [],
+  },
   {
     id: 'scheduling',
     title: '调度与并发',
@@ -284,6 +291,8 @@ const groups: {
   },
 ]
 
+const parameterGroups = groups.filter((item) => item.id !== 'client-keys')
+
 function getValue(
   settings: SystemSettings,
   path: string
@@ -338,6 +347,7 @@ export function SystemSettingsPage({
   const [snapshot, setSnapshot] = useState<SettingsResponse | null>(null)
   const [draft, setDraft] = useState<SystemSettings | null>(null)
   const [saving, setSaving] = useState(false)
+  const [keysBusy, setKeysBusy] = useState(false)
   const [conflict, setConflict] = useState(false)
   const [activeGroup, setActiveGroup] = useState(groups[0].id)
   const dirty = Boolean(
@@ -366,15 +376,17 @@ export function SystemSettingsPage({
     registerNavigationGuard(
       () =>
         !saving &&
+        !keysBusy &&
         (!dirty || window.confirm('设置尚未保存，确定离开并放弃修改吗？'))
     )
     return () => registerNavigationGuard(null)
-  }, [dirty, saving, registerNavigationGuard])
+  }, [dirty, saving, keysBusy, registerNavigationGuard])
 
   const reload = async () => {
     if (dirty && !window.confirm('重新加载会放弃当前未保存修改，确定继续吗？'))
       return
     const result = await query.refetch()
+    client.invalidateQueries({ queryKey: ['client-keys'] })
     if (result.data && !result.error) {
       setSnapshot(result.data)
       setDraft(result.data.settings)
@@ -387,6 +399,8 @@ export function SystemSettingsPage({
       !draft ||
       !snapshot ||
       saving ||
+      keysBusy ||
+      activeGroup === 'client-keys' ||
       !dirty ||
       !snapshot.canSave ||
       conflict
@@ -433,7 +447,7 @@ export function SystemSettingsPage({
             <Button
               variant="ghost"
               size="sm"
-              disabled={saving}
+              disabled={saving || keysBusy}
               onClick={onBack}
             >
               <ArrowLeft className="mr-2 h-4 w-4" />
@@ -446,7 +460,7 @@ export function SystemSettingsPage({
               variant="outline"
               size="sm"
               onClick={reload}
-              disabled={query.isFetching || saving}
+              disabled={query.isFetching || saving || keysBusy}
             >
               <RefreshCw
                 className={`mr-2 h-4 w-4 ${query.isFetching ? 'animate-spin' : ''}`}
@@ -457,7 +471,7 @@ export function SystemSettingsPage({
               variant="ghost"
               size="icon"
               aria-label="退出登录"
-              disabled={saving}
+              disabled={saving || keysBusy}
               onClick={onLogout}
             >
               <LogOut className="h-4 w-4" />
@@ -539,13 +553,17 @@ export function SystemSettingsPage({
                         activeGroup === item.id ? 'page' : undefined
                       }
                       onClick={() => setActiveGroup(item.id)}
+                      disabled={keysBusy || saving}
                     >
                       {item.title}
                     </Button>
                   ))}
                 </nav>
                 <div className="space-y-6">
-                  {groups.map((item) => (
+                  {activeGroup === 'client-keys' && (
+                    <ClientKeysPanel onBusyChange={setKeysBusy} />
+                  )}
+                  {parameterGroups.map((item) => (
                     <Card key={item.id} hidden={item.id !== activeGroup}>
                       <CardHeader>
                         <CardTitle>{item.title}</CardTitle>
@@ -674,7 +692,14 @@ export function SystemSettingsPage({
                       </CardContent>
                     </Card>
                   ))}
-                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-card p-4">
+                  <div
+                    hidden={activeGroup === 'client-keys'}
+                    className={
+                      activeGroup === 'client-keys'
+                        ? 'hidden'
+                        : 'flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-card p-4'
+                    }
+                  >
                     <Button
                       type="button"
                       variant="ghost"

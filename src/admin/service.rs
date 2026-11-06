@@ -61,6 +61,27 @@ pub struct AdminService {
 }
 
 impl AdminService {
+    pub(super) fn read_client_keys(
+        &self,
+    ) -> Result<super::client_keys::KeysResponse, AdminServiceError> {
+        super::client_keys::read(&self.token_manager)
+    }
+
+    pub(super) fn add_client_key(
+        &self,
+        request: super::client_keys::AddKeyRequest,
+    ) -> Result<super::client_keys::CreatedKeyResponse, AdminServiceError> {
+        super::client_keys::add(&self.token_manager, request)
+    }
+
+    pub(super) fn delete_client_key(
+        &self,
+        id: &str,
+        request: super::client_keys::DeleteKeyRequest,
+    ) -> Result<super::client_keys::KeysResponse, AdminServiceError> {
+        super::client_keys::delete(&self.token_manager, id, request)
+    }
+
     pub(super) fn read_settings(
         &self,
     ) -> Result<super::settings::SettingsResponse, AdminServiceError> {

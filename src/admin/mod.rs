@@ -16,6 +16,7 @@
 //! let admin_router = create_admin_router(admin_state);
 //! ```
 
+mod client_keys;
 mod error;
 pub(crate) mod extract;
 mod handlers;

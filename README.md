@@ -655,6 +655,9 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
   - `GET /api/admin/credentials/:id/balance` - 获取凭据余额
   - `GET /api/admin/settings` - 获取系统设置、当前运行值、默认值及待重启项
   - `PUT /api/admin/settings` - 校验并保存系统设置
+  - `GET /api/admin/client-keys` - 查看脱敏调用密钥和生效状态
+  - `POST /api/admin/client-keys` - 生成或添加调用密钥
+  - `DELETE /api/admin/client-keys/{id}` - 删除调用密钥（重启生效）
 
 - **Admin UI**
   - `GET /admin` - 访问管理页面（需要在编译前构建 `admin-ui/dist`）
@@ -663,6 +666,7 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
 
 管理首页点击“系统设置”，或直接打开 `/admin#settings`，可集中管理以下参数：
 
+- **调用密钥**：查看原 `apiKey` 和 `apiKeys`、生成随机密钥、添加已有密钥、删除密钥。完整新密钥仅在创建成功后展示一次，可复制分发；列表显示脱敏值和指纹，便于记录对应使用者。新增和删除会直接写入配置，无需点击“保存设置”，重启后生效。页面分别标记使用中、待启用和待删除；待删除密钥在重启前仍然有效。至少保留一个密钥，新增密钥不能与管理密钥相同。
 - **调度与并发**：负载均衡模式、全局及单账号并发、排队容量与超时、每分钟调用数、限流冷却、认证退避、自适应并发。
 - **请求与响应限制**：客户端并发、上游尝试次数、总超时、首内容及空闲超时、响应字节数与事件数。
 - **会话亲和**：开关、绑定有效期、最大绑定数。
@@ -674,6 +678,8 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
 设置接口沿用 Admin API 认证和禁止缓存策略，仅返回可管理参数；API 密钥、代理认证、远程计数密钥和自定义端点配置不进入设置响应。保存按字段合并，保留文件中其余参数及嵌套扩展字段，使用同目录临时文件原子替换。配置文件路径未知时页面只读；文件读取或写入失败时不提交新的运行模式。
 
 `GET /api/admin/settings` 返回 `settings`（已保存值）、`running`（当前运行值）、`defaults`、`revision`、`restartRequired`（字段路径数组）、`canSave` 和 `endpoints`。`PUT` 的请求体为 `{"revision":"读取时返回的版本","settings":{...完整可管理设置...}}`，响应格式与 GET 相同。请求必须包含完整设置及嵌套参数，未知字段、非法类型或越界值返回 400；设置已被其他页面、旧负载均衡接口或配置文件编辑修改时返回 409，需重新加载后再保存。未管理字段的外部修改会在保存时保留。手动编辑配置文件时应避免与页面保存同时进行。
+
+调用密钥使用独立的 `/api/admin/client-keys` 接口：GET 返回 `keys`（`id` 指纹、`maskedKey`、`legacy`、`configured`、`active`）、`revision`、`canSave` 和 `restartRequired`。POST 请求为 `{"revision":"读取时的版本"}`，可选 `key` 字段用于添加已有密钥；返回 `{key,state}`，完整密钥仅在此次响应中返回。DELETE 路径中的 `id` 使用 GET 返回的完整指纹，请求体为 `{"revision":"读取时的版本"}`，返回更新后的状态。删除会同时清除 `apiKey` 和 `apiKeys` 中的相同密钥。并发编辑版本冲突返回 409。密钥接口仅允许管理密钥访问，不返回现有完整密钥；普通系统设置的保存仍保留调用密钥配置。
 
 表单展示各数值范围；管理接口限制并发容量和排队容量至 1000000，远程 Token 计数超时为 1–300 秒，日志保留期为 1–3650 天。`native-tls` 选项仅在服务构建启用该特性时可保存。区域覆盖留空表示跟随默认区域。
 

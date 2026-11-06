@@ -66,14 +66,14 @@ fn invalid(message: impl Into<String>) -> AdminServiceError {
 }
 
 // 不把包含原始文件内容的解析错误传给客户端。
-fn storage_error(error: impl std::fmt::Display) -> AdminServiceError {
+pub(super) fn storage_error(error: impl std::fmt::Display) -> AdminServiceError {
     tracing::error!("系统设置文件操作失败: {error}");
     AdminServiceError::InternalError(
         "无法读取或保存配置文件，请检查文件格式、路径及写入权限".into(),
     )
 }
 
-fn read_document(path: &Path) -> Result<Value, AdminServiceError> {
+pub(super) fn read_document(path: &Path) -> Result<Value, AdminServiceError> {
     match std::fs::read(path) {
         Ok(bytes) => {
             let document: Value = serde_json::from_slice(&bytes).map_err(storage_error)?;

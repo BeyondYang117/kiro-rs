@@ -29,6 +29,9 @@ use super::{
 /// - `PUT /config/load-balancing` - 设置负载均衡模式
 /// - `GET /settings` - 系统设置、运行值及待重启项
 /// - `PUT /settings` - 校验并保存系统设置
+/// - `GET /client-keys` - 查看脱敏调用密钥及生效状态
+/// - `POST /client-keys` - 生成或添加调用密钥
+/// - `DELETE /client-keys/{id}` - 删除调用密钥（重启生效）
 ///
 /// # 认证
 /// 需要 Admin API Key 认证，支持：
@@ -36,6 +39,11 @@ use super::{
 /// - `Authorization: Bearer <token>` header
 pub fn create_admin_router(state: AdminState) -> Router {
     Router::new()
+        .route(
+            "/client-keys",
+            get(super::client_keys::list_keys).post(super::client_keys::add_key),
+        )
+        .route("/client-keys/{id}", delete(super::client_keys::delete_key))
         .route(
             "/settings",
             get(super::handlers::get_system_settings).put(super::handlers::save_system_settings),
