@@ -646,6 +646,11 @@ impl UpstreamResponseDecoder {
             let payload_bytes = frame.payload.len();
             let event = Event::from_frame(frame)?;
             match &event {
+                Event::Metering {
+                    credits: Some(credits),
+                } => {
+                    crate::request_log::attempt_kiro_credits(*credits);
+                }
                 Event::AssistantResponse(response) => {
                     self.diagnostics.content_truncated |= crate::request_log::append_preview(
                         &mut self.diagnostics.content,

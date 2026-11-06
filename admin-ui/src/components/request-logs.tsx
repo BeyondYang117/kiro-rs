@@ -12,6 +12,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 
 const labels = { success: '成功', error: '失败', interrupted: '中断', running: '进行中' }
 const formatNumber = (n: number | null | undefined) => n == null ? '—' : n.toLocaleString('zh-CN')
+const formatCredits = (n: number | null | undefined) => n == null ? '未上报' : n.toLocaleString('zh-CN', { maximumSignificantDigits: 10 })
 const formatTime = (n: number) => new Date(n).toLocaleString('zh-CN', { hour12: false })
 const formatDuration = (n: number | null | undefined) => n == null ? '—' : n < 1000 ? `${n} ms` : `${(n / 1000).toFixed(2)} s`
 
@@ -23,12 +24,13 @@ function AttemptProgress({ attempt, requestTimestamp }: {
   attempt: NonNullable<LogRecord['upstreamAttempts']>[number]
   requestTimestamp: number
 }) {
-  if (attempt.durationMs == null && attempt.responseHeadersMs == null) return null
+  if (attempt.durationMs == null && attempt.responseHeadersMs == null && attempt.kiroCredits == null) return null
   const bodyState = attempt.bodyComplete == null ? '未取得响应体'
     : attempt.bodyComplete ? '响应体已读完' : '响应体未读完'
   return <div className="mt-2 space-y-1 text-xs text-muted-foreground">
     <p>距请求开始：{formatDuration(Math.max(0, attempt.timestamp - requestTimestamp))} · 上游耗时：{formatDuration(attempt.durationMs)}</p>
     <p>上游响应头 / 首字节：{formatDuration(attempt.responseHeadersMs)} / {formatDuration(attempt.firstByteMs)} · 已接收 {formatNumber(attempt.bodyBytes)} B · {bodyState}</p>
+    <p>Kiro 点数（已上报）：{formatCredits(attempt.kiroCredits)}</p>
     {attempt.status === 200 && <p>HTTP 200 表示已收到上游响应头，完整响应仍需读取并校验。</p>}
   </div>
 }
@@ -122,7 +124,7 @@ export function RequestLogs({ onBack, onLogout }: { onBack: () => void; onLogout
     </header>
     <main className="container mx-auto space-y-6 px-4 py-6 md:px-8">
       <div><h1 className="text-2xl font-semibold">调用与错误记录</h1>
-        <p className="mt-2 text-sm text-muted-foreground">查看请求用量、响应耗时与错误原因。统计随查询条件更新，Token 为服务返回的计数或估算值。</p></div>
+        <p className="mt-2 text-sm text-muted-foreground">查看请求用量、响应耗时与错误原因。Token 为计数或估算值，Kiro 点数来自上游计费上报；未上报部分不计入。</p></div>
       <form onSubmit={search} className="rounded-lg border bg-card p-4">
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <label className="space-y-1 text-sm">关键字<Input placeholder="请求 ID、路径、错误原因…" value={draft.search} maxLength={512} onChange={e => setDraft({ ...draft, search: e.target.value })} /></label>
@@ -135,24 +137,26 @@ export function RequestLogs({ onBack, onLogout }: { onBack: () => void; onLogout
           <div className="flex items-end gap-2"><Button type="submit">查询</Button><Button type="button" variant="outline" onClick={() => { setDraft({ search: '', model: '', status: '', credentialId: '', httpStatus: '', from: '', to: '' }); setFilters({}); setPage(1) }}>重置</Button></div>
         </div>
       </form>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         {[
           ['调用次数', formatNumber(summary?.total), `成功 ${summary?.success ?? 0} · 失败 ${summary?.error ?? 0} · 中断 ${summary?.interrupted ?? 0} · 进行中 ${summary?.running ?? 0}`],
           ['输入 Token', formatNumber(summary?.inputTokens), '包含 count_tokens 的计数结果'],
           ['输出 Token', formatNumber(summary?.outputTokens), '压缩请求累计各轮用量'],
+          ['Kiro 点数（已上报）', formatCredits(summary?.kiroCredits), `${formatNumber(summary?.meteredRequests ?? 0)} 条请求取得计费值，含重试与压缩`],
           ['平均耗时', summary ? formatDuration(Math.round(summary.averageDurationMs)) : '—', '从接收请求到响应结束'],
         ].map(([title, value, caption]) => <Card key={title}><CardHeader className="pb-2"><CardTitle className="text-sm text-muted-foreground">{title}</CardTitle></CardHeader><CardContent><div className="text-2xl font-semibold">{value}</div><p className="mt-1 text-xs text-muted-foreground">{caption}</p></CardContent></Card>)}
       </div>
       {error ? <Card><CardContent className="py-8 text-center"><p className="mb-4 text-destructive">{extractErrorMessage(error)}</p><Button onClick={() => refetch()}>重试</Button></CardContent></Card> :
         <div className="overflow-hidden rounded-lg border">
           <div className="overflow-x-auto"><table className="w-full whitespace-nowrap text-left text-sm">
-            <thead className="bg-muted/50 text-muted-foreground"><tr>{['时间 / 请求', '模型 / 接口', '状态', '耗时 / 首包', 'Token 输入 / 输出', '最后凭据 / 尝试', '操作'].map(title => <th className="px-4 py-3 font-medium" key={title}>{title}</th>)}</tr></thead>
-            <tbody>{isLoading ? <tr><td colSpan={7} className="p-12 text-center text-muted-foreground">正在加载日志…</td></tr> : !data?.items.length ? <tr><td colSpan={7} className="p-12 text-center text-muted-foreground">暂无符合条件的调用记录。更新后的服务收到 API 请求后会开始记录。</td></tr> : data.items.map(record => <tr key={record.id} className="border-t hover:bg-muted/30">
+            <thead className="bg-muted/50 text-muted-foreground"><tr>{['时间 / 请求', '模型 / 接口', '状态', '耗时 / 首包', 'Token 输入 / 输出', 'Kiro 点数（已上报）', '最后凭据 / 尝试', '操作'].map(title => <th className="px-4 py-3 font-medium" key={title}>{title}</th>)}</tr></thead>
+            <tbody>{isLoading ? <tr><td colSpan={8} className="p-12 text-center text-muted-foreground">正在加载日志…</td></tr> : !data?.items.length ? <tr><td colSpan={8} className="p-12 text-center text-muted-foreground">暂无符合条件的调用记录。更新后的服务收到 API 请求后会开始记录。</td></tr> : data.items.map(record => <tr key={record.id} className="border-t hover:bg-muted/30">
               <td className="px-4 py-3"><div>{formatTime(record.timestamp)}</div><button className="mt-1 font-mono text-xs text-muted-foreground hover:underline" onClick={() => setSelectedId(record.id)} title={record.id}>{record.id.slice(0, 8)}</button></td>
               <td className="max-w-64 px-4 py-3"><div className="truncate" title={record.model ?? ''}>{record.model ?? '—'} {record.stream && <Badge variant="outline">流式</Badge>}</div><div className="mt-1 font-mono text-xs text-muted-foreground">{record.method} {record.path}</div></td>
               <td className="px-4 py-3"><Status record={record} /><div className="mt-1 text-xs text-muted-foreground">HTTP {record.httpStatus || '—'}</div></td>
               <td className="px-4 py-3"><div>{record.status === 'running' ? '进行中' : formatDuration(record.durationMs)}</div><div className="mt-1 text-xs text-muted-foreground">首包 {formatDuration(record.firstByteMs)}</div></td>
               <td className="px-4 py-3 tabular-nums">{formatNumber(record.inputTokens)} / {formatNumber(record.outputTokens)}</td>
+              <td className="px-4 py-3 tabular-nums">{formatCredits(record.kiroCredits)}</td>
               <td className="px-4 py-3">{record.credentialId == null ? '—' : `#${record.credentialId}`} / {record.attempts} 次</td>
               <td className="px-4 py-3"><Button size="sm" variant="outline" onClick={() => setSelectedId(record.id)}>详情</Button></td>
             </tr>)}</tbody>
@@ -174,6 +178,8 @@ export function RequestLogs({ onBack, onLogout }: { onBack: () => void; onLogout
               ['总耗时 / 返回客户端首包', `${formatDuration(detail.data.durationMs)} / ${formatDuration(detail.data.firstByteMs)}`],
               ['会话亲和（最后一次调度）', detail.data.affinity === 'hit' ? '复用绑定账号' : detail.data.affinity === 'fallback' ? '绑定账号不可用，已分流' : detail.data.affinity === 'miss' ? '无有效绑定' : '—'],
               ['输入 / 输出 Token', `${formatNumber(detail.data.inputTokens)} / ${formatNumber(detail.data.outputTokens)}`],
+              ['Kiro 点数（已上报）', formatCredits(detail.data.kiroCredits)],
+              ['计费上报覆盖', `${detail.data.upstreamAttempts?.filter(attempt => attempt.kiroCredits != null).length ?? 0} / ${detail.data.attempts} 次上游调用；未上报部分不计入`],
               ['返回客户端的 stop_reason', detail.data.response?.stopReason ?? (detail.data.upstreamAttempts?.some(attempt => attempt.responseDiagnostics?.outcome === 'refusal') ? '无（上游拒绝，以错误结束）' : '未记录')],
             ].map(([key, value]) => <div key={key}><dt className="text-muted-foreground">{key}</dt><dd className="mt-1 break-all">{value}</dd></div>)}
           </dl>

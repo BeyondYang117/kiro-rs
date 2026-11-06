@@ -1269,6 +1269,105 @@ mod tests {
         crate::request_log::tests::capture_request(app, req).await
     }
 
+    #[tokio::test]
+    async fn metering_logs_distinguish_fractional_zero_and_unknown_credit_usage() {
+        for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+            for streaming in [false, true] {
+                for (payload, expected) in [
+                    (None, Value::Null),
+                    (
+                        Some(
+                            json!({"unit":"credit", "unitPlural":"credits", "usage":0.24743150922056384}),
+                        ),
+                        json!(0.24743150922056384),
+                    ),
+                    (Some(json!({"unit":"CREDITS", "usage":0})), json!(0.0)),
+                    (Some(json!({"unit":"credit"})), Value::Null),
+                    (Some(json!({"usage":1})), Value::Null),
+                    (Some(json!({"unit":"USD", "usage":1})), Value::Null),
+                    (Some(json!({"unit":"credit", "usage":-1})), Value::Null),
+                    (
+                        Some(json!({"unit":"credit", "usage":"invalid"})),
+                        Value::Null,
+                    ),
+                    (Some(json!("unexpected schema")), Value::Null),
+                ] {
+                    let mut bytes = frame("assistantResponseEvent", json!({"content":"answer"}));
+                    if let Some(payload) = payload {
+                        bytes.extend(frame("meteringEvent", payload));
+                    }
+                    let mut upstream = mock(bytes).await;
+                    upstream.state.cc_buffered_stream = buffered;
+                    let record = logged_completion_mode(&upstream, streaming, cc).await;
+                    assert_eq!(record["status"], "success");
+                    assert_eq!(record["kiroCredits"], expected);
+                    assert_eq!(record["upstreamAttempts"][0]["kiroCredits"], expected);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn metering_logs_sum_retries_and_summary_calls_without_duplicate_reports() {
+        for compact in [false, true] {
+            for streaming in [false, true] {
+                let first = frame("meteringEvent", json!({"unit":"credit", "usage":0.125}));
+                let mut second = frame("assistantResponseEvent", json!({"content":"answer"}));
+                for usage in [0.2, 0.25, 0.25] {
+                    second.extend(frame(
+                        "meteringEvent",
+                        json!({"unit":"credit", "usage":usage}),
+                    ));
+                }
+                let upstream = mock_scripted(vec![first, second]).await;
+                let state = upstream.state.clone();
+                let app = axum::Router::new().route(
+                    "/v1/messages",
+                    axum::routing::post(move |Json(req): Json<MessagesRequest>| {
+                        let state = state.clone();
+                        async move {
+                            if compact {
+                                handle_request(state, req, false).await
+                            } else {
+                                dispatch(state, req, false).await
+                            }
+                        }
+                    }),
+                );
+                let mut payload = json!({"model":"claude-sonnet-5", "max_tokens":1024,
+                    "stream":streaming, "messages":[{"role":"user","content":"hi"}]});
+                if compact {
+                    payload["compaction"] = json!({"type":"summarize"});
+                }
+                let req = axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap();
+                let record = crate::request_log::tests::capture_request(app, req).await;
+                assert_eq!(record["status"], "success");
+                assert_eq!(record["kiroCredits"], 0.375);
+                assert_eq!(record["attempts"], 2);
+                assert_eq!(record["upstreamAttempts"][0]["kiroCredits"], 0.125);
+                assert_eq!(record["upstreamAttempts"][1]["kiroCredits"], 0.25);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn metering_logs_preserve_usage_when_later_content_validation_fails() {
+        for streaming in [false, true] {
+            let mut bytes = frame("meteringEvent", json!({"unit":"credit", "usage":0.125}));
+            bytes.extend(refusal_response());
+            let upstream = mock(bytes).await;
+            let record = logged_completion(&upstream, streaming).await;
+            assert_eq!(record["status"], "error");
+            assert_eq!(record["kiroCredits"], 0.125);
+            assert_eq!(record["upstreamAttempts"][0]["kiroCredits"], 0.125);
+        }
+    }
+
     fn refusal_response() -> Vec<u8> {
         let mut bytes = frame("contextUsageEvent", json!({"contextUsagePercentage":20.0}));
         bytes.extend(frame(

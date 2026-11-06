@@ -40,6 +40,7 @@ export interface LogRecord {
   affinity?: 'hit' | 'miss' | 'fallback'
   inputTokens: number | null
   outputTokens: number | null
+  kiroCredits?: number | null
   response?: {
     content: unknown[]
     stopReason: string | null
@@ -60,6 +61,7 @@ export interface LogRecord {
     durationMs?: number
     bodyBytes?: number
     bodyComplete?: boolean
+    kiroCredits?: number | null
     responseDiagnostics?: UpstreamResponseDiagnostics
   }[]
   diagnostics?: { timestamp: number; level: string; target: string; message: string }[]
@@ -90,6 +92,8 @@ export interface LogResult {
     inputTokens: number
     outputTokens: number
     averageDurationMs: number
+    kiroCredits?: number | null
+    meteredRequests?: number
   }
 }
 

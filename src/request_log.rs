@@ -95,6 +95,9 @@ pub struct Attempt {
     /// Transport EOF only; response validation can still fail afterward.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     body_complete: Option<bool>,
+    /// Latest valid credit usage reported by this upstream call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kiro_credits: Option<f64>,
     #[serde(skip)]
     started: Option<Instant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,6 +122,9 @@ pub struct Record {
     affinity: Option<String>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+    /// Sum of reported upstream credit usage, including retries and compaction.
+    #[serde(default)]
+    kiro_credits: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     response: Option<ResponsePreview>,
     credential_id: Option<u64>,
@@ -144,6 +150,7 @@ impl Record {
             affinity: None,
             input_tokens: None,
             output_tokens: None,
+            kiro_credits: None,
             response: None,
             credential_id: None,
             attempts: 0,
@@ -222,6 +229,7 @@ pub fn attempt_started(credential_id: u64, endpoint: &str) {
             duration_ms: None,
             body_bytes: None,
             body_complete: None,
+            kiro_credits: None,
             started: Some(Instant::now()),
             response_diagnostics: None,
         });
@@ -251,6 +259,29 @@ impl Attempt {
         self.started
             .map(|started| started.elapsed().as_millis() as u64)
     }
+}
+
+/// Capture metering immediately so cancellation or a later decode error cannot discard it.
+/// Repeated reports replace this call's value rather than double-counting it.
+pub(crate) fn attempt_kiro_credits(credits: f64) {
+    if !credits.is_finite() || credits < 0.0 {
+        return;
+    }
+    let _ = CURRENT.try_with(|context| {
+        let mut record = context.lock();
+        let Some((attempt, previous)) = record.upstream_attempts.split_last_mut() else {
+            return;
+        };
+        let total = previous
+            .iter()
+            .filter_map(|attempt| attempt.kiro_credits)
+            .sum::<f64>()
+            + credits;
+        if total.is_finite() {
+            attempt.kiro_credits = Some(credits);
+            record.kiro_credits = Some(total);
+        }
+    });
 }
 
 /// Track raw upstream bytes independently of decoded content or downstream SSE pings.
@@ -516,7 +547,9 @@ impl LogStore {
             COALESCE(SUM(status='success'),0), COALESCE(SUM(status='error'),0),
             COALESCE(SUM(status='interrupted'),0), COALESCE(SUM(status='running'),0),
             COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),
-            COALESCE(AVG(CASE WHEN status!='running' THEN duration_ms END),0)
+            COALESCE(AVG(CASE WHEN status!='running' THEN duration_ms END),0),
+            SUM(json_extract(data, '$.kiroCredits')),
+            COUNT(json_extract(data, '$.kiroCredits'))
             FROM request_logs WHERE {filter}"
             ),
             params_from_iter(values.iter()),
@@ -525,7 +558,8 @@ impl LogStore {
                     json!({"total":row.get::<_,u64>(0)?, "success":row.get::<_,u64>(1)?,
                     "error":row.get::<_,u64>(2)?, "interrupted":row.get::<_,u64>(3)?,
                     "running":row.get::<_,u64>(4)?, "inputTokens":row.get::<_,u64>(5)?,
-                    "outputTokens":row.get::<_,u64>(6)?, "averageDurationMs":row.get::<_,f64>(7)?}),
+                    "outputTokens":row.get::<_,u64>(6)?, "averageDurationMs":row.get::<_,f64>(7)?,
+                    "kiroCredits":row.get::<_,Option<f64>>(8)?, "meteredRequests":row.get::<_,u64>(9)?}),
                 )
             },
         )?;

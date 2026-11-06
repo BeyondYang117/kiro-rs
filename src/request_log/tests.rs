@@ -66,6 +66,118 @@ impl Drop for TestStore {
     }
 }
 
+#[tokio::test]
+async fn kiro_metering_keeps_unknowns_separate_from_zero_in_filtered_summaries() {
+    let fixture = TestStore::new();
+    let context = Arc::new(Mutex::new(Record::new("POST", "/v1/messages")));
+    CURRENT
+        .scope(context.clone(), async {
+            attempt_kiro_credits(99.0); // No upstream attempt to attribute this to.
+            assert!(context.lock().kiro_credits.is_none());
+            attempt_started(1, "ide");
+            attempt_kiro_credits(0.125);
+            attempt_kiro_credits(0.25);
+            attempt_kiro_credits(0.25);
+            attempt_started(2, "ide"); // This call has no metering report.
+            attempt_started(3, "ide");
+            attempt_kiro_credits(0.5);
+            for invalid in [-1.0, f64::NAN, f64::INFINITY] {
+                attempt_kiro_credits(invalid);
+            }
+        })
+        .await;
+    let mut metered = context.lock().clone();
+    metered.model = Some("metered-model".into());
+    metered.status = "error".into();
+    assert_eq!(metered.kiro_credits, Some(0.75));
+    assert_eq!(metered.upstream_attempts[0].kiro_credits, Some(0.25));
+    assert!(metered.upstream_attempts[1].kiro_credits.is_none());
+    fixture.store.save(&metered).unwrap();
+
+    let mut unknown = Record::new("POST", "/v1/messages");
+    unknown.model = metered.model.clone();
+    unknown.status = "success".into();
+    fixture.store.save(&unknown).unwrap();
+    // A record written by an older version has no kiroCredits field at all.
+    fixture
+        .store
+        .connection
+        .lock()
+        .execute(
+            "UPDATE request_logs SET data=json_remove(data, '$.kiroCredits') WHERE id=?",
+            [&unknown.id],
+        )
+        .unwrap();
+
+    let mut zero = Record::new("POST", "/v1/messages");
+    zero.model = Some("zero-model".into());
+    zero.status = "interrupted".into();
+    zero.kiro_credits = Some(0.0);
+    fixture.store.save(&zero).unwrap();
+    let filtered = fixture
+        .store
+        .query(LogQuery {
+            model: metered.model,
+            page_size: Some(1),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(filtered["items"].as_array().unwrap().len(), 1);
+    assert_eq!(filtered["summary"]["total"], 2);
+    assert_eq!(filtered["summary"]["kiroCredits"], 0.75);
+    assert_eq!(filtered["summary"]["meteredRequests"], 1);
+    let zero_summary = fixture
+        .store
+        .query(LogQuery {
+            model: zero.model,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(zero_summary["summary"]["kiroCredits"], 0.0);
+    assert_eq!(zero_summary["summary"]["meteredRequests"], 1);
+    let unknown_summary = fixture
+        .store
+        .query(LogQuery {
+            status: Some("success".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(unknown_summary["summary"]["kiroCredits"].is_null());
+    assert_eq!(unknown_summary["summary"]["meteredRequests"], 0);
+    let old = fixture.record(&unknown.id).await;
+    assert!(old.kiro_credits.is_none());
+}
+
+#[tokio::test]
+async fn kiro_metering_survives_downstream_cancellation() {
+    let fixture = TestStore::new();
+    let app = Router::new()
+        .route(
+            "/v1/messages",
+            post(|| async {
+                attempt_started(176, "ide");
+                attempt_kiro_credits(0.125);
+                Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from_stream(futures::stream::pending::<
+                        Result<bytes::Bytes, std::io::Error>,
+                    >()))
+                    .unwrap()
+            }),
+        )
+        .layer(from_fn_with_state(fixture.store.clone(), middleware));
+    let response = app.oneshot(request("/v1/messages")).await.unwrap();
+    let id = response.headers()["x-request-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    drop(response);
+    let record = fixture.record(&id).await;
+    assert_eq!(record.status, "interrupted");
+    assert_eq!(record.kiro_credits, Some(0.125));
+    assert_eq!(record.upstream_attempts[0].kiro_credits, Some(0.125));
+}
+
 fn request(path: &str) -> Request<Body> {
     Request::builder().method("POST").uri(path).header("content-type", "application/json")
         .header("x-api-key", "test-api-key").body(Body::from(r#"{"model":"claude-sonnet-4-6","max_tokens":10,"messages":[{"role":"user","content":"private-prompt-sentinel"}]}"#)).unwrap()
@@ -589,6 +701,7 @@ fn completed_calls_cannot_be_overwritten_by_late_active_snapshots_and_filter_mat
         duration_ms: None,
         body_bytes: None,
         body_complete: None,
+        kiro_credits: None,
         started: None,
         response_diagnostics: None,
     }];

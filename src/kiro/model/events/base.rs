@@ -74,8 +74,10 @@ pub enum Event {
     AssistantResponse(super::AssistantResponseEvent),
     /// 工具使用
     ToolUse(super::ToolUseEvent),
-    /// 计费
-    Metering(()),
+    /// 本次上游请求上报的计费值；缺失、无效或其他单位不视为零点数。
+    Metering {
+        credits: Option<f64>,
+    },
     /// 上下文使用率
     ContextUsage(super::ContextUsageEvent),
     /// 原生推理内容
@@ -126,7 +128,17 @@ impl Event {
                 let payload = super::ToolUseEvent::from_frame(&frame)?;
                 Ok(Self::ToolUse(payload))
             }
-            EventType::Metering => Ok(Self::Metering(())),
+            EventType::Metering => {
+                // Metering is observational: malformed billing data must not fail generation.
+                let value: serde_json::Value = frame.payload_as_json().unwrap_or_default();
+                let credit_unit = value["unit"].as_str().is_some_and(|unit| {
+                    unit.eq_ignore_ascii_case("credit") || unit.eq_ignore_ascii_case("credits")
+                });
+                let credits = value["usage"]
+                    .as_f64()
+                    .filter(|usage| credit_unit && usage.is_finite() && *usage >= 0.0);
+                Ok(Self::Metering { credits })
+            }
             EventType::ContextUsage => {
                 let payload = super::ContextUsageEvent::from_frame(&frame)?;
                 Ok(Self::ContextUsage(payload))
