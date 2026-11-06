@@ -108,6 +108,60 @@ mod tests {
     use tower::ServiceExt;
 
     #[tokio::test]
+    async fn stop_sequences_defaults_pass_validation_on_both_message_routes() {
+        use axum::body::to_bytes;
+        use serde_json::{Value, json};
+
+        let app = create_router_with_provider("test-key", None, true, true);
+        for path in ["/v1/messages", "/cc/v1/messages"] {
+            for stream in [false, true] {
+                for (stop_sequences, error) in [
+                    (None, None),
+                    (Some(Value::Null), None),
+                    (Some(json!([])), None),
+                    (Some(json!(["STOP"])), Some("Non-empty stop_sequences")),
+                    (Some(json!("STOP")), Some("stop_sequences must be")),
+                    (Some(json!([42])), Some("stop_sequences must be")),
+                ] {
+                    let mut payload = json!({
+                        "model": "claude-opus-5-5", "max_tokens": 1024,
+                        "messages": [{"role": "user", "content": "hi"}], "stream": stream
+                    });
+                    if let Some(value) = stop_sequences {
+                        payload["stop_sequences"] = value;
+                    }
+                    let response = app
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .method("POST")
+                                .uri(path)
+                                .header("x-api-key", "test-key")
+                                .header("content-type", "application/json")
+                                .body(Body::from(payload.to_string()))
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    let status = response.status();
+                    let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+                    let body: Value = serde_json::from_slice(&bytes).unwrap();
+                    if let Some(error) = error {
+                        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {body}");
+                        assert_eq!(body["error"]["type"], "invalid_request_error");
+                        assert!(body["error"]["message"].as_str().unwrap().contains(error));
+                    } else {
+                        // No provider is configured: reaching this error proves both
+                        // outer and inner request validation accepted the default.
+                        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}: {body}");
+                        assert_eq!(body["error"]["message"], "Kiro API provider not configured");
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn endpoint_groups_share_capacity_and_authentication_precedes_admission() {
         let config: Config = serde_json::from_value(serde_json::json!({
             "requestLimits": {"maxConcurrentRequests": 1}

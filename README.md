@@ -554,6 +554,8 @@ claude --model claude-haiku-5-5 --effort high
 
 当前 `max_tokens` 仅用于本地响应/压缩处理，没有映射到 Kiro 的原生生成上限字段；输出仍由 Kiro 模型策略决定，达到上游长度限制时会返回 `max_tokens` stop reason。`tool_choice`、temperature、top_p、stop_sequences 和 JSON schema 输出也尚未映射到已确认的 Kiro 原生字段。
 
+`stop_sequences` 可省略、设为 `null` 或空数组 `[]`，均表示不设置自定义停止序列；非空数组仍返回 `400 invalid_request_error`，需要客户端移除此参数。此规则同时适用于 `/v1/messages` 和 `/cc/v1/messages` 的流式及非流式请求。
+
 原生 Claude 请求示例：
 
 ```json
