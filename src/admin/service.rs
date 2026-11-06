@@ -61,6 +61,12 @@ pub struct AdminService {
 }
 
 impl AdminService {
+    pub(super) async fn latest_kiro_version(
+        &self,
+    ) -> Result<super::kiro_version::LatestVersion, AdminServiceError> {
+        super::kiro_version::latest(self.token_manager.config()).await
+    }
+
     pub(super) fn read_client_keys(
         &self,
     ) -> Result<super::client_keys::KeysResponse, AdminServiceError> {

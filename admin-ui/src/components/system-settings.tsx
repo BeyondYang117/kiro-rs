@@ -13,7 +13,9 @@ import {
 import { toast } from 'sonner'
 import {
   getSettings,
+  getLatestKiroVersion,
   saveSettings,
+  type LatestKiroVersion,
   type SettingsResponse,
   type SystemSettings,
 } from '@/api/settings'
@@ -249,6 +251,20 @@ const groups: {
     ],
   },
   {
+    id: 'kiro-version',
+    title: 'Kiro 版本',
+    description:
+      '检查官方稳定版并更新上游请求使用的版本标识，保存后重启服务生效。',
+    fields: [
+      {
+        path: 'kiroVersion',
+        label: 'Kiro 版本标识',
+        help: '格式为 major.minor.patch，例如 1.4.121。可手动指定版本以回退兼容性。',
+        type: 'text',
+      },
+    ],
+  },
+  {
     id: 'upstream',
     title: '上游基础配置',
     description: '区域覆盖项留空时使用默认区域。账号自己的区域设置仍然优先。',
@@ -348,6 +364,10 @@ export function SystemSettingsPage({
   const [draft, setDraft] = useState<SystemSettings | null>(null)
   const [saving, setSaving] = useState(false)
   const [keysBusy, setKeysBusy] = useState(false)
+  const [checkingVersion, setCheckingVersion] = useState(false)
+  const [latestVersion, setLatestVersion] = useState<LatestKiroVersion | null>(
+    null
+  )
   const [conflict, setConflict] = useState(false)
   const [activeGroup, setActiveGroup] = useState(groups[0].id)
   const dirty = Boolean(
@@ -423,6 +443,60 @@ export function SystemSettingsPage({
       if ((error as { response?: { status: number } }).response?.status === 409)
         setConflict(true)
       toast.error(`保存失败：${extractErrorMessage(error)}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+  const checkVersion = async () => {
+    setCheckingVersion(true)
+    try {
+      setLatestVersion(await getLatestKiroVersion())
+    } catch (error) {
+      setLatestVersion(null)
+      toast.error(`检查版本失败：${extractErrorMessage(error)}`)
+    } finally {
+      setCheckingVersion(false)
+    }
+  }
+  const updateVersion = async () => {
+    if (
+      !snapshot ||
+      dirty ||
+      saving ||
+      checkingVersion ||
+      conflict ||
+      !snapshot.canSave
+    )
+      return
+    setSaving(true)
+    try {
+      // 每次更新重新检查，避免把页面上过期的版本写回配置。
+      const latest = await getLatestKiroVersion()
+      setLatestVersion(latest)
+      const savedParts = snapshot.settings.kiroVersion.split('.').map(Number)
+      const latestParts = latest.latestVersion.split('.').map(Number)
+      const differingPart = latestParts.findIndex(
+        (part, index) => part !== savedParts[index]
+      )
+      if (
+        differingPart === -1 ||
+        latestParts[differingPart] < savedParts[differingPart]
+      ) {
+        toast.info('已保存的版本已是最新或更高版本，无需更新')
+        return
+      }
+      const result = await saveSettings(
+        { ...snapshot.settings, kiroVersion: latest.latestVersion },
+        snapshot.revision
+      )
+      setSnapshot(result)
+      setDraft(result.settings)
+      client.setQueryData(['system-settings'], result)
+      toast.success(`版本配置已更新为 ${latest.latestVersion}，重启服务后生效`)
+    } catch (error) {
+      if ((error as { response?: { status: number } }).response?.status === 409)
+        setConflict(true)
+      toast.error(`更新版本配置失败：${extractErrorMessage(error)}`)
     } finally {
       setSaving(false)
     }
@@ -572,6 +646,91 @@ export function SystemSettingsPage({
                         </p>
                       </CardHeader>
                       <CardContent className="grid gap-x-6 gap-y-6 lg:grid-cols-2">
+                        {item.id === 'kiro-version' && (
+                          <div
+                            className="space-y-4 rounded-lg border p-4 lg:col-span-2"
+                            aria-live="polite"
+                          >
+                            <dl className="grid gap-3 text-sm sm:grid-cols-3">
+                              <div>
+                                <dt className="text-muted-foreground">
+                                  当前运行版本
+                                </dt>
+                                <dd className="mt-1 font-mono">
+                                  {snapshot.running.kiroVersion}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt className="text-muted-foreground">
+                                  已保存版本
+                                </dt>
+                                <dd className="mt-1 font-mono">
+                                  {snapshot.settings.kiroVersion}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt className="text-muted-foreground">
+                                  官方最新稳定版
+                                </dt>
+                                <dd className="mt-1 font-mono">
+                                  {latestVersion?.latestVersion ?? '尚未检查'}
+                                </dd>
+                              </div>
+                            </dl>
+                            {latestVersion && (
+                              <p className="text-xs text-muted-foreground">
+                                {latestVersion.publishedAt &&
+                                  `发布日期：${latestVersion.publishedAt} · `}
+                                检查时间：
+                                {new Date(
+                                  latestVersion.checkedAt
+                                ).toLocaleString()}
+                                {' · '}
+                                <a
+                                  href={latestVersion.sourceUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="underline"
+                                >
+                                  官方更新源
+                                </a>
+                              </p>
+                            )}
+                            <div className="flex flex-wrap gap-3">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                disabled={checkingVersion || saving}
+                                onClick={checkVersion}
+                              >
+                                <RefreshCw
+                                  className={`mr-2 h-4 w-4 ${checkingVersion ? 'animate-spin' : ''}`}
+                                />
+                                {checkingVersion ? '正在检查…' : '检查最新版本'}
+                              </Button>
+                              <Button
+                                type="button"
+                                disabled={
+                                  dirty ||
+                                  saving ||
+                                  checkingVersion ||
+                                  conflict ||
+                                  !snapshot.canSave
+                                }
+                                onClick={updateVersion}
+                              >
+                                {saving ? '正在更新…' : '一键更新版本配置'}
+                              </Button>
+                            </div>
+                            <p className="text-xs leading-relaxed text-muted-foreground">
+                              {dirty
+                                ? '请先保存或撤销当前修改，再一键更新版本配置。'
+                                : '更新时重新查询官方稳定版，仅在版本更高时保存。'}{' '}
+                              更新版本标识不会安装 Kiro IDE 或升级 kiro-rs
+                              程序；新模型和协议支持仍需更新程序。
+                            </p>
+                          </div>
+                        )}
                         {item.fields.map((field) => {
                           const value = getValue(draft, field.path)
                           const pending = snapshot.restartRequired.includes(
@@ -651,7 +810,13 @@ export function SystemSettingsPage({
                                   step={field.type === 'text' ? undefined : 1}
                                   required={
                                     field.type !== 'text' ||
-                                    field.path === 'region'
+                                    field.path === 'region' ||
+                                    field.path === 'kiroVersion'
+                                  }
+                                  pattern={
+                                    field.path === 'kiroVersion'
+                                      ? '(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)'
+                                      : undefined
                                   }
                                   disabled={saving || !snapshot.canSave}
                                   aria-describedby={`${field.path}-help`}

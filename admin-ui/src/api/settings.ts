@@ -1,6 +1,7 @@
 import { api } from './credentials'
 
 export interface SystemSettings {
+  kiroVersion: string
   region: string
   authRegion: string | null
   apiRegion: string | null
@@ -33,6 +34,21 @@ export interface SystemSettings {
   toolOutputRecoveryAttempts: number
   countTokensTimeoutSeconds: number
   requestLogRetentionDays: number
+}
+
+export interface LatestKiroVersion {
+  latestVersion: string
+  publishedAt: string | null
+  checkedAt: string
+  sourceUrl: string
+}
+
+export async function getLatestKiroVersion(): Promise<LatestKiroVersion> {
+  return (
+    await api.get<LatestKiroVersion>('/settings/kiro-version', {
+      timeout: 20000,
+    })
+  ).data
 }
 
 export interface SettingsResponse {

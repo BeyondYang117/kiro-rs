@@ -6,7 +6,7 @@
 
 | 项目 | 行为 |
 |------|------|
-| 客户端版本标识 | 默认 Kiro 版本更新为 1.4.86，Streaming SDK 标识更新为 1.0.44；显式 `kiroVersion` 仍优先 |
+| 客户端版本标识 | 默认 Kiro 版本更新为官方稳定版 1.4.121（2026-11-06），Streaming SDK 标识更新为 1.0.44；显式 `kiroVersion` 仍优先 |
 | 原生生成上限 | 启用原生模式后传递 `additionalModelRequestFields.max_tokens`；旧协议模式仍不发送原生字段 |
 | 新版 Claude thinking | 原生模式将支持 adaptive 的模型的 `enabled` 转为 `adaptive`，移除固定预算；4.5 系列保留 budgeted thinking |
 | Sonnet 5.5 | 支持 `between_tools`；兼容 `disabled` 请求并转为 `between_tools`，该设置仅接受 low / medium / high effort |
@@ -30,6 +30,14 @@
 该开关控制原生模型参数及 reasoning 历史传输。默认仍是旧协议模式；旧协议中的 thinking/effort 使用提示词引导，`thinking.display` 和原生 `max_tokens` 仅在原生模式传输。启用后，上游按所选模型 schema 校验生成上限；不自动夹取请求值或改变账号、区域。模型能力列表是本地兼容表，不代表当前凭据实际拥有对应授权。
 
 用量按单次生成快照更新，缺失字段不覆盖已有数值，重复事件不累加。明确上报 0 时保留 0；负数、小数、溢出及非数字忽略。`uncachedInputTokens` 对应 Anthropic `input_tokens`，缓存读写单列；不使用 `totalTokens` 或 `normalizedTokenUsage` 替代。实时 SSE 的 `message_start` 仍先返回估值，最终用量在 `message_delta`；缓冲 SSE 会更正 `message_start` 中的输入及缓存数。已有 Kiro credits 计费记录继续取自 `meteringEvent`，与 token 计数分开。
+
+## 版本检查与一键更新
+
+系统设置 → **Kiro 版本** 可查看运行版本、已保存版本与官方最新稳定版。“检查最新版本”读取官方公开更新源；“一键更新版本配置”会重新检查版本，仅在版本更高时保存 `kiroVersion`，重启服务后生效。手动指定版本并保存可回退。存在未保存修改时需先保存或撤销，再使用一键更新。
+
+检查 API：`GET /api/admin/settings/kiro-version`，需要管理员认证，返回 `latestVersion`、`publishedAt`、`checkedAt` 与 `sourceUrl`。版本标识与操作系统无关，固定读取 [官方 Linux x64 稳定版元数据](https://prod.download.desktop.kiro.dev/stable/metadata-linux-x64-stable.json)，本次同时核对 macOS ARM64、Windows x64 均为 1.4.121。检查使用运行中的全局代理与 TLS 配置，有超时和响应大小限制；失败时不回写默认版本。
+
+保存沿用 `PUT /api/admin/settings` 的版本冲突校验和配置持久化，保留密钥与未纳入管理的字段。不下载或安装 Kiro IDE，也不替换 kiro-rs 程序。升级版本标识不等于实现新模型或新协议；协议适配依据仍为上述本机 1.4.86 的静态代码，1.4.121 尚未进行真实账号调用验证。
 
 ## 已核对但未接入的范围
 

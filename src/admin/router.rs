@@ -29,6 +29,7 @@ use super::{
 /// - `PUT /config/load-balancing` - 设置负载均衡模式
 /// - `GET /settings` - 系统设置、运行值及待重启项
 /// - `PUT /settings` - 校验并保存系统设置
+/// - `GET /settings/kiro-version` - 查询 Kiro 官方最新稳定版本
 /// - `GET /client-keys` - 查看脱敏调用密钥及生效状态
 /// - `POST /client-keys` - 生成或添加调用密钥
 /// - `DELETE /client-keys/{id}` - 删除调用密钥（重启生效）
@@ -48,6 +49,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
             "/settings",
             get(super::handlers::get_system_settings).put(super::handlers::save_system_settings),
         )
+        .route("/settings/kiro-version", get(super::kiro_version::check))
         .route("/logs", get(crate::request_log::list))
         .route("/logs/{id}", get(crate::request_log::detail))
         .route(

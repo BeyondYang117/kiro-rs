@@ -25,6 +25,7 @@ macro_rules! settings {
 }
 
 settings! {
+    kiro_version: String,
     region: String,
     auth_region: Option<String>,
     api_region: Option<String>,
@@ -127,6 +128,10 @@ fn validate_shape(value: &Value, template: &Value, prefix: &str) -> Result<(), A
 impl SystemSettings {
     fn validate(&self, endpoints: &HashSet<String>) -> Result<(), AdminServiceError> {
         let check = || -> anyhow::Result<()> {
+            anyhow::ensure!(
+                super::kiro_version::valid_version(&self.kiro_version),
+                "kiroVersion 必须是 major.minor.patch 格式的版本号"
+            );
             crate::common::region::validate("region", &self.region)?;
             for (name, region) in [
                 ("authRegion", &self.auth_region),
@@ -397,12 +402,71 @@ mod tests {
             );
         }
         let response = fixture.get().await;
+        assert_eq!(
+            fixture
+                .call("GET", "/settings/kiro-version", Value::Null, false)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(response["settings"]["kiroVersion"], "1.4.121");
         assert_eq!(response["settings"]["concurrency"]["maxInFlight"], 64);
         assert_eq!(response["defaults"]["requestLogRetentionDays"], 30);
         assert_eq!(response["canSave"], true);
         assert_eq!(response["restartRequired"], serde_json::json!([]));
         assert!(response["settings"].get("apiKey").is_none());
         assert!(response["settings"].get("apiKeys").is_none());
+    }
+
+    #[tokio::test]
+    async fn version_updates_preserve_other_settings_and_require_restart() {
+        let fixture = Fixture::new();
+        let first = fixture.get().await;
+        let mut settings = first["settings"].clone();
+        settings["kiroVersion"] = "1.4.122".into();
+        let (status, saved) = fixture
+            .call(
+                "PUT",
+                "/settings",
+                serde_json::json!({
+                    "revision":first["revision"], "settings":settings
+                }),
+                true,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(saved["settings"]["kiroVersion"], "1.4.122");
+        assert_eq!(saved["running"]["kiroVersion"], "1.4.121");
+        assert_eq!(saved["restartRequired"], serde_json::json!(["kiroVersion"]));
+        assert_eq!(
+            Config::load(fixture.path()).unwrap().kiro_version,
+            "1.4.122"
+        );
+        let document: Value =
+            serde_json::from_slice(&std::fs::read(fixture.path()).unwrap()).unwrap();
+        assert_eq!(document["apiKey"], "private-api-key");
+        assert_eq!(
+            document["endpoints"]["ide"]["customSecret"],
+            "private-endpoint-secret"
+        );
+        assert_eq!(
+            saved["settings"]["concurrency"],
+            first["settings"]["concurrency"]
+        );
+        assert_eq!(
+            fixture
+                .call(
+                    "PUT",
+                    "/settings",
+                    serde_json::json!({
+                        "revision":first["revision"], "settings":first["settings"]
+                    }),
+                    true
+                )
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
     }
 
     #[tokio::test]
@@ -486,6 +550,12 @@ mod tests {
         let before = std::fs::read(fixture.path()).unwrap();
         let mut candidates = Vec::new();
         for (path, value) in [
+            (
+                vec!["kiroVersion"],
+                Value::from("1.4.121\r\nx-header: value"),
+            ),
+            (vec!["kiroVersion"], Value::from("")),
+            (vec!["kiroVersion"], Value::from("1.2.3-beta")),
             (vec!["region"], Value::from("private-host/path")),
             (vec!["loadBalancingMode"], Value::from("unsupported")),
             (vec!["defaultEndpoint"], Value::from("unregistered")),

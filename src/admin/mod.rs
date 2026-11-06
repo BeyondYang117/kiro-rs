@@ -20,6 +20,7 @@ mod client_keys;
 mod error;
 pub(crate) mod extract;
 mod handlers;
+mod kiro_version;
 mod middleware;
 mod router;
 mod service;

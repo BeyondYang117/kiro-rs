@@ -206,7 +206,7 @@ docker login -u abu116
 | `region` | string | `us-east-1` | AWS 区域 |
 | `authRegion` | string | - | Auth Region（用于 Token 刷新），未配置时回退到 region |
 | `apiRegion` | string | - | API Region（用于 API 请求），未配置时回退到 region |
-| `kiroVersion` | string | `1.4.86` | Kiro 版本号 |
+| `kiroVersion` | string | `1.4.121` | Kiro 请求版本标识，可在系统设置检查并更新 |
 | `machineId` | string | - | 自定义机器码（64位十六进制），不定义则自动生成 |
 | `systemVersion` | string | 当前运行平台 | 系统标识，默认 `darwin` / `win32` / `linux` 等；可显式配置完整版本 |
 | `nodeVersion` | string | `22.21.1` | Node.js 版本标识 |
@@ -274,7 +274,7 @@ docker login -u abu116
    "apiKey": "sk-kiro-rs-qazWSXedcRFV123456",
    "region": "us-east-1",
    "tlsBackend": "rustls",
-   "kiroVersion": "1.4.86",
+   "kiroVersion": "1.4.121",
    "machineId": "64位十六进制机器码",
    "systemVersion": "darwin#24.6.0",
    "nodeVersion": "22.21.1",
@@ -657,6 +657,7 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
   - `GET /api/admin/credentials/:id/balance` - 获取凭据余额
   - `GET /api/admin/settings` - 获取系统设置、当前运行值、默认值及待重启项
   - `PUT /api/admin/settings` - 校验并保存系统设置
+  - `GET /api/admin/settings/kiro-version` - 查询 Kiro 官方最新稳定版
   - `GET /api/admin/client-keys` - 查看脱敏调用密钥和生效状态
   - `POST /api/admin/client-keys` - 生成或添加调用密钥
   - `DELETE /api/admin/client-keys/{id}` - 删除调用密钥（重启生效）
@@ -673,6 +674,7 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
 - **请求与响应限制**：客户端并发、上游尝试次数、总超时、首内容及空闲超时、响应字节数与事件数。
 - **会话亲和**：开关、绑定有效期、最大绑定数。
 - **响应处理与日志**：Claude Code 流式缓冲、思考内容提取、工具输出恢复次数、远程 Token 计数超时、调用日志保留天数。
+- **Kiro 版本**：展示运行、已保存和官方最新稳定版本；支持检查版本、一键更新版本配置及手动回退。更新后重启生效，不安装 IDE 或升级代理程序。
 - **上游基础配置**：默认区域、认证/API 区域覆盖、默认端点、TLS 后端。
 
 负载均衡模式保存后立即生效，其他参数保存到启动时指定的配置文件，**重启服务后生效**。页面会标注待重启项及其当前运行值；保存当前运行值可以取消该项待生效修改。保存不会主动重启服务，也不会中断在途请求。恢复本组默认值、撤销修改只影响表单，点击“保存设置”后才会写入。日志保留期缩短后，重启时会按新期限清理记录。
