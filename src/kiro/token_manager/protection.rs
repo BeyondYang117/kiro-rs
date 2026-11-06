@@ -27,8 +27,9 @@ impl std::error::Error for RefreshDeferred {}
 impl MultiTokenManager {
     pub(super) fn protection_remaining_ms(&self, entry: &CredentialEntry) -> u64 {
         let remaining = self.protection_remaining(entry);
-        (remaining.as_millis().min(u64::MAX as u128) as u64)
-            .saturating_add(u64::from(remaining.subsec_nanos() % 1_000_000 != 0))
+        (remaining.as_millis().min(u64::MAX as u128) as u64).saturating_add(u64::from(
+            !remaining.subsec_nanos().is_multiple_of(1_000_000),
+        ))
     }
 
     pub(super) fn protection_remaining(&self, entry: &CredentialEntry) -> StdDuration {

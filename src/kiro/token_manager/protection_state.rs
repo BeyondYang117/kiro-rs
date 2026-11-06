@@ -83,8 +83,9 @@ fn remaining_ms(state: Option<(Instant, StdDuration)>, now: Instant) -> u64 {
         .map(|(start, duration)| duration.saturating_sub(now.saturating_duration_since(start)))
         .unwrap_or_default();
     // Round deadlines up so a restart cannot shorten a protection interval.
-    (duration.as_millis().min(u64::MAX as u128) as u64)
-        .saturating_add(u64::from(duration.subsec_nanos() % 1_000_000 != 0))
+    (duration.as_millis().min(u64::MAX as u128) as u64).saturating_add(u64::from(
+        !duration.subsec_nanos().is_multiple_of(1_000_000),
+    ))
 }
 
 impl ProtectionState {
