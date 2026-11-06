@@ -12,6 +12,6 @@ mod tool_use;
 pub use assistant::AssistantResponseEvent;
 pub use base::Event;
 pub use context_usage::ContextUsageEvent;
-pub use metadata::MetadataEvent;
+pub use metadata::{MetadataEvent, ReportedUsage};
 pub use reasoning_content::ReasoningContentEvent;
 pub use tool_use::ToolUseEvent;

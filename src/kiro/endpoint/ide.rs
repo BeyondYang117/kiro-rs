@@ -32,14 +32,14 @@ impl IdeEndpoint {
 
     fn x_amz_user_agent(&self, ctx: &RequestContext<'_>) -> String {
         format!(
-            "aws-sdk-js/1.0.34 KiroIDE-{}-{}",
+            "aws-sdk-js/1.0.44 KiroIDE-{}-{}",
             ctx.config.kiro_version, ctx.machine_id
         )
     }
 
     fn user_agent(&self, ctx: &RequestContext<'_>) -> String {
         format!(
-            "aws-sdk-js/1.0.34 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererstreaming#1.0.34 m/E KiroIDE-{}-{}",
+            "aws-sdk-js/1.0.44 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererstreaming#1.0.44 m/E KiroIDE-{}-{}",
             ctx.config.system_version,
             ctx.config.node_version,
             ctx.config.kiro_version,
@@ -115,11 +115,43 @@ impl KiroEndpoint for IdeEndpoint {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
         if native_thinking {
-            body
+            native_model_body(&body)
         } else {
             legacy_thinking_body(&body)
         }
     }
+}
+
+/// Normalize compatibility controls only for native Kiro model schemas.
+fn native_model_body(body: &str) -> String {
+    use serde_json::Value;
+    let Ok(mut request) = serde_json::from_str::<Value>(body) else {
+        return body.to_owned();
+    };
+    let model = request
+        .pointer("/conversationState/currentMessage/userInputMessage/modelId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if let Some(thinking) = request.pointer_mut("/additionalModelRequestFields/thinking") {
+        let kind = thinking.get("type").and_then(Value::as_str);
+        let normalized = match kind {
+            Some("disabled") if model == "claude-sonnet-5.5" => Some("between_tools"),
+            Some("enabled") if model.starts_with("claude-") && !model.ends_with("4.5") => {
+                Some("adaptive")
+            }
+            _ => None,
+        };
+        if let Some(kind) = normalized {
+            thinking["type"] = kind.into();
+        }
+        if thinking["type"] != "enabled"
+            && let Some(object) = thinking.as_object_mut()
+        {
+            object.remove("budget_tokens");
+        }
+    }
+    serde_json::to_string(&request).unwrap_or_else(|_| body.to_owned())
 }
 
 /// Keep the established q.amazonaws.com wire format by default. Native model
@@ -142,6 +174,7 @@ fn legacy_thinking_body(body: &str) -> String {
                     .unwrap_or(20_000).min(24_576)
             ),
             Some("adaptive") => "<thinking_mode>adaptive</thinking_mode>".to_owned(),
+            Some("between_tools") => "<thinking_mode>between_tools</thinking_mode>".to_owned(),
             _ => String::new(),
         };
         // Effort applies to the whole response, independently of thinking mode.
@@ -327,8 +360,50 @@ mod tests {
                     assert!(prefix.contains("<max_thinking_length>1234</max_thinking_length>"));
                 }
                 let native = transform(body.clone(), true);
-                assert_eq!(native["additionalModelRequestFields"], fields);
+                let mut expected = fields.clone();
+                if let Some(kind) = thinking {
+                    expected["thinking"] = json!({"type":match kind {
+                        "disabled" => "between_tools",
+                        "enabled" => "adaptive",
+                        kind => kind,
+                    }});
+                }
+                assert_eq!(native["additionalModelRequestFields"], expected);
                 assert_eq!(native["conversationState"], body["conversationState"]);
+            }
+        }
+    }
+
+    #[test]
+    fn native_controls_preserve_limits_visibility_and_budgeted_legacy_models() {
+        for (model, kind, expected) in [
+            ("claude-sonnet-5.5", "disabled", "between_tools"),
+            ("claude-sonnet-5.5", "between_tools", "between_tools"),
+            ("claude-opus-5.5", "enabled", "adaptive"),
+            ("claude-opus-4.7", "enabled", "adaptive"),
+            ("claude-haiku-4.5", "enabled", "enabled"),
+        ] {
+            let body = json!({"conversationState":{"currentMessage":{"userInputMessage":{
+                "modelId":model,"content":"hi"}}}, "additionalModelRequestFields":{
+                "max_tokens":4096, "thinking":{"type":kind,"budget_tokens":2048,"display":"omitted"},
+                "output_config":{"effort":"high"}}});
+            let native = transform(body.clone(), true);
+            let fields = &native["additionalModelRequestFields"];
+            assert_eq!(fields["max_tokens"], 4096);
+            assert_eq!(fields["thinking"]["type"], expected);
+            assert_eq!(fields["thinking"]["display"], "omitted");
+            assert_eq!(
+                fields["thinking"].get("budget_tokens").is_some(),
+                expected == "enabled"
+            );
+            let legacy = transform(body, false);
+            assert!(legacy.get("additionalModelRequestFields").is_none());
+            if kind == "enabled" {
+                assert!(
+                    legacy
+                        .to_string()
+                        .contains("<max_thinking_length>2048</max_thinking_length>")
+                );
             }
         }
     }

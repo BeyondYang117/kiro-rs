@@ -27,7 +27,7 @@
 因 TLS 默认从 native-tls 切换至 rustls，你可能需要专门安装证书后才能配置 HTTP 代理。可通过 `config.json` 的 `tlsBackend` 切回 `native-tls`。
 如果遇到请求报错, 尤其是无法刷新 token, 或者是直接返回 error request, 请尝试切换 tls 后端为 `native-tls`, 一般即可解决。
 
-**Write Failed/会话卡死**: 已增加分块写入提示与工具参数校验，详见下方[大文件写入与截断处理](#大文件写入与截断处理)。上游仍可能截断长输出；`max_tokens` 未映射到 Kiro 的原生生成上限，调低它不能保证避免截断。历史讨论见 Issue [#22](https://github.com/hank9999/kiro.rs/issues/22)（包含 Windows 路径问题）和 [#49](https://github.com/hank9999/kiro.rs/issues/49)（长输出截断）。
+**Write Failed/会话卡死**: 已增加分块写入提示与工具参数校验，详见下方[大文件写入与截断处理](#大文件写入与截断处理)。上游仍可能截断长输出；默认旧协议模式未映射原生 `max_tokens`，调低它不能保证避免截断；原生模式会传递该参数，见下文 Thinking 模式。历史讨论见 Issue [#22](https://github.com/hank9999/kiro.rs/issues/22)（包含 Windows 路径问题）和 [#49](https://github.com/hank9999/kiro.rs/issues/49)（长输出截断）。
 
 ## 功能特性
 
@@ -151,7 +151,7 @@ curl http://127.0.0.1:8990/v1/messages \
   -H "Content-Type: application/json" \
   -H "x-api-key: sk-kiro-rs-qazWSXedcRFV123456" \
   -d '{
-    "model": "claude-sonnet-4-20250514",
+    "model": "claude-sonnet-5-5",
     "max_tokens": 1024,
     "stream": true,
     "messages": [
@@ -206,7 +206,7 @@ docker login -u abu116
 | `region` | string | `us-east-1` | AWS 区域 |
 | `authRegion` | string | - | Auth Region（用于 Token 刷新），未配置时回退到 region |
 | `apiRegion` | string | - | API Region（用于 API 请求），未配置时回退到 region |
-| `kiroVersion` | string | `0.9.2` | Kiro 版本号 |
+| `kiroVersion` | string | `1.4.86` | Kiro 版本号 |
 | `machineId` | string | - | 自定义机器码（64位十六进制），不定义则自动生成 |
 | `systemVersion` | string | 当前运行平台 | 系统标识，默认 `darwin` / `win32` / `linux` 等；可显式配置完整版本 |
 | `nodeVersion` | string | `22.21.1` | Node.js 版本标识 |
@@ -274,7 +274,7 @@ docker login -u abu116
    "apiKey": "sk-kiro-rs-qazWSXedcRFV123456",
    "region": "us-east-1",
    "tlsBackend": "rustls",
-   "kiroVersion": "0.9.2",
+   "kiroVersion": "1.4.86",
    "machineId": "64位十六进制机器码",
    "systemVersion": "darwin#24.6.0",
    "nodeVersion": "22.21.1",
@@ -562,7 +562,7 @@ Kiro 没有原生 Anthropic 压缩接口，摘要由代理额外调用当前模�
 
 支持 Claude Code 的标准强度字段 `output_config.effort`，无需给模型名加 `-thinking`。强度会独立转换为 `<thinking_effort>` 提示词；仅传 effort、使用固定预算 thinking 或显式关闭 thinking 时也会保留强度，不会因为 effort 自动开启思考输出。当前支持的级别按模型校验，不支持的值返回 `400 invalid_request_error`。
 
-当 `thinking.type` 为 `adaptive`（包括 `-thinking` 别名自动启用）且没有传非空 effort 时，默认值为：Haiku 5.5、Sonnet 5.5、Opus 5.5 使用 `medium`，Opus 4.7 使用 `xhigh`，其余使用 `high`。显式 effort 始终优先。完全不传 thinking/effort 且没有使用 `-thinking` 别名时，代理不添加控制参数，沿用 Kiro 自身行为。`enabled` 未传 `budget_tokens` 时默认 20000，默认 IDE 提示词预算最多 24576。
+当 `thinking.type` 为 `adaptive`（包括 `-thinking` 别名自动启用）且没有传非空 effort 时，默认值为：Haiku 5.5、Sonnet 5.5、Opus 5.5 使用 `medium`，Opus 4.7 使用 `xhigh`，其余使用 `high`。显式 effort 始终优先。完全不传 thinking/effort 且没有使用 `-thinking` 别名时，代理沿用 Kiro 自身的 thinking/effort 默认行为。`enabled` 未传 `budget_tokens` 时默认 20000，默认 IDE 提示词预算最多 24576。
 
 Claude Code 可直接连接 `/cc` 前缀（客户端会追加 `/v1/messages`），例如：
 
@@ -574,11 +574,11 @@ claude --model claude-haiku-5-5 --effort high
 
 会话内可用 `/effort` 调整强度，也可通过 `CLAUDE_CODE_EFFORT_LEVEL=high` 设置。客户端需升级到支持所选模型及 effort 的版本；Haiku 5.5 需要 Claude Code v2.1.293 或更高。参数格式与客户端设置参考 [Anthropic effort 文档](https://platform.claude.com/docs/en/build-with-claude/effort)及 [Claude Code 模型配置](https://code.claude.com/docs/en/model-config#adjust-effort-level)。
 
-只有验证过当前 Kiro 账号、区域支持原生参数后，才设置 `"endpoints":{"ide":{"nativeThinking":true}}`。此模式通过 `additionalModelRequestFields` 传递 thinking/effort；`enabled` 会同时传递 `budget_tokens`，是否接受由上游模型 schema 决定。历史签名按 `reasoningContent.reasoningText.{text,signature}` 传递，加密块按 `reasoningContent.redactedContent` 传递；不拼接多个签名对应的文本。该模式尚未经过真实 Kiro 调用验证。
+只有验证过当前 Kiro 账号、区域支持原生参数后，才设置 `"endpoints":{"ide":{"nativeThinking":true}}`。此模式通过 `additionalModelRequestFields` 传递 `max_tokens`、thinking 和 effort。支持 adaptive 的新版 Claude 会把兼容请求中的 `enabled` 转为 `adaptive` 并移除固定预算；旧版 4.5 模型仍传 `enabled` 和 `budget_tokens`。Sonnet 5.5 的 `disabled` 会转为原生 `between_tools`，该模式仅允许 `low` / `medium` / `high` effort；也可直接传 `thinking.type: "between_tools"`。`thinking.display` 支持 `summarized` / `omitted`，原样传给上游。历史签名按 `reasoningContent.reasoningText.{text,signature}` 传递，加密块按 `reasoningContent.redactedContent` 传递；不拼接多个签名对应的文本。该模式尚未经过真实 Kiro 调用验证。
 
-上下文窗口使用项目内维护的模型映射：已确认的 1M 模型会在 `GET /v1/models` 的 `max_input_tokens` 和 `GET /v1/models/{model_id}` 中声明 1,000,000。运行时 Kiro `contextUsageEvent` 只提供百分比，响应 `input_tokens` 是按窗口换算的估值；未收到事件时回退到本地 token 估算。上游拒绝 1M 请求时，代理无法扩展 Kiro 账号或模型本身的限制。
+上下文窗口使用项目内维护的模型映射：已确认的 1M 模型会在 `GET /v1/models` 的 `max_input_tokens` 和 `GET /v1/models/{model_id}` 中声明 1,000,000。新版 Kiro `metadataEvent.tokenUsage` 上报用量时，优先返回 `uncachedInputTokens`、`outputTokens` 和缓存读写数；缓存字段分别映射为 `cache_read_input_tokens` / `cache_creation_input_tokens`。重复 metadata 视为快照更新，不累加；缺失或无效的计数保留已有有效值。没有上报的输入数仍按 `contextUsageEvent` 百分比换算，没有该事件则回退本地估算；输出数未上报时使用本地估算。JSON、实时 SSE、`/cc` 缓冲 SSE 和摘要均使用此规则，摘要的缓存用量保留在 `usage.iterations` 中。上游拒绝 1M 请求时，代理无法扩展 Kiro 账号或模型本身的限制。
 
-当前 `max_tokens` 仅用于本地响应/压缩处理，没有映射到 Kiro 的原生生成上限字段；输出仍由 Kiro 模型策略决定，达到上游长度限制时会返回 `max_tokens` stop reason。`tool_choice`、temperature、top_p、stop_sequences 和 JSON schema 输出也尚未映射到已确认的 Kiro 原生字段。
+默认旧协议模式的 `max_tokens` 仍仅用于本地响应/压缩处理；启用 `nativeThinking` 后会映射到 `additionalModelRequestFields.max_tokens`，由上游校验和执行模型上限。Kiro 文档所列模型通常要求最小 1024；Sonnet 5.5、Sonnet 4.6、Opus 4.6 / 4.7 的上限为 64000，Opus 4.8 / 5 的上限为 128000。达到上游长度限制时会返回 `max_tokens` stop reason。模型列表与模型详情的输出上限共用同一来源。`tool_choice`、temperature、top_p、stop_sequences 和 JSON schema 输出也尚未映射到已确认的 Kiro 原生字段。
 
 `stop_sequences` 可省略、设为 `null` 或空数组 `[]`，均表示不设置自定义停止序列；非空数组仍返回 `400 invalid_request_error`，需要客户端移除此参数。此规则同时适用于 `/v1/messages` 和 `/cc/v1/messages` 的流式及非流式请求。
 
@@ -586,7 +586,7 @@ claude --model claude-haiku-5-5 --effort high
 
 ```json
 {
-  "model": "claude-sonnet-4-20250514",
+  "model": "claude-sonnet-5-5",
   "max_tokens": 16000,
   "thinking": {
     "type": "enabled",
@@ -602,7 +602,7 @@ claude --model claude-haiku-5-5 --effort high
 
 ```json
 {
-  "model": "claude-sonnet-4-20250514",
+  "model": "claude-sonnet-5-5",
   "max_tokens": 1024,
   "tools": [
     {
@@ -622,6 +622,8 @@ claude --model claude-haiku-5-5 --effort high
 ```
 
 ## 模型映射
+
+2026-11-06 的新版 Kiro 适配范围、协议依据及尚未接入的功能见 [兼容性记录](docs/KIRO_COMPATIBILITY.md)。
 
 | Anthropic 模型 | Kiro 模型 |
 |----------------|-----------|

@@ -512,6 +512,7 @@ pub struct StreamContext {
     pub input_tokens: i32,
     /// 从 contextUsageEvent 计算的实际输入 tokens
     pub context_input_tokens: Option<i32>,
+    reported_usage: crate::kiro::model::events::ReportedUsage,
     /// 输出 tokens 累计
     pub output_tokens: i32,
     /// 工具块索引映射 (tool_id -> block_index)
@@ -551,6 +552,7 @@ impl StreamContext {
             message_id: format!("msg_{}", Uuid::new_v4().to_string().replace('-', "")),
             input_tokens,
             context_input_tokens: None,
+            reported_usage: Default::default(),
             output_tokens: 0,
             tool_block_indices: HashMap::new(),
             tool_name_map,
@@ -648,8 +650,11 @@ impl StreamContext {
                 );
                 Vec::new()
             }
-            Event::Metadata(metadata) if metadata.output_limited() => {
-                self.state_manager.set_stop_reason("max_tokens");
+            Event::Metadata(metadata) => {
+                self.reported_usage.observe(metadata);
+                if metadata.output_limited() {
+                    self.state_manager.set_stop_reason("max_tokens");
+                }
                 Vec::new()
             }
             Event::Error {
@@ -1180,6 +1185,11 @@ impl StreamContext {
             self.state_manager
                 .generate_final_events(final_input_tokens, self.output_tokens),
         );
+        for event in &mut events {
+            if event.event == "message_delta" {
+                self.reported_usage.apply(&mut event.data["usage"]);
+            }
+        }
         events
     }
 }
@@ -1303,6 +1313,9 @@ impl BufferedStreamContext {
                 && let Some(usage) = message.get_mut("usage")
             {
                 usage["input_tokens"] = serde_json::json!(final_input_tokens);
+                let initial_output_tokens = usage["output_tokens"].clone();
+                self.inner.reported_usage.apply(usage);
+                usage["output_tokens"] = initial_output_tokens;
             }
         }
 

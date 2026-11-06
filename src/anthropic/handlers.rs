@@ -122,7 +122,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Fable 5.1".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 128_000,
+            max_tokens: super::converter::get_max_output_tokens("claude-fable-5-1"),
             max_input_tokens: model_input_limit("claude-fable-5-1"),
         },
         Model {
@@ -132,7 +132,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Fable 5.1 (Thinking)".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 128_000,
+            max_tokens: super::converter::get_max_output_tokens("claude-fable-5-1-thinking"),
             max_input_tokens: model_input_limit("claude-fable-5-1-thinking"),
         },
         Model {
@@ -142,7 +142,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Opus 5.5".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 128_000,
+            max_tokens: super::converter::get_max_output_tokens("claude-opus-5-5"),
             max_input_tokens: model_input_limit("claude-opus-5-5"),
         },
         Model {
@@ -152,7 +152,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Opus 5.5 (Thinking)".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 128_000,
+            max_tokens: super::converter::get_max_output_tokens("claude-opus-5-5-thinking"),
             max_input_tokens: model_input_limit("claude-opus-5-5-thinking"),
         },
         Model {
@@ -162,7 +162,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Opus 5".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 128_000,
+            max_tokens: super::converter::get_max_output_tokens("claude-opus-5"),
             max_input_tokens: model_input_limit("claude-opus-5"),
         },
         Model {
@@ -172,7 +172,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Opus 5 (Thinking)".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 128_000,
+            max_tokens: super::converter::get_max_output_tokens("claude-opus-5-thinking"),
             max_input_tokens: model_input_limit("claude-opus-5-thinking"),
         },
         Model {
@@ -182,7 +182,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Sonnet 5".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 128_000,
+            max_tokens: super::converter::get_max_output_tokens("claude-sonnet-5"),
             max_input_tokens: model_input_limit("claude-sonnet-5"),
         },
         Model {
@@ -192,7 +192,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Sonnet 5.5".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 128_000,
+            max_tokens: super::converter::get_max_output_tokens("claude-sonnet-5-5"),
             max_input_tokens: model_input_limit("claude-sonnet-5-5"),
         },
         Model {
@@ -202,7 +202,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Sonnet 5.5 (Thinking)".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 128_000,
+            max_tokens: super::converter::get_max_output_tokens("claude-sonnet-5-5-thinking"),
             max_input_tokens: model_input_limit("claude-sonnet-5-5-thinking"),
         },
         Model {
@@ -212,7 +212,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Sonnet 5 (Thinking)".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 128_000,
+            max_tokens: super::converter::get_max_output_tokens("claude-sonnet-5-thinking"),
             max_input_tokens: model_input_limit("claude-sonnet-5-thinking"),
         },
         Model {
@@ -222,7 +222,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Opus 4.8".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 128_000,
+            max_tokens: super::converter::get_max_output_tokens("claude-opus-4-8"),
             max_input_tokens: model_input_limit("claude-opus-4-8"),
         },
         Model {
@@ -232,7 +232,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Opus 4.8 (Thinking)".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 128_000,
+            max_tokens: super::converter::get_max_output_tokens("claude-opus-4-8-thinking"),
             max_input_tokens: model_input_limit("claude-opus-4-8-thinking"),
         },
         Model {
@@ -242,7 +242,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Opus 4.7".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 64000,
+            max_tokens: super::converter::get_max_output_tokens("claude-opus-4-7"),
             max_input_tokens: super::converter::get_context_window_size("claude-fable-5-1"),
         },
         Model {
@@ -252,7 +252,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Opus 4.7 (Thinking)".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 64000,
+            max_tokens: super::converter::get_max_output_tokens("claude-opus-4-7-thinking"),
             max_input_tokens: super::converter::get_context_window_size("claude-opus-4-7-thinking"),
         },
         Model {
@@ -262,7 +262,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Opus 4.6".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 64000,
+            max_tokens: super::converter::get_max_output_tokens("claude-opus-4-6"),
             max_input_tokens: super::converter::get_context_window_size("claude-opus-4-6"),
         },
         Model {
@@ -272,7 +272,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Opus 4.6 (Thinking)".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 64000,
+            max_tokens: super::converter::get_max_output_tokens("claude-opus-4-6-thinking"),
             max_input_tokens: super::converter::get_context_window_size("claude-opus-4-6-thinking"),
         },
         Model {
@@ -282,7 +282,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Sonnet 4.6".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 64000,
+            max_tokens: super::converter::get_max_output_tokens("claude-sonnet-4-6"),
             max_input_tokens: super::converter::get_context_window_size("claude-sonnet-4-6"),
         },
         Model {
@@ -292,7 +292,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Sonnet 4.6 (Thinking)".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 64000,
+            max_tokens: super::converter::get_max_output_tokens("claude-sonnet-4-6-thinking"),
             max_input_tokens: super::converter::get_context_window_size(
                 "claude-sonnet-4-6-thinking",
             ),
@@ -304,7 +304,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Opus 4.5".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 64000,
+            max_tokens: super::converter::get_max_output_tokens("claude-opus-4-5-20251101"),
             max_input_tokens: super::converter::get_context_window_size("claude-opus-4-5-20251101"),
         },
         Model {
@@ -314,7 +314,9 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Opus 4.5 (Thinking)".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 64000,
+            max_tokens: super::converter::get_max_output_tokens(
+                "claude-opus-4-5-20251101-thinking",
+            ),
             max_input_tokens: super::converter::get_context_window_size(
                 "claude-opus-4-5-20251101-thinking",
             ),
@@ -326,7 +328,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Sonnet 4.5".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 64000,
+            max_tokens: super::converter::get_max_output_tokens("claude-sonnet-4-5-20250929"),
             max_input_tokens: super::converter::get_context_window_size(
                 "claude-sonnet-4-5-20250929",
             ),
@@ -338,7 +340,9 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Sonnet 4.5 (Thinking)".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 64000,
+            max_tokens: super::converter::get_max_output_tokens(
+                "claude-sonnet-4-5-20250929-thinking",
+            ),
             max_input_tokens: super::converter::get_context_window_size(
                 "claude-sonnet-4-5-20250929-thinking",
             ),
@@ -350,7 +354,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Haiku 4.5".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 64000,
+            max_tokens: super::converter::get_max_output_tokens("claude-haiku-4-5-20251001"),
             max_input_tokens: super::converter::get_context_window_size(
                 "claude-haiku-4-5-20251001",
             ),
@@ -362,7 +366,9 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Haiku 4.5 (Thinking)".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 64000,
+            max_tokens: super::converter::get_max_output_tokens(
+                "claude-haiku-4-5-20251001-thinking",
+            ),
             max_input_tokens: super::converter::get_context_window_size(
                 "claude-haiku-4-5-20251001-thinking",
             ),
@@ -374,7 +380,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Haiku 5.5".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 128_000,
+            max_tokens: super::converter::get_max_output_tokens("claude-haiku-5-5"),
             max_input_tokens: model_input_limit("claude-haiku-5-5"),
         },
         Model {
@@ -384,7 +390,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Haiku 5.5 (Thinking)".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 128_000,
+            max_tokens: super::converter::get_max_output_tokens("claude-haiku-5-5-thinking"),
             max_input_tokens: model_input_limit("claude-haiku-5-5-thinking"),
         },
     ];
@@ -412,7 +418,7 @@ pub async fn get_model(axum::extract::Path(model_id): axum::extract::Path<String
         display_name: kiro_model,
         type_name: "model".into(),
         max_input_tokens: context,
-        max_tokens: 128_000,
+        max_tokens: super::converter::get_max_output_tokens(&model_id),
         capabilities: model_capabilities(&model_id),
     };
     Json(detail).into_response()
@@ -420,8 +426,8 @@ pub async fn get_model(axum::extract::Path(model_id): axum::extract::Path<String
 
 fn model_capabilities(model: &str) -> serde_json::Value {
     let mapped = super::converter::map_model(model).unwrap_or_default();
-    // Haiku 4.5 has no native thinking support; Haiku 5.5 supports adaptive thinking and effort.
-    let thinking = !mapped.contains("haiku") || mapped == "claude-haiku-5.5";
+    // Haiku 4.5 supports budgeted thinking; Haiku 5.5 also supports adaptive thinking.
+    let thinking = !mapped.is_empty();
     let generation_5 = matches!(
         mapped.as_str(),
         "claude-sonnet-5"
@@ -435,7 +441,7 @@ fn model_capabilities(model: &str) -> serde_json::Value {
         || mapped.contains("fable")
         || mapped == "claude-opus-4.7"
         || mapped == "claude-opus-4.8";
-    let adaptive = modern_effort || mapped == "claude-opus-4.6" || mapped == "claude-sonnet-4.6";
+    let adaptive = super::converter::supports_adaptive_thinking(model);
     let effort: Vec<&str> = if mapped.contains("haiku") && mapped != "claude-haiku-5.5" {
         vec![]
     } else if modern_effort {
@@ -448,7 +454,8 @@ fn model_capabilities(model: &str) -> serde_json::Value {
     capabilities.insert(
         "thinking".into(),
         json!({"supported":thinking, "types": {
-            "adaptive":adaptive, "enabled":thinking, "disabled":true
+            "adaptive":adaptive, "enabled":thinking, "disabled":true,
+            "between_tools":mapped == "claude-sonnet-5.5"
         }}),
     );
     if !effort.is_empty() || max_effort {
@@ -520,13 +527,37 @@ fn validate_and_normalize_request(payload: &mut MessagesRequest) -> Result<(), S
         return Err("max_tokens must be greater than zero".into());
     }
     normalize_message_input(&payload.model, &mut payload.system, &mut payload.messages)?;
-    if let Some(thinking) = &payload.thinking
-        && !matches!(
+    if let Some(thinking) = &payload.thinking {
+        if !matches!(
             thinking.thinking_type.as_str(),
-            "enabled" | "adaptive" | "disabled"
-        )
-    {
-        return Err("thinking.type must be enabled, adaptive, or disabled".into());
+            "enabled" | "adaptive" | "disabled" | "between_tools"
+        ) {
+            return Err(
+                "thinking.type must be enabled, adaptive, disabled, or between_tools".into(),
+            );
+        }
+        if thinking.thinking_type == "between_tools"
+            && super::converter::map_model(&payload.model).as_deref() != Some("claude-sonnet-5.5")
+        {
+            return Err(
+                "thinking.type between_tools is only supported for Claude Sonnet 5.5".into(),
+            );
+        }
+        if thinking.thinking_type == "adaptive"
+            && !super::converter::supports_adaptive_thinking(&payload.model)
+        {
+            return Err("thinking.type adaptive is unsupported for the requested model".into());
+        }
+        if thinking.thinking_type == "enabled" && thinking.budget_tokens <= 0 {
+            return Err("thinking.budget_tokens must be greater than zero".into());
+        }
+        if thinking
+            .display
+            .as_deref()
+            .is_some_and(|display| !matches!(display, "summarized" | "omitted"))
+        {
+            return Err("thinking.display must be summarized or omitted".into());
+        }
     }
     if let Some(config) = &payload.output_config {
         let allowed = model_capabilities(&payload.model)["effort"][&config.effort]["supported"]
@@ -534,6 +565,20 @@ fn validate_and_normalize_request(payload: &mut MessagesRequest) -> Result<(), S
             == Some(true);
         if !config.effort.is_empty() && !allowed {
             return Err("output_config.effort is unsupported for the requested model".into());
+        }
+        if super::converter::map_model(&payload.model).as_deref() == Some("claude-sonnet-5.5")
+            && payload.thinking.as_ref().is_some_and(|thinking| {
+                matches!(
+                    thinking.thinking_type.as_str(),
+                    "disabled" | "between_tools"
+                )
+            })
+            && matches!(config.effort.as_str(), "xhigh" | "max")
+        {
+            return Err(
+                "Claude Sonnet 5.5 between_tools thinking supports low, medium, or high effort"
+                    .into(),
+            );
         }
     }
     Ok(())
@@ -974,6 +1019,7 @@ async fn handle_non_stream_request(
     let mut stop_reason = "end_turn".to_string();
     // 从 contextUsageEvent 计算的实际输入 tokens
     let mut context_input_tokens: Option<i32> = None;
+    let mut reported_usage = crate::kiro::model::events::ReportedUsage::default();
 
     // 收集工具调用的增量 JSON
     let mut tool_json_buffers: std::collections::HashMap<String, String> =
@@ -1051,8 +1097,11 @@ async fn handle_non_stream_request(
                         actual_input_tokens
                     );
                 }
-                Event::Metadata(metadata) if metadata.output_limited() => {
-                    stop_reason = "max_tokens".to_string();
+                Event::Metadata(metadata) => {
+                    reported_usage.observe(&metadata);
+                    if metadata.output_limited() {
+                        stop_reason = "max_tokens".to_string();
+                    }
                 }
                 Event::Exception { exception_type, .. }
                     if exception_type == "ContentLengthExceededException" =>
@@ -1117,7 +1166,7 @@ async fn handle_non_stream_request(
     let final_input_tokens = context_input_tokens.unwrap_or(input_tokens);
 
     // 构建 Anthropic 响应
-    let response_body = json!({
+    let mut response_body = json!({
         "id": format!("msg_{}", Uuid::new_v4().to_string().replace('-', "")),
         "type": "message",
         "role": "assistant",
@@ -1130,6 +1179,8 @@ async fn handle_non_stream_request(
             "output_tokens": output_tokens
         }
     });
+
+    reported_usage.apply(&mut response_body["usage"]);
 
     crate::request_log::response_usage(&response_body);
     (StatusCode::OK, Json(response_body)).into_response()
@@ -1145,6 +1196,7 @@ fn apply_thinking_defaults(payload: &mut MessagesRequest) {
         payload.thinking = Some(Thinking {
             thinking_type: if adaptive { "adaptive" } else { "enabled" }.to_string(),
             budget_tokens: 20000,
+            display: None,
         });
     }
 
@@ -1721,10 +1773,10 @@ mod model_capability_tests {
     }
 
     #[test]
-    fn haiku_45_reports_no_thinking_or_effort() {
+    fn haiku_45_reports_budgeted_thinking_without_adaptive_or_effort() {
         let capabilities = model_capabilities("claude-haiku-4-5-20251001");
-        assert_eq!(capabilities["thinking"]["supported"], false);
-        assert_eq!(capabilities["thinking"]["types"]["enabled"], false);
+        assert_eq!(capabilities["thinking"]["supported"], true);
+        assert_eq!(capabilities["thinking"]["types"]["enabled"], true);
         assert_eq!(capabilities["thinking"]["types"]["adaptive"], false);
         assert_eq!(capabilities["effort"]["supported"], false);
         assert_eq!(
@@ -1740,5 +1792,37 @@ mod model_capability_tests {
         assert_eq!(capabilities["thinking"]["types"]["adaptive"], true);
         assert_eq!(capabilities["effort"]["supported"], true);
         assert_eq!(super::model_input_limit("claude-haiku-5-5"), 1_000_000);
+    }
+
+    #[tokio::test]
+    async fn model_list_and_detail_expose_sonnet_55_and_opus_output_caps() {
+        use axum::{body::to_bytes, response::IntoResponse};
+        let list = super::get_models().await.into_response();
+        let list: serde_json::Value =
+            serde_json::from_slice(&to_bytes(list.into_body(), 100_000).await.unwrap()).unwrap();
+        for (model, expected) in [
+            ("claude-sonnet-5-5", 64_000),
+            ("claude-opus-4-7", 64_000),
+            ("claude-opus-4-8", 128_000),
+        ] {
+            let entry = list["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["id"] == model)
+                .unwrap();
+            assert_eq!(entry["max_tokens"], expected);
+            let detail = super::get_model(axum::extract::Path(model.to_owned())).await;
+            let detail: serde_json::Value =
+                serde_json::from_slice(&to_bytes(detail.into_body(), 100_000).await.unwrap())
+                    .unwrap();
+            assert_eq!(detail["max_tokens"], expected);
+            if model == "claude-sonnet-5-5" {
+                assert_eq!(
+                    detail["capabilities"]["thinking"]["types"]["between_tools"],
+                    true
+                );
+            }
+        }
     }
 }

@@ -350,6 +350,7 @@ fn summary_request(request: &MessagesRequest, plan: &Plan) -> MessagesRequest {
         thinking: Some(Thinking {
             thinking_type: "disabled".into(),
             budget_tokens: 0,
+            display: None,
         }),
         output_config: None,
         metadata: None,
@@ -417,6 +418,7 @@ async fn summarize(
     );
     let mut text = String::new();
     let mut stop_reason = "end_turn";
+    let mut reported_usage = crate::kiro::model::events::ReportedUsage::default();
     let mut input_tokens =
         token::count_all_tokens(&payload.model, &payload.system, &payload.messages, &None).await
             as i32;
@@ -427,8 +429,11 @@ async fn summarize(
             match event {
                 Event::AssistantResponse(response) => text.push_str(&response.content),
                 Event::ToolUse(_) => stop_reason = "tool_use",
-                Event::Metadata(metadata) if metadata.output_limited() => {
-                    stop_reason = "max_tokens"
+                Event::Metadata(metadata) => {
+                    reported_usage.observe(&metadata);
+                    if metadata.output_limited() {
+                        stop_reason = "max_tokens";
+                    }
                 }
                 Event::ContextUsage(usage) => {
                     input_tokens = (usage.context_usage_percentage
@@ -458,14 +463,16 @@ async fn summarize(
         }
     }
     let (_, text) = super::stream::extract_thinking_from_complete_text(&text);
-    let output_tokens = token::count_tokens(&text) as i32;
+    let output_tokens = reported_usage
+        .output_tokens
+        .unwrap_or_else(|| token::count_tokens(&text) as i32);
     if output_tokens > request.max_tokens {
         stop_reason = "max_tokens";
     }
-    Ok(
-        json!({"content":[{"type":"text", "text":text}], "stop_reason":stop_reason,
-        "usage":{"input_tokens":input_tokens, "output_tokens":output_tokens}}),
-    )
+    let mut summary = json!({"content":[{"type":"text", "text":text}], "stop_reason":stop_reason,
+        "usage":{"input_tokens":input_tokens, "output_tokens":output_tokens}});
+    reported_usage.apply(&mut summary["usage"]);
+    Ok(summary)
 }
 
 fn upstream_error(message: impl Into<String>) -> Box<Response> {
@@ -493,8 +500,8 @@ async fn perform_compaction(
         .filter_map(|b| b["text"].as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    let iteration = json!({"type":"compaction", "input_tokens":summary["usage"]["input_tokens"],
-        "output_tokens":summary["usage"]["output_tokens"]});
+    let mut iteration = summary["usage"].clone();
+    iteration["type"] = json!("compaction");
     let complete = summary["stop_reason"] == "end_turn" && !summary_text.trim().is_empty();
     let block = if plan.on_demand {
         json!({"type":"compaction", "content":summary_text, "signature":signature(&summary_text)})
@@ -536,10 +543,9 @@ async fn perform_compaction(
         .ok_or_else(|| upstream_error("Invalid continuation response"))?
         .insert(0, block);
     let mut iterations = vec![iteration];
-    iterations.push(
-        json!({"type":"message", "input_tokens":response["usage"]["input_tokens"],
-        "output_tokens":response["usage"]["output_tokens"]}),
-    );
+    let mut message_iteration = response["usage"].clone();
+    message_iteration["type"] = json!("message");
+    iterations.push(message_iteration);
     response["usage"]["iterations"] = json!(iterations);
     Ok(response)
 }
@@ -928,9 +934,140 @@ mod tests {
             req.thinking = Some(Thinking {
                 thinking_type: "enabled".into(),
                 budget_tokens: 100,
+                display: None,
             });
         }
         dispatch(upstream.state.clone(), req, cc).await
+    }
+
+    #[tokio::test]
+    async fn reported_tokens_override_estimates_across_json_streams_and_summaries() {
+        for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+            for streaming in [false, true] {
+                for summary in [false, true] {
+                    let mut bytes = frame(
+                        "metadataEvent",
+                        json!({"tokenUsage":{
+                        "uncachedInputTokens":17,"outputTokens":1,"cacheReadInputTokens":99}}),
+                    );
+                    bytes.extend(frame(
+                        "assistantResponseEvent",
+                        json!({"content":"A complete answer and summary of the work."}),
+                    ));
+                    bytes.extend(frame(
+                        "metadataEvent",
+                        json!({"stopReason":"end_turn","tokenUsage":{
+                        "outputTokens":23,"cacheWriteInputTokens":11}}),
+                    ));
+                    bytes.extend(frame(
+                        "contextUsageEvent",
+                        json!({"contextUsagePercentage":80.0}),
+                    ));
+                    let mut upstream = mock(bytes).await;
+                    upstream.state.cc_buffered_stream = buffered;
+                    let mut payload = json!({"model":"claude-sonnet-5.5", "max_tokens":4096,
+                        "stream":streaming,"messages":[{"role":"user","content":"hello"}]});
+                    if summary {
+                        payload["compaction"] = json!({"type":"summarize"});
+                    }
+                    let response = if summary {
+                        handle_request(upstream.state.clone(), request(payload), cc).await
+                    } else {
+                        dispatch(upstream.state.clone(), request(payload), cc).await
+                    };
+                    assert_eq!(response.status(), StatusCode::OK);
+                    let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                    let expected = json!({"input_tokens":17,"output_tokens":23,
+                        "cache_read_input_tokens":99,"cache_creation_input_tokens":11});
+                    if streaming {
+                        let text = std::str::from_utf8(&body).unwrap();
+                        assert!(!text.contains("event: error"), "{text}");
+                        let events: Vec<Value> = text
+                            .lines()
+                            .filter_map(|line| line.strip_prefix("data: "))
+                            .map(|line| serde_json::from_str(line).unwrap())
+                            .collect();
+                        let delta = events
+                            .iter()
+                            .find(|event| event["type"] == "message_delta")
+                            .unwrap();
+                        let usage = if summary {
+                            &delta["usage"]["iterations"][0]
+                        } else {
+                            &delta["usage"]
+                        };
+                        for (key, count) in expected.as_object().unwrap() {
+                            assert_eq!(
+                                &usage[key], count,
+                                "summary={summary}, cc={cc}, buffered={buffered}"
+                            );
+                        }
+                        if cc && buffered && !summary {
+                            let start = events
+                                .iter()
+                                .find(|event| event["type"] == "message_start")
+                                .unwrap();
+                            assert_eq!(start["message"]["usage"]["input_tokens"], 17);
+                            assert_eq!(start["message"]["usage"]["cache_read_input_tokens"], 99);
+                        }
+                    } else {
+                        let body: Value = serde_json::from_slice(&body).unwrap();
+                        let usage = if summary {
+                            &body["usage"]["iterations"][0]
+                        } else {
+                            &body["usage"]
+                        };
+                        for (key, count) in expected.as_object().unwrap() {
+                            assert_eq!(&usage[key], count, "{body}");
+                        }
+                    }
+                    assert_eq!(upstream.requests.lock().unwrap().len(), 1);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sonnet_55_thinking_controls_are_validated_before_upstream_calls() {
+        for cc in [false, true] {
+            for (model, kind, display, effort, valid) in [
+                (
+                    "claude-sonnet-5.5",
+                    "between_tools",
+                    "omitted",
+                    "high",
+                    true,
+                ),
+                (
+                    "claude-sonnet-5.5",
+                    "between_tools",
+                    "summarized",
+                    "max",
+                    false,
+                ),
+                ("claude-sonnet-5.5", "disabled", "omitted", "xhigh", false),
+                ("claude-opus-5.5", "between_tools", "omitted", "high", false),
+                ("claude-sonnet-5.5", "adaptive", "invalid", "high", false),
+                ("claude-haiku-4.5", "adaptive", "omitted", "", false),
+            ] {
+                let upstream =
+                    mock(frame("assistantResponseEvent", json!({"content":"answer"}))).await;
+                let payload = json!({"model":model,"max_tokens":4096,
+                    "messages":[{"role":"user","content":"hello"}],
+                    "thinking":{"type":kind,"display":display},"output_config":{"effort":effort}});
+                let response = dispatch(upstream.state.clone(), request(payload), cc).await;
+                assert_eq!(
+                    response.status(),
+                    if valid {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    }
+                );
+                let _ = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                assert_eq!(upstream.requests.lock().unwrap().len(), usize::from(valid));
+            }
+        }
     }
 
     #[tokio::test]

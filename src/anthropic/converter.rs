@@ -199,10 +199,17 @@ pub fn get_context_window_size(model: &str) -> i32 {
 /// Builds the native Kiro controls documented by its model request schema.
 pub fn additional_model_request_fields(req: &MessagesRequest) -> Option<serde_json::Value> {
     let mut fields = serde_json::Map::new();
+    fields.insert("max_tokens".into(), req.max_tokens.into());
     if let Some(thinking) = &req.thinking {
-        let mut config = serde_json::json!({"type":thinking.thinking_type});
-        if thinking.thinking_type == "enabled" {
+        // Keep client intent here; endpoint-specific normalization belongs to
+        // native transport so legacy enabled budgets retain their semantics.
+        let kind = thinking.thinking_type.as_str();
+        let mut config = serde_json::json!({"type":kind});
+        if kind == "enabled" {
             config["budget_tokens"] = thinking.budget_tokens.into();
+        }
+        if let Some(display) = &thinking.display {
+            config["display"] = display.clone().into();
         }
         fields.insert("thinking".into(), config);
     }
@@ -215,6 +222,35 @@ pub fn additional_model_request_fields(req: &MessagesRequest) -> Option<serde_js
         );
     }
     (!fields.is_empty()).then_some(serde_json::Value::Object(fields))
+}
+
+pub fn supports_adaptive_thinking(model: &str) -> bool {
+    matches!(
+        map_model(model).as_deref(),
+        Some(
+            "claude-fable-5.1"
+                | "claude-sonnet-5"
+                | "claude-sonnet-5.5"
+                | "claude-haiku-5.5"
+                | "claude-opus-5"
+                | "claude-opus-5.5"
+                | "claude-opus-4.7"
+                | "claude-opus-4.8"
+                | "claude-opus-4.6"
+                | "claude-sonnet-4.6"
+        )
+    )
+}
+
+/// Output limits from Kiro's model schemas, separate from context windows.
+pub fn get_max_output_tokens(model: &str) -> i32 {
+    match map_model(model).as_deref() {
+        Some(
+            "claude-opus-4.5" | "claude-sonnet-4.5" | "claude-haiku-4.5" | "claude-opus-4.6"
+            | "claude-opus-4.7" | "claude-sonnet-4.6" | "claude-sonnet-5.5",
+        ) => 64_000,
+        _ => 128_000,
+    }
 }
 
 /// 转换结果
@@ -1282,7 +1318,7 @@ mod tests {
     fn native_model_controls_are_serialized_without_prompt_injection() {
         let req = MessagesRequest {
             model: "claude-sonnet-5-thinking".into(),
-            max_tokens: 1000,
+            max_tokens: 4096,
             messages: vec![super::super::types::Message {
                 role: "user".into(),
                 content: serde_json::json!("hi"),
@@ -1295,6 +1331,7 @@ mod tests {
             thinking: Some(super::super::types::Thinking {
                 thinking_type: "adaptive".into(),
                 budget_tokens: 1000,
+                display: Some("omitted".into()),
             }),
             output_config: Some(super::super::types::OutputConfig {
                 effort: "xhigh".into(),
@@ -1307,6 +1344,8 @@ mod tests {
         let body = additional_model_request_fields(&req).unwrap();
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["output_config"]["effort"], "xhigh");
+        assert_eq!(body["max_tokens"], 4096);
+        assert_eq!(body["thinking"]["display"], "omitted");
         assert!(
             !serde_json::to_string(&converted.conversation_state)
                 .unwrap()

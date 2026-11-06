@@ -82,12 +82,18 @@ pub struct Thinking {
     #[serde(default = "default_budget_tokens")]
     #[allow(dead_code)]
     pub budget_tokens: i32,
+    /// Kiro native reasoning visibility (independent of the reasoning effort).
+    #[serde(default)]
+    pub display: Option<String>,
 }
 
 impl Thinking {
-    /// 是否启用了 thinking（enabled 或 adaptive）
+    /// 是否启用了 thinking（enabled、adaptive 或 between_tools）
     pub fn is_enabled(&self) -> bool {
-        self.thinking_type == "enabled" || self.thinking_type == "adaptive"
+        matches!(
+            self.thinking_type.as_str(),
+            "enabled" | "adaptive" | "between_tools"
+        )
     }
 }
 
