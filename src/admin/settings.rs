@@ -319,6 +319,7 @@ mod tests {
                 &path,
                 serde_json::json!({
                     "apiKey":"private-api-key", "adminApiKey":"private-admin-key",
+                    "apiKeys":["private-alice-key", "private-bob-key"],
                     "countTokensApiKey":"private-count-key", "proxyPassword":"private-password",
                     "proxyUrl":"http://user:private-secret@localhost:8080/path?private-query",
                     "endpoints":{"ide":{"customSecret":"private-endpoint-secret"}},
@@ -401,6 +402,7 @@ mod tests {
         assert_eq!(response["canSave"], true);
         assert_eq!(response["restartRequired"], serde_json::json!([]));
         assert!(response["settings"].get("apiKey").is_none());
+        assert!(response["settings"].get("apiKeys").is_none());
     }
 
     #[tokio::test]
@@ -441,6 +443,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(fixture.path()).unwrap()).unwrap();
         for key in [
             "apiKey",
+            "apiKeys",
             "adminApiKey",
             "countTokensApiKey",
             "proxyPassword",
@@ -507,6 +510,7 @@ mod tests {
             (vec!["requestLogRetentionDays"], Value::from(3651)),
             (vec!["concurrency", "unsupported"], Value::from(1)),
             (vec!["apiKey"], Value::from("replacement")),
+            (vec!["apiKeys"], serde_json::json!(["replacement"])),
         ] {
             let mut settings = first["settings"].clone();
             let mut node = &mut settings;

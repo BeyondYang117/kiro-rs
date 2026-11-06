@@ -207,6 +207,10 @@ pub struct Config {
     #[serde(default)]
     pub api_key: Option<String>,
 
+    /// 分发给多个客户端的独立密钥，与旧的 apiKey 合并使用。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_keys: Vec<String>,
+
     #[serde(default = "default_system_version")]
     pub system_version: String,
 
@@ -402,6 +406,7 @@ impl Default for Config {
             kiro_version: default_kiro_version(),
             machine_id: None,
             api_key: None,
+            api_keys: Vec::new(),
             system_version: default_system_version(),
             node_version: default_node_version(),
             tls_backend: default_tls_backend(),
@@ -432,6 +437,32 @@ impl Default for Config {
 }
 
 impl Config {
+    /// 校验并合并客户端密钥；错误只报告字段位置，不包含密钥内容。
+    pub(crate) fn client_api_keys(&self) -> anyhow::Result<Vec<String>> {
+        let mut keys = Vec::new();
+        for (field, key) in self
+            .api_key
+            .iter()
+            .map(|key| ("apiKey".to_string(), key))
+            .chain(
+                self.api_keys
+                    .iter()
+                    .enumerate()
+                    .map(|(index, key)| (format!("apiKeys[{index}]"), key)),
+            )
+        {
+            anyhow::ensure!(
+                crate::common::auth::is_valid_api_key(key),
+                "{field} 必须为非空的可打印 ASCII 字符，不能包含空白或逗号"
+            );
+            if !keys.contains(key) {
+                keys.push(key.clone());
+            }
+        }
+        anyhow::ensure!(!keys.is_empty(), "必须配置 apiKey 或至少一个 apiKeys 密钥");
+        Ok(keys)
+    }
+
     pub(crate) fn validate_regions(&self) -> anyhow::Result<()> {
         crate::common::region::validate("region", &self.region)?;
         if let Some(region) = &self.auth_region {
@@ -663,12 +694,64 @@ mod tests {
     fn config_debug_omits_keys_proxy_auth_and_custom_endpoint_secrets() {
         let config: Config = serde_json::from_value(serde_json::json!({
             "apiKey":"sensitive-sentinel", "adminApiKey":"sensitive-sentinel",
+            "apiKeys":["multi-key-sensitive-sentinel"],
             "countTokensApiKey":"sensitive-sentinel",
             "proxyUrl":"http://user:sensitive-sentinel@localhost",
             "proxyPassword":"sensitive-sentinel", "endpoints":{"test":{"key":"sensitive-sentinel"}}
         }))
         .unwrap();
         assert!(!format!("{config:?}").contains("sensitive-sentinel"));
+    }
+
+    #[test]
+    fn client_keys_support_legacy_multi_key_and_combined_configs() {
+        for (document, expected) in [
+            (
+                serde_json::json!({"apiKey":"legacy-key"}),
+                vec!["legacy-key"],
+            ),
+            (
+                serde_json::json!({"apiKeys":["alice-key", "bob-key"]}),
+                vec!["alice-key", "bob-key"],
+            ),
+            (
+                serde_json::json!({"apiKey":"legacy-key", "apiKeys":["alice-key", "legacy-key", "alice-key"]}),
+                vec!["legacy-key", "alice-key"],
+            ),
+        ] {
+            let config: Config = serde_json::from_value(document).unwrap();
+            assert_eq!(config.client_api_keys().unwrap(), expected);
+            let saved = serde_json::to_value(&config).unwrap();
+            let reloaded: Config = serde_json::from_value(saved).unwrap();
+            assert_eq!(reloaded.client_api_keys().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn client_keys_reject_missing_or_invalid_keys_without_exposing_them() {
+        for document in [serde_json::json!({}), serde_json::json!({"apiKeys":[]})] {
+            let config: Config = serde_json::from_value(document).unwrap();
+            assert!(config.client_api_keys().is_err());
+        }
+        for invalid in ["", " ", "secret with-space", "secret,joined", "密钥"] {
+            for (document, field) in [
+                (
+                    serde_json::json!({"apiKey":invalid,"apiKeys":["valid-key"]}),
+                    "apiKey",
+                ),
+                (
+                    serde_json::json!({"apiKey":"valid-key","apiKeys":["also-valid",invalid]}),
+                    "apiKeys[1]",
+                ),
+            ] {
+                let config: Config = serde_json::from_value(document).unwrap();
+                let error = config.client_api_keys().unwrap_err().to_string();
+                assert!(error.starts_with(field));
+                if invalid.len() > 1 {
+                    assert!(!error.contains(invalid));
+                }
+            }
+        }
     }
 
     #[test]

@@ -909,7 +909,7 @@ mod tests {
         let manager = Arc::new(manager);
         let provider = KiroProvider::with_proxy(manager.clone(), None, endpoints, "mock".into());
         Mock {
-            state: AppState::new("test", true).with_kiro_provider(provider),
+            state: AppState::new(["test"], true).with_kiro_provider(provider),
             requests,
             task,
             manager,
@@ -951,7 +951,7 @@ mod tests {
                         )
                         .unwrap();
                         let app = crate::anthropic::create_router_with_provider(
-                            "test",
+                            ["test"],
                             Some(provider),
                             true,
                             buffered,
@@ -1019,7 +1019,7 @@ mod tests {
             let provider =
                 std::sync::Arc::into_inner(upstream.state.kiro_provider.take().unwrap()).unwrap();
             let app = crate::anthropic::create_router_with_provider(
-                "test",
+                ["test"],
                 Some(provider),
                 true,
                 buffered,
@@ -2192,7 +2192,7 @@ mod tests {
     async fn conflicting_parameters_fail_before_upstream() {
         let mut req = compact_request(false);
         req.context_management = Some(json!({"edits":[]}));
-        let response = handle_request(AppState::new("test", false), req, false).await;
+        let response = handle_request(AppState::new(["test"], false), req, false).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 

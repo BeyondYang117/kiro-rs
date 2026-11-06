@@ -18,8 +18,8 @@ use super::types::ErrorResponse;
 /// 应用共享状态
 #[derive(Clone)]
 pub struct AppState {
-    /// API 密钥
-    pub api_key: String,
+    /// 客户端 API 密钥集合，路由克隆时共享。
+    pub api_keys: Arc<[String]>,
     /// Kiro Provider（可选，用于实际 API 调用）
     /// 内部使用 MultiTokenManager，已支持线程安全的多凭据管理
     pub kiro_provider: Option<Arc<KiroProvider>>,
@@ -33,9 +33,12 @@ pub struct AppState {
 
 impl AppState {
     /// 创建新的应用状态
-    pub fn new(api_key: impl Into<String>, extract_thinking: bool) -> Self {
+    pub fn new(
+        api_keys: impl IntoIterator<Item = impl Into<String>>,
+        extract_thinking: bool,
+    ) -> Self {
         Self {
-            api_key: api_key.into(),
+            api_keys: api_keys.into_iter().map(Into::into).collect(),
             kiro_provider: None,
             extract_thinking,
             force_stream: false,
@@ -56,7 +59,7 @@ pub async fn auth_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let response = if auth::authenticate(&request, &state.api_key) {
+    let response = if auth::authenticate_any(&request, &state.api_keys) {
         next.run(request).await
     } else {
         let error = ErrorResponse::authentication_error();
@@ -344,7 +347,7 @@ mod security_headers_tests {
 
     #[tokio::test]
     async fn no_store_overrides_handler_caching_and_preserves_streaming_responses() {
-        let state = super::AppState::new("client-key", true);
+        let state = super::AppState::new(["client-key"], true);
         let app = Router::new()
             .route(
                 "/events",

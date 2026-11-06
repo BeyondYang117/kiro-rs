@@ -46,6 +46,11 @@ async fn main() {
         tracing::error!("加载配置失败: {}", e);
         std::process::exit(1);
     });
+    let api_keys = config.client_api_keys().unwrap_or_else(|error| {
+        tracing::error!("客户端密钥配置无效: {error}");
+        std::process::exit(1);
+    });
+    tracing::info!("已加载 {} 个客户端 API 密钥", api_keys.len());
 
     // 加载凭证（支持单对象或数组格式）
     let credentials_path = args
@@ -83,16 +88,6 @@ async fn main() {
     // 获取第一个凭据用于日志显示
     let first_credentials = credentials_list.first().cloned().unwrap_or_default();
     tracing::debug!("主凭证: {:?}", first_credentials);
-
-    // 获取 API Key
-    let api_key = config
-        .api_key
-        .clone()
-        .filter(|key| common::auth::is_valid_api_key(key))
-        .unwrap_or_else(|| {
-            tracing::error!("apiKey 必须为非空的可打印 ASCII 字符，不能包含空白或逗号");
-            std::process::exit(1);
-        });
 
     // 构建代理配置
     let proxy_config = config.proxy_url.as_ref().map(|url| {
@@ -184,7 +179,7 @@ async fn main() {
 
     // 构建 Anthropic API 路由（profile_arn 由 provider 层根据实际凭据动态注入）
     let anthropic_app = anthropic::create_router_with_provider(
-        &api_key,
+        api_keys,
         Some(kiro_provider),
         config.extract_thinking,
         config.cc_buffered_stream,

@@ -201,7 +201,8 @@ docker login -u abu116
 |------|------|--------|------|
 | `host` | string | `127.0.0.1` | 服务监听地址 |
 | `port` | number | `8080` | 服务监听端口 |
-| `apiKey` | string | - | 自定义 API Key（用于客户端认证，必配） |
+| `apiKey` | string | - | 单个客户端调用密钥（兼容旧配置，与 `apiKeys` 至少配置一项） |
+| `apiKeys` | string[] | `[]` | 多个客户端调用密钥，可为每个人分配独立密钥；与 `apiKey` 合并生效 |
 | `region` | string | `us-east-1` | AWS 区域 |
 | `authRegion` | string | - | Auth Region（用于 Token 刷新），未配置时回退到 region |
 | `apiRegion` | string | - | API Region（用于 API 请求），未配置时回退到 region |
@@ -468,7 +469,20 @@ Social 和 IdC 刷新会拒绝空的访问令牌、空的轮换刷新令牌，�
    Authorization: Bearer sk-your-api-key
    ```
 
-`apiKey` 必须是非空的可打印 ASCII 字符串，不能含空白或逗号；无效配置会阻止服务启动。`adminApiKey` 使用相同规则，无效时不启用管理接口。Bearer scheme 不区分大小写。重复的 `x-api-key` 或 `Authorization`、空值、格式错误和两个认证头携带不同密钥时均返回 `401 authentication_error`；同时提供两个头时必须使用相同密钥。Cookie 和 URL 查询参数不参与认证。认证失败响应包含 `WWW-Authenticate: Bearer`。
+调用密钥在 `config.json` 中配置。多人使用时，可省略旧的 `apiKey`，为每个人设置一个独立密钥（下列为示例，请替换为随机生成的密钥）：
+
+```json
+{
+  "apiKeys": [
+    "sk-user-alice-replace-with-random-secret",
+    "sk-user-bob-replace-with-random-secret"
+  ]
+}
+```
+
+每个人用自己的密钥访问相同的服务地址，`/v1` 和 `/cc/v1` 均支持。`apiKey` 和 `apiKeys` 同时配置时合并生效，重复值会去重。新增或删除密钥后重启服务生效；撤销时需从两处都移除。所有调用密钥共享上游凭据池与全局并发限制，目前不提供每个密钥独立的配额、限速或用量统计。管理后台仍使用独立的 `adminApiKey`，请勿将管理密钥分发给调用者。
+
+`apiKey`（若配置）和 `apiKeys` 中每个密钥必须是非空的可打印 ASCII 字符串，不能含空白或逗号；无效密钥或未配置任何调用密钥会阻止服务启动。`adminApiKey` 使用相同规则，无效时不启用管理接口。Bearer scheme 不区分大小写。重复的 `x-api-key` 或 `Authorization`、空值、格式错误和两个认证头携带不同密钥时均返回 `401 authentication_error`，即使两个密钥都有效；同时提供两个头时必须使用相同密钥。Cookie 和 URL 查询参数不参与认证。认证失败响应包含 `WWW-Authenticate: Bearer`。
 
 管理接口的 JSON、路径和查询参数解析失败统一返回 JSON `error` 对象，保留 `400`／`413`／`415`／`422` 状态码，不回显无效参数值；认证先于参数解析执行。客户端 JSON 与 SSE 错误中的常见令牌、密钥字段和代理认证信息统一脱敏，错误消息最多保留 4096 个字符。
 

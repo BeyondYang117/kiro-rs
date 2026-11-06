@@ -70,6 +70,16 @@ pub(crate) fn authenticate(request: &Request<Body>, expected: &str) -> bool {
         && extract_api_key(request).is_some_and(|key| constant_time_eq(key, expected))
 }
 
+/// 对所有候选密钥执行比较，不因匹配到某个密钥而提前结束。
+pub(crate) fn authenticate_any(request: &Request<Body>, expected: &[String]) -> bool {
+    let Some(key) = extract_api_key(request) else {
+        return false;
+    };
+    expected.iter().fold(false, |matched, candidate| {
+        matched | (is_valid_api_key(candidate) && constant_time_eq(key, candidate))
+    })
+}
+
 /// 常量时间字符串比较，防止时序攻击
 ///
 /// 对等长字符串执行常量时间比较，不在首个不同字节处提前返回。
@@ -96,15 +106,135 @@ mod tests {
     }
 
     fn app_with_keys(api_key: &str, admin_key: &str) -> Router {
+        app_with_client_keys(&[api_key], admin_key)
+    }
+
+    fn app_with_client_keys(api_keys: &[&str], admin_key: &str) -> Router {
         let manager =
             Arc::new(MultiTokenManager::new(Config::default(), vec![], None, None, true).unwrap());
-        crate::anthropic::create_router_with_provider(api_key, None, true, true, false).nest(
+        crate::anthropic::create_router_with_provider(
+            api_keys.iter().copied(),
+            None,
+            true,
+            true,
+            false,
+        )
+        .nest(
             "/api/admin",
             create_admin_router(AdminState::new(
                 admin_key,
                 AdminService::new(manager, ["ide".into()]),
             )),
         )
+    }
+
+    #[tokio::test]
+    async fn multiple_client_keys_work_on_all_routes_and_keep_admin_separate() {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "apiKey":"legacy-key", "apiKeys":["alice-key", "bob-key"]
+        }))
+        .unwrap();
+        let keys = config.client_api_keys().unwrap();
+        let keys: Vec<_> = keys.iter().map(String::as_str).collect();
+        let app = app_with_client_keys(&keys, "admin-key");
+        for prefix in ["/v1", "/cc/v1"] {
+            for (method, suffix, accepted_status) in [
+                ("GET", "/models", 200),
+                ("GET", "/models/claude-opus-5-5", 200),
+                ("POST", "/messages", 503),
+                ("POST", "/messages/count_tokens", 200),
+            ] {
+                for key in [
+                    "legacy-key",
+                    "alice-key",
+                    "bob-key",
+                    "admin-key",
+                    "unknown-key",
+                ] {
+                    for header in ["x-api-key", "authorization"] {
+                        let value = if header == "authorization" {
+                            format!("Bearer {key}")
+                        } else {
+                            key.to_string()
+                        };
+                        let request = Request::builder()
+                            .method(method)
+                            .uri(format!("{prefix}{suffix}"))
+                            .header(header, value)
+                            .header("content-type", "application/json")
+                            .body(Body::from(r#"{"model":"claude-opus-5-5","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}"#))
+                            .unwrap();
+                        let response = app.clone().oneshot(request).await.unwrap();
+                        assert_eq!(
+                            response.status().as_u16(),
+                            if keys.contains(&key) {
+                                accepted_status
+                            } else {
+                                401
+                            },
+                            "{method} {prefix}{suffix} {key} {header}"
+                        );
+                    }
+                }
+            }
+        }
+        for key in ["legacy-key", "alice-key", "bob-key", "admin-key"] {
+            let request = Request::builder()
+                .uri("/api/admin/credentials")
+                .header("x-api-key", key)
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(
+                app.clone()
+                    .oneshot(request)
+                    .await
+                    .unwrap()
+                    .status()
+                    .as_u16(),
+                if key == "admin-key" { 200 } else { 401 }
+            );
+        }
+        for path in ["/v1/models", "/cc/v1/models"] {
+            let request = Request::builder()
+                .uri(path)
+                .header("x-api-key", "alice-key")
+                .header("authorization", "Bearer bob-key")
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(app.clone().oneshot(request).await.unwrap().status(), 401);
+        }
+
+        // Removing one key on restart revokes only that key.
+        let app = app_with_client_keys(&["alice-key"], "admin-key");
+        for (key, status) in [("alice-key", 200), ("bob-key", 401)] {
+            let request = Request::builder()
+                .uri("/v1/models")
+                .header("x-api-key", key)
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(
+                app.clone()
+                    .oneshot(request)
+                    .await
+                    .unwrap()
+                    .status()
+                    .as_u16(),
+                status
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_client_key_set_rejects_all_requests() {
+        let app = app_with_client_keys(&[], "admin-key");
+        for path in ["/v1/models", "/cc/v1/models"] {
+            let request = Request::builder()
+                .uri(path)
+                .header("x-api-key", "any-key")
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(app.clone().oneshot(request).await.unwrap().status(), 401);
+        }
     }
 
     #[tokio::test]
