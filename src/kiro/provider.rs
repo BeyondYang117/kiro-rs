@@ -545,6 +545,7 @@ impl KiroProvider {
 
             let url = endpoint.api_url(&rctx);
             let body = endpoint.transform_api_body(request_body, &rctx);
+            let body = self.token_manager.model_request_body(ctx.id, body);
 
             let base = self
                 .client_for(&ctx.credentials)?
@@ -1459,6 +1460,7 @@ mod retry_tests {
             rate_multiplier: None,
             rate_unit: None,
             max_input_tokens: None,
+            native_max_tokens: None,
             min_output_tokens: Some(512),
             max_output_tokens: Some(1000),
             effort_levels: vec![],

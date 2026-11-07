@@ -5,6 +5,66 @@ const SONNET: &str = "claude-sonnet-4.6";
 const OPUS: &str = "claude-opus-4.6";
 
 #[tokio::test]
+async fn wire_output_control_uses_selected_account_and_verified_gpt_fallback() {
+    let manager = manager("priority", "KIRO PRO");
+    let body = |model: &str, fields: serde_json::Value| {
+        serde_json::json!({
+            "conversationState":{"currentMessage":{"userInputMessage":{"modelId":model}}},
+            "additionalModelRequestFields":fields
+        })
+        .to_string()
+    };
+    let fields = serde_json::json!({"max_tokens":1024,"reasoning":{"effort":"low"}});
+    let gpt = body("gpt-5.6-sol", fields.clone());
+    let shaped: serde_json::Value =
+        serde_json::from_str(&manager.model_request_body(1, gpt.clone())).unwrap();
+    assert_eq!(
+        shaped["additionalModelRequestFields"],
+        serde_json::json!({"reasoning":{"effort":"low"}})
+    );
+    let claude = body(SONNET, fields.clone());
+    assert_eq!(manager.model_request_body(1, claude.clone()), claude);
+    for (id, supported) in [(1, true), (2, false)] {
+        let mut data = catalog(&["gpt-5.6-sol", "kimi-k3"]);
+        for model in &mut data.models {
+            model.native_max_tokens = Some(supported);
+        }
+        manager.update_model_catalog(
+            id,
+            &manager.model_catalog_key(id).unwrap(),
+            &data,
+            Instant::now(),
+            false,
+        );
+    }
+    assert_eq!(manager.model_request_body(1, gpt.clone()), gpt);
+    let shaped: serde_json::Value =
+        serde_json::from_str(&manager.model_request_body(2, gpt.clone())).unwrap();
+    assert!(
+        shaped["additionalModelRequestFields"]
+            .get("max_tokens")
+            .is_none()
+    );
+    let kimi = body("kimi-k3", serde_json::json!({"max_tokens":1024}));
+    let shaped: serde_json::Value =
+        serde_json::from_str(&manager.model_request_body(2, kimi.clone())).unwrap();
+    assert!(shaped.get("additionalModelRequestFields").is_none());
+    manager.invalidate_model_catalog(1, &manager.model_catalog_key(1).unwrap(), Instant::now());
+    let shaped: serde_json::Value =
+        serde_json::from_str(&manager.model_request_body(1, gpt)).unwrap();
+    assert!(
+        shaped["additionalModelRequestFields"]
+            .get("max_tokens")
+            .is_none()
+    );
+    manager.invalidate_model_catalog(2, &manager.model_catalog_key(2).unwrap(), Instant::now());
+    let shaped: serde_json::Value =
+        serde_json::from_str(&manager.model_request_body(2, kimi)).unwrap();
+    assert!(shaped.get("additionalModelRequestFields").is_none());
+    assert_eq!(manager.model_request_body(1, "not-json".into()), "not-json");
+}
+
+#[tokio::test]
 async fn provider_models_use_catalog_permissions_and_native_reasoning_limits_by_default() {
     let manager = manager("priority", "KIRO FREE");
     assert!(manager.acquire_context(Some("gpt-5.6-sol")).await.is_err());
@@ -13,6 +73,7 @@ async fn provider_models_use_catalog_permissions_and_native_reasoning_limits_by_
         let model = &mut catalog.models[0];
         model.effort_schema_path = Some("reasoning.effort".into());
         model.effort_levels = vec![effort.into()];
+        model.native_max_tokens = Some(true);
         model.max_output_tokens = Some(limit);
         manager.update_model_catalog(
             id,
@@ -86,6 +147,7 @@ fn catalog(ids: &[&str]) -> ModelCatalog {
                 rate_multiplier: None,
                 rate_unit: None,
                 max_input_tokens: None,
+                native_max_tokens: None,
                 min_output_tokens: None,
                 max_output_tokens: None,
                 effort_levels: vec![],

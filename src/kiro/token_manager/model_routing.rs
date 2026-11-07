@@ -131,6 +131,47 @@ impl MultiTokenManager {
             .map(|catalog| catalog.fetched_at + CATALOG_TTL)
     }
 
+    /// Shape controls using the selected account's fresh schema. Verified GPT/Kimi
+    /// schemas reject max_tokens; unknown catalogs use the same provider default.
+    pub(crate) fn model_request_body(&self, id: u64, body: String) -> String {
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&body) else {
+            return body;
+        };
+        let Some(model) = value
+            .pointer("/conversationState/currentMessage/userInputMessage/modelId")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return body;
+        };
+        let canonical = crate::anthropic::map_model(model).unwrap_or_else(|| model.to_owned());
+        let supported = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .and_then(|entry| self.fresh_catalog(entry))
+                .and_then(|catalog| catalog.models.get(&canonical))
+                .and_then(|model| model.native_max_tokens)
+        };
+        let omit = supported == Some(false)
+            || (supported.is_none() && crate::anthropic::is_non_claude(&canonical));
+        if omit
+            && let Some(fields) = value
+                .get_mut("additionalModelRequestFields")
+                .and_then(serde_json::Value::as_object_mut)
+        {
+            fields.remove("max_tokens");
+            if fields.is_empty() {
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("additionalModelRequestFields");
+            }
+            return serde_json::to_string(&value).unwrap_or(body);
+        }
+        body
+    }
+
     pub(super) fn validate_model_controls(
         &self,
         entry: &CredentialEntry,

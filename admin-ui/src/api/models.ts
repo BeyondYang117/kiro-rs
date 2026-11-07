@@ -7,6 +7,7 @@ export interface AvailableModel {
   rateMultiplier: number | null
   rateUnit: string | null
   maxInputTokens: number | null
+  nativeMaxTokens: boolean | null
   minOutputTokens: number | null
   maxOutputTokens: number | null
   effortLevels: string[]

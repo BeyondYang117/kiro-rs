@@ -89,6 +89,7 @@ pub(crate) struct AvailableModel {
     pub rate_multiplier: Option<f64>,
     pub rate_unit: Option<String>,
     pub max_input_tokens: Option<u64>,
+    pub native_max_tokens: Option<bool>,
     pub min_output_tokens: Option<u64>,
     pub max_output_tokens: Option<u64>,
     pub effort_levels: Vec<String>,
@@ -197,6 +198,19 @@ fn normalize(model: &Value) -> anyhow::Result<AvailableModel> {
         max_input_tokens: model["tokenLimits"]["maxInputTokens"]
             .as_u64()
             .filter(|v| *v > 0),
+        native_max_tokens: schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| {
+                if properties.contains_key("max_tokens") {
+                    Some(true)
+                } else if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false)
+                {
+                    Some(false)
+                } else {
+                    None
+                }
+            }),
         min_output_tokens,
         max_output_tokens,
         effort_levels,

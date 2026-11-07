@@ -70,7 +70,11 @@ impl ModelControls {
     }
 
     pub(crate) fn validate(&self, model: &AvailableModel) -> Result<(), ModelParameterError> {
+        let native_max_tokens = model
+            .native_max_tokens
+            .unwrap_or_else(|| !crate::anthropic::is_non_claude(&model.model_id));
         if let (Some(requested), Some(minimum)) = (self.max_tokens, model.min_output_tokens)
+            && native_max_tokens
             && requested < minimum
         {
             return Err(ModelParameterError("max_tokens"));
@@ -82,6 +86,7 @@ impl ModelControls {
             return Err(ModelParameterError("thinking.display"));
         }
         if let (Some(requested), Some(limit)) = (self.max_tokens, model.max_output_tokens)
+            && native_max_tokens
             && requested > limit
         {
             return Err(ModelParameterError("max_tokens"));
@@ -125,6 +130,7 @@ mod tests {
             rate_multiplier: None,
             rate_unit: None,
             max_input_tokens: None,
+            native_max_tokens: None,
             min_output_tokens: None,
             max_output_tokens: None,
             effort_levels: vec![],
@@ -196,6 +202,25 @@ mod tests {
             model.max_output_tokens = Some(8192);
             model.thinking_displays = vec!["omitted".into()];
         }
+    }
+
+    #[test]
+    fn schemas_without_output_control_do_not_validate_a_field_that_will_be_omitted() {
+        let mut model = model("gpt-5.6-sol");
+        model.native_max_tokens = Some(false);
+        model.min_output_tokens = Some(1024);
+        model.max_output_tokens = Some(4096);
+        model.effort_schema_path = Some("reasoning.effort".into());
+        model.effort_levels = vec!["low".into()];
+        for requested in [1, 8192] {
+            let controls = ModelControls::from_value(&serde_json::json!({"additionalModelRequestFields":{"max_tokens":requested,"reasoning":{"effort":"low"}}})).unwrap();
+            assert!(controls.validate(&model).is_ok());
+        }
+        let controls = ModelControls::from_value(
+            &serde_json::json!({"additionalModelRequestFields":{"reasoning":{"effort":"high"}}}),
+        )
+        .unwrap();
+        assert_eq!(controls.validate(&model).unwrap_err().0, "reasoning.effort");
     }
 
     #[test]

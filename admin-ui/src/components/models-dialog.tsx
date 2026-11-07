@@ -155,6 +155,11 @@ export function ModelsDialog({
                   <dd>
                     {model.maxInputTokens?.toLocaleString() ?? '未上报'} /{' '}
                     {model.maxOutputTokens?.toLocaleString() ?? '未上报'}
+                    {model.nativeMaxTokens === false && (
+                      <span className="block text-muted-foreground">
+                        上游不接受原生 max_tokens，使用模型默认输出配置
+                      </span>
+                    )}
                     {model.minOutputTokens != null && (
                       <span className="block text-muted-foreground">
                         输出下限 {model.minOutputTokens.toLocaleString()}

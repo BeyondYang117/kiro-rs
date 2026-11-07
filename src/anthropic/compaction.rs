@@ -998,7 +998,13 @@ mod tests {
                         model
                     );
                     let fields = &call["additionalModelRequestFields"];
-                    assert_eq!(fields["max_tokens"], 4096);
+                    if super::super::converter::is_non_claude(model) {
+                        // Verified live schemas reject this field; no catalog
+                        // uses the same fallback for generation and compaction.
+                        assert!(fields.get("max_tokens").is_none());
+                    } else {
+                        assert_eq!(fields["max_tokens"], 4096);
+                    }
                     assert!(fields.get("thinking").is_none());
                     assert!(fields.get("output_config").is_none());
                     if !compact && super::super::converter::is_gpt(model) {

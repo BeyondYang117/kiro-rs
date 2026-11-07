@@ -155,6 +155,27 @@ fn output_bounds_and_display_constraints_follow_complete_schema_values() {
 }
 
 #[test]
+fn native_output_support_requires_an_explicit_schema_declaration() {
+    let mut value = model("gpt-5.6-sol");
+    for (schema, expected) in [
+        (Value::Null, None),
+        (serde_json::json!({"properties":{"reasoning":{}}}), None),
+        (
+            serde_json::json!({"properties":{"reasoning":{}},"additionalProperties":false}),
+            Some(false),
+        ),
+        (
+            serde_json::json!({"properties":{"max_tokens":{}},"additionalProperties":false}),
+            Some(true),
+        ),
+        (serde_json::json!({"additionalProperties":false}), None),
+    ] {
+        value["additionalModelRequestFieldsSchema"] = schema;
+        assert_eq!(normalize(&value).unwrap().native_max_tokens, expected);
+    }
+}
+
+#[test]
 fn discovers_provider_specific_schemas_without_promoting_unknown_models() {
     for (id, path, supported) in [
         ("claude-sonnet-5.5", "output_config", true),

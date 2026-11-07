@@ -581,7 +581,7 @@ claude --model claude-haiku-5-5 --effort high
 
 上下文窗口使用项目内维护的模型映射：已确认的 1M 模型会在 `GET /v1/models` 的 `max_input_tokens` 和 `GET /v1/models/{model_id}` 中声明 1,000,000。新版 Kiro `metadataEvent.tokenUsage` 上报用量时，优先返回 `uncachedInputTokens`、`outputTokens` 和缓存读写数；缓存字段分别映射为 `cache_read_input_tokens` / `cache_creation_input_tokens`。重复 metadata 视为快照更新，不累加；缺失或无效的计数保留已有有效值。没有上报的输入数仍按 `contextUsageEvent` 百分比换算，没有该事件则回退本地估算；输出数未上报时使用本地估算。JSON、实时 SSE、`/cc` 缓冲 SSE 和摘要均使用此规则，摘要的缓存用量保留在 `usage.iterations` 中。上游拒绝 1M 请求时，代理无法扩展 Kiro 账号或模型本身的限制。
 
-默认旧协议模式的 `max_tokens` 仍仅用于本地响应/压缩处理；启用 `nativeThinking` 后会映射到 `additionalModelRequestFields.max_tokens`，由上游校验和执行模型上限。Kiro 文档所列模型通常要求最小 1024；Sonnet 5.5、Sonnet 4.6、Opus 4.6 / 4.7 的上限为 64000，Opus 4.8 / 5 的上限为 128000。达到上游长度限制时会返回 `max_tokens` stop reason。模型列表与模型详情的输出上限共用同一来源。`tool_choice`、temperature、top_p、stop_sequences 和 JSON schema 输出也尚未映射到已确认的 Kiro 原生字段。
+Claude 默认旧协议模式的 `max_tokens` 仅用于本地响应/压缩处理；启用 `nativeThinking` 后会映射到 `additionalModelRequestFields.max_tokens`，新鲜账号 schema 明确不支持时省略。GPT / Kimi 的实测规则见下文。Kiro 文档所列 Claude 模型通常要求最小 1024；Sonnet 5.5、Sonnet 4.6、Opus 4.6 / 4.7 的上限为 64000，Opus 4.8 / 5 的上限为 128000。达到上游长度限制时会返回 `max_tokens` stop reason。模型列表与模型详情的输出上限共用本地默认表；账号目录可能报告不同值。`tool_choice`、temperature、top_p、stop_sequences 和 JSON schema 输出也尚未映射到已确认的 Kiro 原生字段。
 
 `stop_sequences` 可省略、设为 `null` 或空数组 `[]`，均表示不设置自定义停止序列；非空数组仍返回 `400 invalid_request_error`，需要客户端移除此参数。此规则同时适用于 `/v1/messages` 和 `/cc/v1/messages` 的流式及非流式请求。
 
@@ -657,7 +657,9 @@ GPT / Kimi 仍使用本项目的 Messages API，可调用 `/v1/messages` 和 `/c
 }
 ```
 
-Kimi K3 目前仅映射通用 `max_tokens`，其他模型参数待账号 schema 确认后再开放。GPT / Kimi 不接受 Claude 的 thinking 配置（`disabled` 可兼容省略），切换模型时不回放 Claude 推理签名。模型目录支持新鲜账号权限、输出上限和 GPT effort 枚举校验；没有新鲜目录时，已知 FREE 账号不会用于这些付费模型。模型支持表不代表账号授权，Kimi K3 的区域限制仍由上游执行。本地已验证协议转换和模拟上游，尚未完成真实账号联调。
+Kimi K3 的额外 reasoning 参数暂未开放。真实账号联调确认 GPT / Kimi 当前 schema 不接受原生 `max_tokens`：代理保留 Messages 请求参数用于本地处理，但默认不向这两类模型透传该字段，使用上游默认输出配置；新鲜账号目录若明确声明支持则按该账号 schema 传递。管理接口用 `nativeMaxTokens` 表示此能力，字段被省略时不按输出上下限误拒绝账号。GPT / Kimi 不接受 Claude 的 thinking 配置（`disabled` 可兼容省略），切换模型时不回放 Claude 推理签名。没有新鲜目录时，已知 FREE 账号不会用于这些付费模型。
+
+2026-11-07 已用一个 Social OAuth 账号在 `us-east-1` 完成真实联调：CLI 覆盖 Haiku 5.5、GPT-5.6 Sol / Terra / Luna、Kimi K3；IDE 覆盖 Haiku 5.5、Sol、Kimi K3。均通过目录、余额、JSON、三种 SSE 和工具往返；Haiku CLI 覆盖旧协议及原生模式。结果不代表其他账号、地区、API Key / IdC、图片、InvokeMCP 或压缩已实测。复现方式见 [真实联调说明](docs/LIVE_TESTING.md)。
 
 Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/claude-sonnet-5.md)。
 

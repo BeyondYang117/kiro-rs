@@ -1,5 +1,23 @@
 # Kiro CLI 适配（2026-11-07）
 
+## 真实账号补验与修复（2026-11-07）
+
+使用本机已登录的一个 Social OAuth 账号，区域 `us-east-1`，通过生产 Token 管理器和 Messages 路由向官方端点实际请求。未输出账号标识和令牌，未修改源配置、凭据或服务进程。
+
+| 端点 / 模式 | 模型 | 结果 |
+|-------------|------|------|
+| CLI，Claude 旧协议 | Haiku 5.5 | JSON、三种 SSE、工具调用及结果继续对话通过 |
+| CLI，原生参数 | Haiku 5.5 | 同上通过 |
+| CLI | GPT-5.6 Sol / Terra / Luna、Kimi K3 | 各模型完整矩阵通过；GPT 使用 schema 确认的 low effort |
+| IDE，原生参数 | Haiku 5.5、GPT-5.6 Sol、Kimi K3 | 各模型完整矩阵通过 |
+| CLI / IDE 控制平面 | 同一账号 | 模型目录返回 22 个模型，余额查询及响应结构校验通过 |
+
+三种 SSE 分别为 `/v1/messages` 实时、`/cc/v1/messages` 实时及缓冲；工具只返回固定字符串，不操作文件或网络。共完成 9 组模型/端点/模式矩阵，每组 6 次生成。只验证这个账号和区域，未验证图片、InvokeMCP、真实压缩、API Key、IdC 或其他区域。
+
+**实测修复**：GPT 首次生成返回 `ValidationException`，原因是 `max_tokens` 未在 schema 中声明且 `additionalProperties=false`。Kimi 的账号 schema 也明确不支持该字段。目录新增 `nativeMaxTokens`（true / false / null）；发送前按所选账号的新鲜 schema 省略不支持的原生 `max_tokens`，同时保留 effort 和其他历史字段。没有新鲜目录时，GPT / Kimi 使用本次实测确认的省略策略；若将来某账号明确声明支持则传递。字段不会发往上游时不按输出上下限误拒绝账号，effort 检查仍然执行。客户端 `max_tokens` 对上述模型不是上游硬输出保证，使用模型默认生成配置。
+
+新增默认忽略的 `live_account_smoke` 及无网络回归，覆盖账号选择、目录能力与字段整形、JSON / SSE 完整性、工具参数、块顺序、输出截断和容量释放。运行方法、请求数量和参数见 [真实联调说明](LIVE_TESTING.md)。下文“未联调”等描述为之前的历史记录，当前结论以本节为准。
+
 ## 增强：目录参数边界与模型分页
 
 - 新鲜账号目录从 `additionalModelRequestFieldsSchema.properties.max_tokens` 提取正整数 `minimum` / `maximum`；上限同时存在于 `tokenLimits.maxOutputTokens` 时取两者较小值。上下限冲突时不使用该组约束，缺失或非法值不推测默认值。
@@ -25,13 +43,13 @@
 |------|--------|
 | 非 Claude 生成 | 精确接受 `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`、`kimi-k3`，普通和 `/cc` Messages 入口均可调用；不支持这些模型的 `-thinking` 别名，不猜测未来模型 ID |
 | GPT 参数 | 接受 `reasoning.effort: none / low / medium / high / xhigh / max`；兼容转换 `output_config.effort`，两者冲突时在发送前返回 400；未提供 effort 时不覆盖上游默认值 |
-| 原生传输 | GPT / Kimi 无论 Claude 的 `nativeThinking` 开关如何都发送原生 `max_tokens`；GPT effort 使用 `reasoning.effort`，不注入 Claude thinking 提示词 |
+| 原生传输 | GPT / Kimi 无论 Claude 的 `nativeThinking` 开关如何都使用原生参数通路；`max_tokens` 按账号 schema 判断支持情况，未知时省略；GPT effort 使用 `reasoning.effort`，不注入 Claude thinking 提示词 |
 | 跨模型历史 | GPT / Kimi 保留文本、图片、工具定义、工具调用及结果，移除 Claude 专用 reasoning/signature/redacted 历史；不接受 Claude 的 thinking 配置，兼容省略 `disabled` |
 | 模型能力 | 模型列表、详情及账号目录包含新增模型；GPT 明示 effort 路径及六种枚举，Kimi 不宣称支持尚未确认的 effort/thinking schema；上下文声明 1M |
 | 账号路由 | 新鲜目录继续判断模型权限；GPT `reasoning.effort` 和输出上限参与账号选择，全部账号不兼容时提前返回 400；未获取目录时沿用订阅启发式，已知 FREE 不用于新增付费模型 |
 | CLI 余额 | `GetUsageLimits` 的 `origin`、`resourceType`、`profileArn` 放入 AWS JSON 请求体，不再放在 URL；IDE 保留 GET 查询协议 |
 
-新增回归覆盖精确模型映射、参数非法值和冲突、CLI 传输、跨提供商历史、账号目录约束、工具输入/输出、JSON、实时和缓冲 SSE、摘要压缩、用量，以及 CLI / IDE 的额度请求绑定。**这些是本地模拟上游测试，未使用真实账号联调**。GPT 参数依据[官方 effort 文档](https://kiro.dev/docs/models/effort.md)，Kimi 仅开放通用输出上限，具体支持值仍由账号目录和上游决定。新增模型继续走 AWS Event Stream，不新增 OpenAI Responses / Chat Completions API，不声称实现 CLI 的 Hooks、审批、沙箱、云会话、Memory 或工作流执行器。
+新增回归覆盖精确模型映射、参数非法值和冲突、CLI 传输、跨提供商历史、账号目录约束、工具输入/输出、JSON、实时和缓冲 SSE、摘要压缩、用量，以及 CLI / IDE 的额度请求绑定。这些原有回归使用本地模拟上游；真实账号补验结果见本文开头。GPT effort 参数依据[官方文档](https://kiro.dev/docs/models/effort.md)，原生输出控制以账号 schema 及实测结果为准。新增模型继续走 AWS Event Stream，不新增 OpenAI Responses / Chat Completions API，不声称实现 CLI 的 Hooks、审批、沙箱、云会话、Memory 或工作流执行器。
 
 本轮已完整下载官方 Linux ARM64 3.1.0 发布包，SHA-256 为 `acf8e80a10a079bad0c4e28b38a00aa4b3c537067c7844490384fddf94f88e7d`，与 manifest 一致。未安装或执行其中二进制；静态字符串确认 runtime / management 主机、生成 / MCP / 模型目录 targets、SDK `0.1.19636`、`additionalModelRequestFields`、`KIRO_CLI` 及 `GetUsageLimits` target。额度请求体字段同时依据下述开源生成序列化器确认。静态证据不证明账号可以使用任一模型。
 
@@ -71,7 +89,7 @@ Claude 原生参数默认仍关闭；CLI 可单独设置 `endpoints.cli.nativeTh
 - [Amazon Q CLI 开源前身](https://github.com/aws/amazon-q-developer-cli/tree/15cc8f3cd18c4272925ce1c7053268eedff1ea0a)的生成/余额序列化器与 User-Agent 拦截器。旧仓库的 `CLI` origin 不代表新版 Kiro CLI。
 - 本机 Kiro 共享客户端 `extensions/kiro.kiro-agent/dist/extension.js` 中 `resolveServerOrigin` 映射：`kiro-cli` / `kiro-cli-non-interactive` → `KIRO_CLI`；该来源用于模型目录与生成。官方 CLI 3.1.0 发布包静态字符串也包含独立的 `KiroCli` origin 枚举。
 
-本地测试覆盖 CLI 请求构造、工具/图片/历史、旧协议和原生参数、分页及版本源解析；完整既有套件用于回归。**尚未使用真实账号验证 CLI 上游调用**；其中模型目录已修正 AWS JSON 的请求体绑定；InvokeMCP 请求/响应及账号区域权限仍需联调。静态核对不等于已验证 CLI 3.x 全部工作流。
+本地测试覆盖 CLI 请求构造、工具/图片/历史、旧协议和原生参数、分页及版本源解析；完整既有套件用于回归。真实 CLI 模型目录、余额和本文开头列出的生成矩阵已补验；InvokeMCP 请求/响应及其他账号区域权限仍需联调。静态核对不等于已验证 CLI 3.x 全部工作流。
 
 ---
 
