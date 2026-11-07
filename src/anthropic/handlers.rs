@@ -535,7 +535,7 @@ fn validate_and_normalize_request(payload: &mut MessagesRequest) -> Result<(), S
         return Err("max_tokens must be greater than zero".into());
     }
     normalize_message_input(&payload.model, &mut payload.system, &mut payload.messages)?;
-    if let Some(thinking) = &payload.thinking {
+    if let Some(thinking) = &mut payload.thinking {
         if !matches!(
             thinking.thinking_type.as_str(),
             "enabled" | "adaptive" | "disabled" | "between_tools"
@@ -564,7 +564,25 @@ fn validate_and_normalize_request(payload: &mut MessagesRequest) -> Result<(), S
             .as_deref()
             .is_some_and(|display| !matches!(display, "summarized" | "omitted"))
         {
-            return Err("thinking.display must be summarized or omitted".into());
+            // Display is an optional presentation hint. New clients may send
+            // values outside Kiro's enum; omit the hint rather than rejecting
+            // an otherwise valid generation or forwarding an invalid control.
+            let received_display = crate::request_log::public_error_message(
+                &thinking
+                    .display
+                    .as_deref()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(128)
+                    .collect::<String>(),
+            );
+            tracing::warn!(
+                stage = "request_normalization",
+                parameter = "thinking.display",
+                received = %received_display,
+                "Unsupported thinking.display ignored; using the default display. Use summarized or omitted, or remove thinking.display."
+            );
+            thinking.display = None;
         }
     }
     if let Some(config) = &payload.output_config {
@@ -1531,14 +1549,11 @@ fn create_buffered_sse_stream(
 }
 
 fn json_rejection(error: axum::extract::rejection::JsonRejection) -> Response {
-    (
-        error.status(),
-        Json(ErrorResponse::new(
-            "invalid_request_error",
-            error.body_text(),
-        )),
-    )
-        .into_response()
+    let response = ErrorResponse::new("invalid_request_error", error.body_text());
+    crate::request_log::error_details(&response.error.message);
+    tracing::warn!(stage = "request_deserialization", error = %response.error.message,
+        "Request body rejected locally; no upstream request was sent");
+    (error.status(), Json(response)).into_response()
 }
 
 pub(super) async fn post_messages_route(
@@ -1648,6 +1663,49 @@ mod model_capability_tests {
         super::apply_thinking_defaults(&mut payload);
         assert!(payload.thinking.is_none());
         assert!(payload.output_config.is_none());
+    }
+
+    #[test]
+    fn thinking_display_falls_back_without_changing_reasoning_controls() {
+        for kind in ["enabled", "adaptive", "disabled"] {
+            for display in [
+                None,
+                Some("summarized"),
+                Some("omitted"),
+                Some(""),
+                Some("full"),
+                Some("future-value"),
+            ] {
+                let mut value = serde_json::json!({"model":"claude-haiku-5-5", "max_tokens":4096,
+                    "messages":[{"role":"user", "content":"hi"}],
+                    "thinking":{"type":kind, "budget_tokens":2048},
+                    "output_config":{"effort":"high"}});
+                if let Some(display) = display {
+                    value["thinking"]["display"] = display.into();
+                }
+                let mut payload: super::MessagesRequest = serde_json::from_value(value).unwrap();
+                // Both outer and inner handlers normalize; the fallback must be idempotent.
+                for _ in 0..2 {
+                    super::validate_and_normalize_request(&mut payload).unwrap();
+                    let thinking = payload.thinking.as_ref().unwrap();
+                    assert_eq!(thinking.thinking_type, kind);
+                    assert_eq!(thinking.budget_tokens, 2048);
+                    assert_eq!(
+                        thinking.display.as_deref(),
+                        display.filter(|v| matches!(*v, "summarized" | "omitted"))
+                    );
+                    assert_eq!(payload.output_config.as_ref().unwrap().effort, "high");
+                    let fields =
+                        super::super::converter::additional_model_request_fields(&payload).unwrap();
+                    assert_eq!(
+                        fields["thinking"]
+                            .get("display")
+                            .and_then(serde_json::Value::as_str),
+                        thinking.display.as_deref()
+                    );
+                }
+            }
+        }
     }
 
     #[test]

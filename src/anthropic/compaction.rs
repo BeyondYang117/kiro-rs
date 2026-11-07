@@ -131,11 +131,11 @@ fn instructions(custom: Option<String>) -> Result<String, String> {
 }
 
 pub(super) fn invalid_request(message: impl Into<String>) -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(ErrorResponse::new("invalid_request_error", message)),
-    )
-        .into_response()
+    let response = ErrorResponse::new("invalid_request_error", message);
+    crate::request_log::error_details(&response.error.message);
+    tracing::warn!(stage = "request_validation", error = %response.error.message,
+        "Request parameters rejected locally");
+    (StatusCode::BAD_REQUEST, Json(response)).into_response()
 }
 
 fn signature(summary: &str) -> String {
@@ -1047,7 +1047,7 @@ mod tests {
                 ),
                 ("claude-sonnet-5.5", "disabled", "omitted", "xhigh", false),
                 ("claude-opus-5.5", "between_tools", "omitted", "high", false),
-                ("claude-sonnet-5.5", "adaptive", "invalid", "high", false),
+                ("claude-sonnet-5.5", "adaptive", "invalid", "high", true),
                 ("claude-haiku-4.5", "adaptive", "omitted", "", false),
             ] {
                 let upstream =
@@ -1066,6 +1066,136 @@ mod tests {
                 );
                 let _ = to_bytes(response.into_body(), 1_000_000).await.unwrap();
                 assert_eq!(upstream.requests.lock().unwrap().len(), usize::from(valid));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn thinking_display_fallback_is_logged_across_message_routes_and_response_modes() {
+        for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+            for streaming in [false, true] {
+                for compact in [false, true] {
+                    let mut upstream = mock(frame(
+                        "assistantResponseEvent",
+                        json!({"content":"<summary>answer</summary>"}),
+                    ))
+                    .await;
+                    let provider =
+                        std::sync::Arc::into_inner(upstream.state.kiro_provider.take().unwrap())
+                            .unwrap();
+                    let app = crate::anthropic::create_router_with_provider(
+                        ["test"],
+                        Some(provider),
+                        true,
+                        buffered,
+                        false,
+                    );
+                    let path = if cc {
+                        "/cc/v1/messages"
+                    } else {
+                        "/v1/messages"
+                    };
+                    let mut payload = json!({"model":"claude-haiku-5-5", "max_tokens":4096,
+                        "stream":streaming, "messages":[{"role":"user", "content":"private-prompt-sentinel"}],
+                        "thinking":{"type":"adaptive", "display":"full\nsk-display-secret"},
+                        "output_config":{"effort":"high"}});
+                    if compact {
+                        payload["compaction"] = json!({"type":"summarize"});
+                    }
+                    let req = axum::http::Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("x-api-key", "test")
+                        .header("content-type", "application/json")
+                        .body(Body::from(payload.to_string()))
+                        .unwrap();
+                    let record = crate::request_log::tests::capture_request(app, req).await;
+                    assert_eq!(record["status"], "success", "{record}");
+                    assert_eq!(record["httpStatus"], 200);
+                    assert_eq!(record["attempts"], 1);
+                    assert!(record["error"].is_null());
+                    let diagnostics = record["diagnostics"].as_array().unwrap();
+                    let warnings: Vec<_> = diagnostics
+                        .iter()
+                        .filter(|d| {
+                            d["message"]
+                                .as_str()
+                                .unwrap()
+                                .contains("Unsupported thinking.display")
+                        })
+                        .collect();
+                    assert_eq!(warnings.len(), 1, "{record}");
+                    let message = warnings[0]["message"].as_str().unwrap();
+                    assert!(message.contains("request_normalization"));
+                    assert!(message.contains("summarized or omitted"));
+                    assert!(message.contains("[REDACTED]"));
+                    assert!(!message.contains("sk-display-secret"));
+                    assert!(!message.contains("private-prompt-sentinel"));
+                    let requests = upstream.requests.lock().unwrap();
+                    assert_eq!(requests.len(), 1);
+                    assert!(!requests[0].to_string().contains("sk-display-secret"));
+                    assert!(!requests[0].to_string().contains("\"display\""));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn local_parameter_errors_have_readable_messages_and_stage_diagnostics() {
+        for cc in [false, true] {
+            for (thinking, status, stage, message) in [
+                (
+                    json!({"type":"unknown", "display":"full"}),
+                    StatusCode::BAD_REQUEST,
+                    "request_validation",
+                    "thinking.type",
+                ),
+                (
+                    json!({"type":"adaptive", "display":42}),
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "request_deserialization",
+                    "string",
+                ),
+            ] {
+                let mut upstream = mock(Vec::new()).await;
+                let provider =
+                    std::sync::Arc::into_inner(upstream.state.kiro_provider.take().unwrap())
+                        .unwrap();
+                let app = crate::anthropic::create_router_with_provider(
+                    ["test"],
+                    Some(provider),
+                    true,
+                    false,
+                    false,
+                );
+                let path = if cc {
+                    "/cc/v1/messages"
+                } else {
+                    "/v1/messages"
+                };
+                let req = axum::http::Request::builder().method("POST").uri(path)
+                    .header("x-api-key", "test").header("content-type", "application/json")
+                    .body(Body::from(json!({"model":"claude-haiku-5-5", "max_tokens":4096, "stream":true,
+                        "messages":[{"role":"user", "content":"private-prompt-sentinel"}], "thinking":thinking}).to_string())).unwrap();
+                let record = crate::request_log::tests::capture_request(app, req).await;
+                assert_eq!(record["status"], "error");
+                assert_eq!(record["httpStatus"], status.as_u16());
+                assert_eq!(record["attempts"], 0);
+                assert!(record["credentialId"].is_null());
+                assert!(record["upstreamAttempts"].as_array().unwrap().is_empty());
+                let error = record["error"].as_str().unwrap();
+                assert!(error.contains(message), "{record}");
+                assert!(!error.starts_with('{'), "{record}");
+                assert!(!error.contains("private-prompt-sentinel"));
+                assert!(
+                    record["diagnostics"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|d| d["message"].as_str().unwrap().contains(stage)),
+                    "{record}"
+                );
+                assert!(upstream.requests.lock().unwrap().is_empty());
             }
         }
     }

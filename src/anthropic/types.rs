@@ -83,6 +83,7 @@ pub struct Thinking {
     #[allow(dead_code)]
     pub budget_tokens: i32,
     /// Kiro native reasoning visibility (independent of the reasoning effort).
+    /// Unknown string hints are omitted during request normalization with a warning.
     #[serde(default)]
     pub display: Option<String>,
 }

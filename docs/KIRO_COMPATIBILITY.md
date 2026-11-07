@@ -10,7 +10,7 @@
 | 原生生成上限 | 启用原生模式后传递 `additionalModelRequestFields.max_tokens`；旧协议模式仍不发送原生字段 |
 | 新版 Claude thinking | 原生模式将支持 adaptive 的模型的 `enabled` 转为 `adaptive`，移除固定预算；4.5 系列保留 budgeted thinking |
 | Sonnet 5.5 | 支持 `between_tools`；兼容 `disabled` 请求并转为 `between_tools`，该设置仅接受 low / medium / high effort |
-| 推理显示设置 | 接受、校验并在原生模式传递 `thinking.display: summarized / omitted` |
+| 推理显示设置 | 原生模式透传 `thinking.display: summarized / omitted`；未知字符串忽略并记录脱敏诊断，使用默认显示；非字符串仍拒绝 |
 | 模型能力与上限 | 修正 Haiku 4.5 的 budgeted thinking 能力；模型列表与详情共用输出上限，Sonnet 5.5 为 64K |
 | 用量 metadata | 优先使用 `metadataEvent.tokenUsage` 的有效 token 计数，覆盖 JSON、实时 SSE、缓冲 SSE、压缩摘要；无上报时保留既有估算 |
 | 缓存计数 | `cacheReadInputTokens` / `cacheWriteInputTokens` 转为 Anthropic 缓存用量字段；压缩调用保存在 `usage.iterations` 中 |
