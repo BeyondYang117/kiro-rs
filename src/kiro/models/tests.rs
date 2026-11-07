@@ -19,12 +19,13 @@ async fn cli_catalog_uses_control_plane_operation_and_keeps_pagination() {
             assert_eq!(headers["authorization"], "Bearer test-token");
             assert!(headers["user-agent"].to_str().unwrap().contains("app/AmazonQ-For-CLI"));
             assert!(!headers.contains_key("x-amz-user-agent"));
-            assert_eq!(query["origin"], "CLI");
-            assert_eq!(query["profileArn"], "profile+/=&");
-            assert_eq!(body, "{}");
-            axum::Json(if query.contains_key("nextToken") {
-                assert_eq!(query["nextToken"], "cursor+/=&");
-                serde_json::json!({"models":[model("claude-opus-4.6")]})
+            assert!(query.is_empty(), "AWS JSON members belong in the body");
+            let input: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(input["origin"], "KIRO_CLI");
+            assert_eq!(input["profileArn"], "profile+/=&");
+            axum::Json(if input.get("nextToken").is_some() {
+                assert_eq!(input["nextToken"], "cursor+/=&");
+                serde_json::json!({"models":[model("claude-opus-4.6"), model("claude-haiku-5.5"), model("gpt-5.6-sol")]})
             } else {
                 serde_json::json!({"models":[model("claude-sonnet-4.6")],"nextToken":"cursor+/=&","defaultModel":{"modelId":"claude-sonnet-4.6"}})
             })
@@ -43,12 +44,56 @@ async fn cli_catalog_uses_control_plane_operation_and_keeps_pagination() {
     let catalog = fetch_pages(&client, &url, &credentials, &config, "test-token")
         .await
         .unwrap();
-    assert_eq!(catalog.models.len(), 2);
+    assert_eq!(catalog.models.len(), 4);
+    assert!(
+        catalog
+            .models
+            .iter()
+            .any(|model| model.model_id == "claude-haiku-5.5")
+    );
+    assert!(
+        catalog
+            .models
+            .iter()
+            .any(|model| model.model_id == "gpt-5.6-sol" && !model.proxy_supported)
+    );
     assert_eq!(
         catalog.default_model_id.as_deref(),
         Some("claude-sonnet-4.6")
     );
     task.abort();
+}
+
+#[tokio::test]
+async fn discovery_failure_exposes_only_status_allowlisted_code_and_uuid() {
+    for (code, expected_code) in [
+        (
+            "com.amazon.kiro#ValidationException",
+            Some("ValidationException"),
+        ),
+        ("secret-token-in-error-type", None),
+    ] {
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(400)
+                .header("x-amzn-requestid", "69a53241-4c50-4f8b-8748-1700f8ca7d5e")
+                .body(reqwest::Body::from(
+                    serde_json::json!({
+                        "__type":code, "message":"private-profile-and-token"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        );
+        let error = discovery_http_error(response).await;
+        assert_eq!(error.status, 400);
+        assert_eq!(error.code, expected_code);
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("HTTP 400"));
+        assert!(diagnostic.contains("69a53241-4c50-4f8b-8748-1700f8ca7d5e"));
+        assert!(!diagnostic.contains("private-profile"));
+        assert!(!diagnostic.contains("secret-token"));
+    }
 }
 
 fn model(id: &str) -> Value {

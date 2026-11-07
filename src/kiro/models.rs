@@ -19,6 +19,67 @@ const MAX_MODELS: usize = 1000;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const CATALOG_TTL: Duration = Duration::from_secs(300);
 
+/// Only structured, non-sensitive upstream diagnostics may reach the admin UI.
+#[derive(Debug)]
+pub(crate) struct DiscoveryHttpError {
+    status: u16,
+    code: Option<&'static str>,
+    request_id: Option<uuid::Uuid>,
+}
+
+impl std::fmt::Display for DiscoveryHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "模型查询上游返回 HTTP {}", self.status)?;
+        if let Some(code) = self.code {
+            write!(f, " ({code})")?;
+        }
+        if let Some(id) = self.request_id {
+            write!(f, "，请求 ID: {id}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for DiscoveryHttpError {}
+
+async fn discovery_http_error(response: reqwest::Response) -> DiscoveryHttpError {
+    let status = response.status().as_u16();
+    let request_id = response
+        .headers()
+        .get("x-amzn-requestid")
+        .or_else(|| response.headers().get("x-amz-request-id"))
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| uuid::Uuid::parse_str(value).ok());
+    let body = read_bounded_text(
+        response,
+        16 * 1024,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    )
+    .await
+    .ok()
+    .and_then(|body| serde_json::from_str::<Value>(&body).ok());
+    let code = body
+        .as_ref()
+        .and_then(|body| body.get("__type").or_else(|| body.get("code")))
+        .and_then(Value::as_str)
+        .and_then(|code| match code.rsplit('#').next()? {
+            "ValidationException" => Some("ValidationException"),
+            "AccessDeniedException" => Some("AccessDeniedException"),
+            "UnauthorizedException" => Some("UnauthorizedException"),
+            "UnrecognizedClientException" => Some("UnrecognizedClientException"),
+            "ThrottlingException" => Some("ThrottlingException"),
+            "InternalServerException" => Some("InternalServerException"),
+            "UnknownOperationException" => Some("UnknownOperationException"),
+            _ => None,
+        });
+    DiscoveryHttpError {
+        status,
+        code,
+        request_id,
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AvailableModel {
@@ -136,7 +197,17 @@ fn request(
 ) -> reqwest::RequestBuilder {
     let machine = machine_id::generate_from_credentials(credentials, config);
     let cli = crate::kiro::endpoint::is_cli(credentials, config);
+    let origin = crate::kiro::endpoint::origin(credentials, config);
     let base = if cli {
+        // AWS JSON operations serialize members in the document body. The IDE
+        // REST operation below instead binds these same members to the query.
+        let mut input = serde_json::json!({"origin": origin});
+        if let Some(arn) = &credentials.profile_arn {
+            input["profileArn"] = arn.clone().into();
+        }
+        if let Some(cursor) = next_token {
+            input["nextToken"] = cursor.into();
+        }
         client
             .post(url)
             .header("content-type", "application/x-amz-json-1.0")
@@ -144,12 +215,18 @@ fn request(
                 "x-amz-target",
                 "KiroControlPlaneBearerService.ListAvailableModels",
             )
-            .body("{}")
+            .body(input.to_string())
     } else {
-        client.get(url)
+        let mut req = client.get(url).query(&[("origin", origin)]);
+        if let Some(arn) = &credentials.profile_arn {
+            req = req.query(&[("profileArn", arn)]);
+        }
+        if let Some(cursor) = next_token {
+            req = req.query(&[("nextToken", cursor)]);
+        }
+        req
     };
     let mut req = base
-        .query(&[("origin", crate::kiro::endpoint::origin(credentials, config))])
         .bearer_auth(token)
         .header("accept", "application/json")
         .header("amz-sdk-invocation-id", uuid::Uuid::new_v4().to_string())
@@ -167,12 +244,6 @@ fn request(
         req = req
             .header("user-agent", &ua)
             .header("x-amz-user-agent", &ua);
-    }
-    if let Some(arn) = &credentials.profile_arn {
-        req = req.query(&[("profileArn", arn)]);
-    }
-    if let Some(cursor) = next_token {
-        req = req.query(&[("nextToken", cursor)]);
     }
     if credentials.is_api_key_credential() {
         if !cli {
@@ -208,12 +279,9 @@ async fn fetch_pages(
         let response = request(client, url, credentials, config, token, cursor.as_deref())
             .send()
             .await?;
-        // No response body is included in errors; it may contain account information.
-        ensure!(
-            response.status().is_success(),
-            "model discovery returned HTTP {}",
-            response.status()
-        );
+        if !response.status().is_success() {
+            return Err(discovery_http_error(response).await.into());
+        }
         let body = read_bounded_text(
             response,
             bytes_left.min(1024 * 1024),

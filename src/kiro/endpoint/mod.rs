@@ -27,7 +27,7 @@ pub(crate) fn is_cli(credentials: &KiroCredentials, config: &Config) -> bool {
 
 pub(crate) fn origin(credentials: &KiroCredentials, config: &Config) -> &'static str {
     if is_cli(credentials, config) {
-        "CLI"
+        cli::CLI_ORIGIN
     } else {
         "AI_EDITOR"
     }
@@ -136,6 +136,20 @@ pub fn default_is_bearer_token_invalid(body: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn origin_tracks_the_effective_endpoint_including_account_overrides() {
+        let mut config = Config::default();
+        let mut credentials = KiroCredentials::default();
+        assert_eq!(origin(&credentials, &config), "KIRO_CLI");
+        config.default_endpoint = "ide".into();
+        assert_eq!(origin(&credentials, &config), "AI_EDITOR");
+        credentials.endpoint = Some("cli".into());
+        assert_eq!(origin(&credentials, &config), "KIRO_CLI");
+        credentials.endpoint = Some("ide".into());
+        config.default_endpoint = "cli".into();
+        assert_eq!(origin(&credentials, &config), "AI_EDITOR");
+    }
 
     #[test]
     fn test_default_monthly_request_limit_detects_reason() {

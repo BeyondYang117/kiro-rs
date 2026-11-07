@@ -137,7 +137,20 @@ impl CatalogCache {
                 });
                 Ok(response)
             }
-            _ => {
+            failure => {
+                // Do not forward arbitrary error chains (OAuth, proxy URLs and
+                // response messages can contain credentials). This type holds
+                // only status, an allowlisted code and a UUID request ID.
+                let detail = match &failure {
+                    Ok(Err(error)) => error
+                        .downcast_ref::<crate::kiro::models::DiscoveryHttpError>()
+                        .map(ToString::to_string),
+                    Err(_) => Some("模型查询超时".into()),
+                    _ => None,
+                };
+                if let Some(detail) = &detail {
+                    tracing::warn!(credential_id = id, diagnostic = %detail, "模型目录查询失败");
+                }
                 if let Some(hit) = cached
                     .as_mut()
                     .filter(|hit| hit.key == key && hit.fetched_at.elapsed() < STALE_TTL)
@@ -145,11 +158,21 @@ impl CatalogCache {
                     hit.response.stale = true;
                     hit.response.refresh_error =
                         Some("刷新失败，当前展示上次成功查询的模型；不能据此确认当前授权".into());
+                    if let Some(detail) = &detail {
+                        hit.response
+                            .refresh_error
+                            .as_mut()
+                            .unwrap()
+                            .push_str(&format!("；{detail}"));
+                    }
                     let mut response = hit.response.clone();
                     response.cached = true;
                     Ok(response)
                 } else {
-                    Err(unavailable())
+                    Err(match detail {
+                        Some(detail) => AdminServiceError::UpstreamError(detail),
+                        None => unavailable(),
+                    })
                 }
             }
         }

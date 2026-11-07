@@ -1,5 +1,9 @@
 # Kiro CLI 适配（2026-11-07）
 
+生产排查修正：新版 Kiro CLI 的 origin 为 `KIRO_CLI`，此前误用了 Amazon Q 前身的 `CLI`，现统一修正模型目录、当前/历史生成消息及余额请求的客户端来源。旧 origin 下只返回两个模型的目录不能据此认定账号仅有两种模型权限；修正后需重新查询并进行真实生成验证。
+
+CLI 模型目录的 AWS JSON 操作不使用 IDE 的 URL 查询参数绑定，现将 origin、profileArn 和分页游标放入 JSON 请求体。查询失败时管理页显示上游 HTTP 状态、白名单错误类型及 UUID 请求 ID；不返回原始响应或凭证。此修正用于恢复目录查询，生成请求的 `INVALID_MODEL_ID` 仍须依据账号目录核对。
+
 默认端点已改为 `cli`，保留显式 `ide`。本项目直接构造上游 HTTP 请求，不调用本机 kiro-cli 进程，也不实现 CLI 自身的 agent harness。
 
 ```json
@@ -15,11 +19,11 @@
 |------|----------|
 | 生成 | `POST https://runtime.<apiRegion>.kiro.dev/`，`x-amz-target: AmazonCodeWhispererStreamingService.GenerateAssistantResponse` |
 | WebSearch / MCP | 同一 runtime 根路径，`x-amz-target: AmazonCodeWhispererStreamingService.InvokeMCP`，保留 JSON-RPC 字段并注入 `profileArn` |
-| 模型目录 | `POST https://management.<apiRegion>.kiro.dev/?origin=CLI`，`x-amz-target: KiroControlPlaneBearerService.ListAvailableModels`，保留 profile 与分页查询参数 |
-| 余额 | `POST https://q.<apiRegion>.amazonaws.com/?origin=CLI&resourceType=AGENTIC_REQUEST`，`x-amz-target: AmazonCodeWhispererService.GetUsageLimits` |
+| 模型目录 | `POST https://management.<apiRegion>.kiro.dev/`，`x-amz-target: KiroControlPlaneBearerService.ListAvailableModels`；`origin: KIRO_CLI`、`profileArn`、`nextToken` 放在 JSON 请求体中 |
+| 余额 | `POST https://q.<apiRegion>.amazonaws.com/?origin=KIRO_CLI&resourceType=AGENTIC_REQUEST`，`x-amz-target: AmazonCodeWhispererService.GetUsageLimits` |
 | 版本检查 | 按运行中的默认端点选择 CLI / IDE 官方发布源；CLI 更新 `kiroCliVersion`，IDE 更新 `kiroVersion` |
 
-CLI 使用 `application/x-amz-json-1.0`、Rust SDK 风格 User-Agent（`md/appVersion-3.1.0 app/AmazonQ-For-CLI`）及 bearer 认证。当前和历史用户消息均改为 `origin: CLI`，包括旧协议 thinking 注入的历史；触发类型为 `MANUAL`，移除 IDE continuation/task 字段。工具、图片和对话 ID 保留。Token 刷新继续使用凭据对应的 Social / IdC OAuth 流程，CLI 分支使用 CLI 标识。API Key 沿用已有 bearer / `API_KEY` 扩展，未声明实现 AWS SigV4。
+CLI 使用 `application/x-amz-json-1.0`、Rust SDK 风格 User-Agent（`md/appVersion-3.1.0 app/AmazonQ-For-CLI`）及 bearer 认证。当前和历史用户消息均改为 `origin: KIRO_CLI`，包括旧协议 thinking 注入的历史；触发类型为 `MANUAL`，移除 IDE continuation/task 字段。工具、图片和对话 ID 保留。Token 刷新继续使用凭据对应的 Social / IdC OAuth 流程，CLI 分支使用 CLI 标识。API Key 沿用已有 bearer / `API_KEY` 扩展，未声明实现 AWS SigV4。
 
 原生参数默认仍关闭；CLI 可单独设置 `endpoints.cli.nativeThinking: true`，启用后复用原生模型参数、reasoning 历史及新鲜账号目录的参数校验。IDE 开关不影响 CLI。生成模型仍为现有 Claude 映射。
 
@@ -27,9 +31,10 @@ CLI 使用 `application/x-amz-json-1.0`、Rust SDK 风格 User-Agent（`md/appVe
 
 - [官方安装脚本](https://cli.kiro.dev/install)与[CLI 稳定版 manifest](https://prod.download.cli.kiro.dev/stable/latest/manifest.json)：当前 `3.1.0`。
 - 官方 CLI 3.1.0 Linux 发布包的部分解压静态字符串：确认 runtime/management 主机、Rust streaming SDK `0.1.19636`、三个 operation target、`additionalModelRequestFields`、CLI app/version 标识。下载较慢，仅检查部分内容，未安装或运行 CLI，未完成完整包校验。
-- [Amazon Q CLI 开源前身](https://github.com/aws/amazon-q-developer-cli/tree/15cc8f3cd18c4272925ce1c7053268eedff1ea0a)的生成/余额序列化器、CLI origin、profile/分页查询绑定与 User-Agent 拦截器。
+- [Amazon Q CLI 开源前身](https://github.com/aws/amazon-q-developer-cli/tree/15cc8f3cd18c4272925ce1c7053268eedff1ea0a)的生成/余额序列化器与 User-Agent 拦截器。旧仓库的 `CLI` origin 不代表新版 Kiro CLI。
+- 本机 Kiro 共享客户端 `extensions/kiro.kiro-agent/dist/extension.js` 中 `resolveServerOrigin` 映射：`kiro-cli` / `kiro-cli-non-interactive` → `KIRO_CLI`；该来源用于模型目录与生成。官方 CLI 3.1.0 发布包静态字符串也包含独立的 `KiroCli` origin 枚举。
 
-本地测试覆盖 CLI 请求构造、工具/图片/历史、旧协议和原生参数、分页及版本源解析；完整既有套件用于回归。**尚未使用真实账号验证 CLI 上游调用**；尤其新版 control-plane 的具体 query/body 绑定、InvokeMCP 请求/响应及账号区域权限仍需联调。静态核对不等于已验证 CLI 3.x 全部工作流。
+本地测试覆盖 CLI 请求构造、工具/图片/历史、旧协议和原生参数、分页及版本源解析；完整既有套件用于回归。**尚未使用真实账号验证 CLI 上游调用**；其中模型目录已修正 AWS JSON 的请求体绑定；InvokeMCP 请求/响应及账号区域权限仍需联调。静态核对不等于已验证 CLI 3.x 全部工作流。
 
 ---
 

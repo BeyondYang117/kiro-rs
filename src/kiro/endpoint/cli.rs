@@ -8,6 +8,8 @@ use super::{KiroEndpoint, RequestContext, ide};
 use crate::{kiro::model::credentials::KiroCredentials, model::config::Config};
 
 pub const CLI_ENDPOINT_NAME: &str = "cli";
+// Kiro's current CLI surface is distinct from the legacy Amazon Q `CLI` origin.
+pub const CLI_ORIGIN: &str = "KIRO_CLI";
 pub const GENERATE_TARGET: &str = "AmazonCodeWhispererStreamingService.GenerateAssistantResponse";
 pub const MCP_TARGET: &str = "AmazonCodeWhispererStreamingService.InvokeMCP";
 
@@ -157,7 +159,7 @@ fn set_origin(message: &mut Value) {
         .get_mut("userInputMessage")
         .and_then(Value::as_object_mut)
     {
-        user.insert("origin".into(), "CLI".into());
+        user.insert("origin".into(), CLI_ORIGIN.into());
     }
 }
 
@@ -203,12 +205,12 @@ mod tests {
             assert!(state.get("agentTaskType").is_none());
             assert!(state.get("agentContinuationId").is_none());
             let mut current = body["conversationState"]["currentMessage"].clone();
-            current["userInputMessage"]["origin"] = "CLI".into();
+            current["userInputMessage"]["origin"] = "KIRO_CLI".into();
             assert_eq!(state["currentMessage"], current);
             let history = state["history"].as_array().unwrap();
             for message in history {
                 if let Some(user) = message.get("userInputMessage") {
-                    assert_eq!(user["origin"], "CLI");
+                    assert_eq!(user["origin"], "KIRO_CLI");
                 }
             }
             assert_eq!(
