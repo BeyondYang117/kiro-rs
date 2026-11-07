@@ -254,12 +254,18 @@ const groups: {
     id: 'kiro-version',
     title: 'Kiro 版本',
     description:
-      '检查官方稳定版并更新上游请求使用的版本标识，保存后重启服务生效。',
+      '按当前运行的默认端点检查官方稳定版。CLI 和 IDE 的版本分别保存，重启后生效。',
     fields: [
       {
         path: 'kiroVersion',
-        label: 'Kiro 版本标识',
+        label: 'Kiro IDE 版本标识',
         help: '格式为 major.minor.patch，例如 1.4.121。可手动指定版本以回退兼容性。',
+        type: 'text',
+      },
+      {
+        path: 'kiroCliVersion',
+        label: 'Kiro CLI 版本标识',
+        help: '格式为 major.minor.patch，例如 3.1.0。用于 CLI 端点，与 IDE 版本独立。',
         type: 'text',
       },
     ],
@@ -473,7 +479,8 @@ export function SystemSettingsPage({
       // 每次更新重新检查，避免把页面上过期的版本写回配置。
       const latest = await getLatestKiroVersion()
       setLatestVersion(latest)
-      const savedParts = snapshot.settings.kiroVersion.split('.').map(Number)
+      const versionField = latest.endpoint === 'cli' ? 'kiroCliVersion' : 'kiroVersion'
+      const savedParts = snapshot.settings[versionField].split('.').map(Number)
       const latestParts = latest.latestVersion.split('.').map(Number)
       const differingPart = latestParts.findIndex(
         (part, index) => part !== savedParts[index]
@@ -486,7 +493,7 @@ export function SystemSettingsPage({
         return
       }
       const result = await saveSettings(
-        { ...snapshot.settings, kiroVersion: latest.latestVersion },
+        { ...snapshot.settings, [versionField]: latest.latestVersion },
         snapshot.revision
       )
       setSnapshot(result)
@@ -654,10 +661,10 @@ export function SystemSettingsPage({
                             <dl className="grid gap-3 text-sm sm:grid-cols-3">
                               <div>
                                 <dt className="text-muted-foreground">
-                                  当前运行版本
+                                  当前运行版本（{snapshot.running.defaultEndpoint}）
                                 </dt>
                                 <dd className="mt-1 font-mono">
-                                  {snapshot.running.kiroVersion}
+                                  {snapshot.running.defaultEndpoint === 'cli' ? snapshot.running.kiroCliVersion : snapshot.running.kiroVersion}
                                 </dd>
                               </div>
                               <div>
@@ -665,7 +672,7 @@ export function SystemSettingsPage({
                                   已保存版本
                                 </dt>
                                 <dd className="mt-1 font-mono">
-                                  {snapshot.settings.kiroVersion}
+                                  {snapshot.running.defaultEndpoint === 'cli' ? snapshot.settings.kiroCliVersion : snapshot.settings.kiroVersion}
                                 </dd>
                               </div>
                               <div>
@@ -811,10 +818,10 @@ export function SystemSettingsPage({
                                   required={
                                     field.type !== 'text' ||
                                     field.path === 'region' ||
-                                    field.path === 'kiroVersion'
+                                    ['kiroVersion', 'kiroCliVersion'].includes(field.path)
                                   }
                                   pattern={
-                                    field.path === 'kiroVersion'
+                                    ['kiroVersion', 'kiroCliVersion'].includes(field.path)
                                       ? '(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)'
                                       : undefined
                                   }

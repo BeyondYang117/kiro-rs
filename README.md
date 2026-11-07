@@ -2,6 +2,8 @@
 
 一个用 Rust 编写的 Anthropic Claude API 兼容代理服务，将 Anthropic API 请求转换为 Kiro API 请求。
 
+默认按 **kiro-cli** 的 bearer 协议发送请求（`defaultEndpoint: "cli"`），同时保留 `ide` 端点。这里是直接构造 CLI 协议请求，不会启动本机 `kiro-cli` 进程。已有配置若显式设置了 `"defaultEndpoint":"ide"`，请改成 `"cli"` 并重启；凭据自己的 `endpoint` 优先，需要一并检查。CLI 适配依据、验证范围见 [兼容性记录](docs/KIRO_COMPATIBILITY.md)。
+
 ---
 
 <table>
@@ -107,7 +109,7 @@ cargo build --release
 ```
 > PS: 如果你需要 Web 管理面板, 请注意配置 `adminApiKey`
 
-创建 `credentials.json`（从 Kiro IDE 等中获取凭证信息）：
+创建 `credentials.json`（使用 Kiro CLI / IDE 的完整 OAuth 凭据或 API Key）：
 > PS: 可以前往 Web 管理面板配置跳过本步骤
 > 如果你对凭据地域有疑惑, 请查看 [Region 配置](#region-配置)
 
@@ -206,7 +208,8 @@ docker login -u abu116
 | `region` | string | `us-east-1` | AWS 区域 |
 | `authRegion` | string | - | Auth Region（用于 Token 刷新），未配置时回退到 region |
 | `apiRegion` | string | - | API Region（用于 API 请求），未配置时回退到 region |
-| `kiroVersion` | string | `1.4.121` | Kiro 请求版本标识，可在系统设置检查并更新 |
+| `kiroVersion` | string | `1.4.121` | Kiro IDE 请求版本标识 |
+| `kiroCliVersion` | string | `3.1.0` | Kiro CLI 请求版本标识，与 IDE 独立 |
 | `machineId` | string | - | 自定义机器码（64位十六进制），不定义则自动生成 |
 | `systemVersion` | string | 当前运行平台 | 系统标识，默认 `darwin` / `win32` / `linux` 等；可显式配置完整版本 |
 | `nodeVersion` | string | `22.21.1` | Node.js 版本标识 |
@@ -243,7 +246,7 @@ docker login -u abu116
 | `ccBufferedStream` | boolean | `true` | `/cc/v1/messages` 是否缓冲完整流；设为 `false` 可实时返回内容 |
 | `forceStream` | boolean | `false` | 强制 `/v1/messages` 和 `/cc/v1/messages` 使用 SSE，覆盖 `stream: false` 或未指定 `stream` 的请求；重启后生效，客户端需支持 SSE |
 | `extractThinking` | boolean | `true` | 非流式响应的 thinking 块提取。启用后 `<thinking>` 标签会被解析为独立的 `thinking` 内容块 |
-| `defaultEndpoint` | string | `ide` | 默认 Kiro 端点。凭据未显式指定 `endpoint` 时使用。当前支持：`ide` |
+| `defaultEndpoint` | string | `cli` | 默认 Kiro 端点。凭据未显式指定 `endpoint` 时使用。支持：`cli`、`ide` |
 
 通过管理 API 切换负载均衡模式时，会先原子保存配置再更新运行模式；保存失败则保留原模式。配置回写保留未知扩展字段和已有文件权限，新建配置文件在 Unix 上使用 `0600` 权限。
 
@@ -574,7 +577,7 @@ claude --model claude-haiku-5-5 --effort high
 
 会话内可用 `/effort` 调整强度，也可通过 `CLAUDE_CODE_EFFORT_LEVEL=high` 设置。客户端需升级到支持所选模型及 effort 的版本；Haiku 5.5 需要 Claude Code v2.1.293 或更高。参数格式与客户端设置参考 [Anthropic effort 文档](https://platform.claude.com/docs/en/build-with-claude/effort)及 [Claude Code 模型配置](https://code.claude.com/docs/en/model-config#adjust-effort-level)。
 
-只有验证过当前 Kiro 账号、区域支持原生参数后，才设置 `"endpoints":{"ide":{"nativeThinking":true}}`。此模式通过 `additionalModelRequestFields` 传递 `max_tokens`、thinking 和 effort。支持 adaptive 的新版 Claude 会把兼容请求中的 `enabled` 转为 `adaptive` 并移除固定预算；旧版 4.5 模型仍传 `enabled` 和 `budget_tokens`。Sonnet 5.5 的 `disabled` 会转为原生 `between_tools`，该模式仅允许 `low` / `medium` / `high` effort；也可直接传 `thinking.type: "between_tools"`。`thinking.display` 支持 `summarized` / `omitted`，原样传给上游；未知字符串（包括空字符串）会忽略并使用默认显示，同时在调用日志中记录脱敏警告及修正建议，不再因此拒绝整次生成。省略或 `null` 同样使用默认显示；非字符串仍按请求格式错误拒绝。此兼容规则同时适用于两个消息接口、流式/非流式及压缩路径，不改变 thinking 类型、预算或 effort。本地参数校验及请求解析失败的日志会记录可读错误与失败阶段。历史签名按 `reasoningContent.reasoningText.{text,signature}` 传递，加密块按 `reasoningContent.redactedContent` 传递；不拼接多个签名对应的文本。该模式尚未经过真实 Kiro 调用验证。
+只有验证过当前 Kiro 账号、区域支持原生参数后，才设置 `"endpoints":{"cli":{"nativeThinking":true}}`（IDE 凭据使用 `ide` 键）。此模式通过 `additionalModelRequestFields` 传递 `max_tokens`、thinking 和 effort。支持 adaptive 的新版 Claude 会把兼容请求中的 `enabled` 转为 `adaptive` 并移除固定预算；旧版 4.5 模型仍传 `enabled` 和 `budget_tokens`。Sonnet 5.5 的 `disabled` 会转为原生 `between_tools`，该模式仅允许 `low` / `medium` / `high` effort；也可直接传 `thinking.type: "between_tools"`。`thinking.display` 支持 `summarized` / `omitted`，原样传给上游；未知字符串（包括空字符串）会忽略并使用默认显示，同时在调用日志中记录脱敏警告及修正建议，不再因此拒绝整次生成。省略或 `null` 同样使用默认显示；非字符串仍按请求格式错误拒绝。此兼容规则同时适用于两个消息接口、流式/非流式及压缩路径，不改变 thinking 类型、预算或 effort。本地参数校验及请求解析失败的日志会记录可读错误与失败阶段。历史签名按 `reasoningContent.reasoningText.{text,signature}` 传递，加密块按 `reasoningContent.redactedContent` 传递；不拼接多个签名对应的文本。该模式尚未经过真实 Kiro 调用验证。
 
 上下文窗口使用项目内维护的模型映射：已确认的 1M 模型会在 `GET /v1/models` 的 `max_input_tokens` 和 `GET /v1/models/{model_id}` 中声明 1,000,000。新版 Kiro `metadataEvent.tokenUsage` 上报用量时，优先返回 `uncachedInputTokens`、`outputTokens` 和缓存读写数；缓存字段分别映射为 `cache_read_input_tokens` / `cache_creation_input_tokens`。重复 metadata 视为快照更新，不累加；缺失或无效的计数保留已有有效值。没有上报的输入数仍按 `contextUsageEvent` 百分比换算，没有该事件则回退本地估算；输出数未上报时使用本地估算。JSON、实时 SSE、`/cc` 缓冲 SSE 和摘要均使用此规则，摘要的缓存用量保留在 `usage.iterations` 中。上游拒绝 1M 请求时，代理无法扩展 Kiro 账号或模型本身的限制。
 
@@ -680,7 +683,7 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
 
 成功查询的目录在 5 分钟内参与账号选路：优先选择已确认支持请求模型的账号，跳过目录明确未授权的账号；目录可覆盖旧的订阅名称判断。已确认账号满载或冷却时，仍可选择权限未知且通过原有订阅规则的账号。未查询、过期或刷新失败时恢复原有规则；生成请求不额外查询目录，可在此手动刷新。
 
-启用 `endpoints.ide.nativeThinking` 后，新鲜目录还会检查 `max_tokens`、`output_config.effort` 和实际传输的 thinking 类型，并选择参数兼容的账号。所有具备模型权限的启用账号均被目录明确判定为不兼容时，发送上游请求前返回 HTTP 400；未上报的能力保持兼容处理，不自动修改请求参数。
+启用相应端点的 `endpoints.cli.nativeThinking` / `endpoints.ide.nativeThinking` 后，新鲜目录还会检查 `max_tokens`、`output_config.effort` 和实际传输的 thinking 类型，并选择参数兼容的账号。所有具备模型权限的启用账号均被目录明确判定为不兼容时，发送上游请求前返回 HTTP 400；未上报的能力保持兼容处理，不自动修改请求参数。
 
 刷新失败时展示旧记录并标明过期；账号身份、Profile ARN、区域或端点变化会隔离缓存。分页失败时不返回不完整的授权表。该功能不会自动切换请求模型，GPT/Kimi 等待适配模型暂不能通过 messages 调用；普通 `/v1/models` 仍是本地兼容表。完整行为及限制见 [兼容性记录](docs/KIRO_COMPATIBILITY.md)。
 
@@ -693,7 +696,7 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
 - **请求与响应限制**：客户端并发、上游尝试次数、总超时、首内容及空闲超时、响应字节数与事件数。
 - **会话亲和**：开关、绑定有效期、最大绑定数。
 - **响应处理与日志**：Claude Code 流式缓冲、思考内容提取、工具输出恢复次数、远程 Token 计数超时、调用日志保留天数。
-- **Kiro 版本**：展示运行、已保存和官方最新稳定版本；支持检查版本、一键更新版本配置及手动回退。更新后重启生效，不安装 IDE 或升级代理程序。
+- **Kiro 版本**：分别配置 CLI 和 IDE 版本；按运行中的默认端点检查官方最新稳定版并更新对应版本。更新后重启生效，不安装 CLI/IDE 或升级代理程序。
 - **上游基础配置**：默认区域、认证/API 区域覆盖、默认端点、TLS 后端。
 
 负载均衡模式保存后立即生效，其他参数保存到启动时指定的配置文件，**重启服务后生效**。页面会标注待重启项及其当前运行值；保存当前运行值可以取消该项待生效修改。保存不会主动重启服务，也不会中断在途请求。恢复本组默认值、撤销修改只影响表单，点击“保存设置”后才会写入。日志保留期缩短后，重启时会按新期限清理记录。

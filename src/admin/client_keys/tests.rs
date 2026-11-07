@@ -55,7 +55,7 @@ impl Fixture {
             "/api/admin",
             create_admin_router(AdminState::new(
                 ADMIN,
-                AdminService::new(manager, ["ide".into()]),
+                AdminService::new(manager, ["ide".into(), "cli".into()]),
             )),
         )
     }

@@ -202,6 +202,9 @@ pub struct Config {
     #[serde(default = "default_kiro_version")]
     pub kiro_version: String,
 
+    #[serde(default = "default_kiro_cli_version")]
+    pub kiro_cli_version: String,
+
     #[serde(default)]
     pub machine_id: Option<String>,
 
@@ -294,7 +297,7 @@ pub struct Config {
     #[serde(default = "default_extract_thinking")]
     pub extract_thinking: bool,
 
-    /// 默认端点名称（凭据未显式指定 endpoint 时使用，默认 "ide"）
+    /// 默认端点名称（凭据未显式指定 endpoint 时使用，默认 "cli"）
     #[serde(default = "default_endpoint")]
     pub default_endpoint: String,
 
@@ -393,7 +396,11 @@ fn default_tool_output_recovery_attempts() -> u8 {
 }
 
 fn default_endpoint() -> String {
-    crate::kiro::endpoint::ide::IDE_ENDPOINT_NAME.to_string()
+    crate::kiro::endpoint::cli::CLI_ENDPOINT_NAME.to_string()
+}
+
+fn default_kiro_cli_version() -> String {
+    "3.1.0".to_string()
 }
 
 impl Default for Config {
@@ -405,6 +412,7 @@ impl Default for Config {
             auth_region: None,
             api_region: None,
             kiro_version: default_kiro_version(),
+            kiro_cli_version: default_kiro_cli_version(),
             machine_id: None,
             api_key: None,
             api_keys: Vec::new(),

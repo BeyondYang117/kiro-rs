@@ -10,6 +10,47 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+#[tokio::test]
+async fn cli_catalog_uses_control_plane_operation_and_keeps_pagination() {
+    let app = Router::new().route("/", axum::routing::post(
+        |Query(query): Query<BTreeMap<String,String>>, headers: HeaderMap, body: String| async move {
+            assert_eq!(headers["x-amz-target"], "KiroControlPlaneBearerService.ListAvailableModels");
+            assert_eq!(headers["content-type"], "application/x-amz-json-1.0");
+            assert_eq!(headers["authorization"], "Bearer test-token");
+            assert!(headers["user-agent"].to_str().unwrap().contains("app/AmazonQ-For-CLI"));
+            assert!(!headers.contains_key("x-amz-user-agent"));
+            assert_eq!(query["origin"], "CLI");
+            assert_eq!(query["profileArn"], "profile+/=&");
+            assert_eq!(body, "{}");
+            axum::Json(if query.contains_key("nextToken") {
+                assert_eq!(query["nextToken"], "cursor+/=&");
+                serde_json::json!({"models":[model("claude-opus-4.6")]})
+            } else {
+                serde_json::json!({"models":[model("claude-sonnet-4.6")],"nextToken":"cursor+/=&","defaultModel":{"modelId":"claude-sonnet-4.6"}})
+            })
+        }
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let config = Config::default();
+    assert_eq!(config.default_endpoint, "cli");
+    let credentials = KiroCredentials {
+        profile_arn: Some("profile+/=&".into()),
+        ..Default::default()
+    };
+    let client = build_client(None, 5, config.tls_backend).unwrap();
+    let catalog = fetch_pages(&client, &url, &credentials, &config, "test-token")
+        .await
+        .unwrap();
+    assert_eq!(catalog.models.len(), 2);
+    assert_eq!(
+        catalog.default_model_id.as_deref(),
+        Some("claude-sonnet-4.6")
+    );
+    task.abort();
+}
+
 fn model(id: &str) -> Value {
     serde_json::json!({"modelId":id, "modelName":format!("Name {id}"), "modelProvider":"provider", "tokenLimits":{"maxInputTokens":1_000_000,"maxOutputTokens":64_000}})
 }
@@ -103,7 +144,8 @@ async fn paginated_transport_encodes_queries_authenticates_and_deduplicates() {
         listener.local_addr().unwrap()
     );
     let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let config = Config::default();
+    let mut config = Config::default();
+    config.default_endpoint = "ide".into();
     let credentials = KiroCredentials {
         kiro_api_key: Some("private-test-key".into()),
         profile_arn: Some("arn:aws:codewhisperer:us-east-1:account:profile/a+b&c".into()),
@@ -148,7 +190,8 @@ async fn partial_catalogs_are_rejected_on_pagination_or_protocol_failure() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let config = Config::default();
+    let mut config = Config::default();
+    config.default_endpoint = "ide".into();
     let credentials = KiroCredentials::default();
     let client = build_client(None, 5, config.tls_backend).unwrap();
     assert!(
@@ -190,7 +233,8 @@ async fn partial_catalogs_are_rejected_on_pagination_or_protocol_failure() {
 
 #[test]
 fn oauth_requests_do_not_include_api_key_token_type_or_body() {
-    let config = Config::default();
+    let mut config = Config::default();
+    config.default_endpoint = "ide".into();
     let client = build_client(None, 5, config.tls_backend).unwrap();
     let req = request(
         &client,

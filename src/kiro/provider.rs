@@ -1435,7 +1435,7 @@ mod retry_tests {
         let manager = Arc::new(
             MultiTokenManager::new(
                 serde_json::from_value(
-                    serde_json::json!({"endpoints":{"ide":{"nativeThinking":true}}}),
+                    serde_json::json!({"defaultEndpoint":"ide", "endpoints":{"ide":{"nativeThinking":true}}}),
                 )
                 .unwrap(),
                 vec![KiroCredentials {

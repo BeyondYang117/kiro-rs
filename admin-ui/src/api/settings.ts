@@ -2,6 +2,7 @@ import { api } from './credentials'
 
 export interface SystemSettings {
   kiroVersion: string
+  kiroCliVersion: string
   region: string
   authRegion: string | null
   apiRegion: string | null
@@ -37,6 +38,7 @@ export interface SystemSettings {
 }
 
 export interface LatestKiroVersion {
+  endpoint: 'ide' | 'cli'
   latestVersion: string
   publishedAt: string | null
   checkedAt: string

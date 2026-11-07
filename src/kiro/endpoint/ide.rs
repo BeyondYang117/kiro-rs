@@ -123,7 +123,7 @@ impl KiroEndpoint for IdeEndpoint {
 }
 
 /// Normalize compatibility controls only for native Kiro model schemas.
-fn native_model_body(body: &str) -> String {
+pub(super) fn native_model_body(body: &str) -> String {
     use serde_json::Value;
     let Ok(mut request) = serde_json::from_str::<Value>(body) else {
         return body.to_owned();
@@ -151,7 +151,7 @@ fn native_model_body(body: &str) -> String {
 
 /// Keep the established q.amazonaws.com wire format by default. Native model
 /// controls are opt-in until the selected account/region has been verified.
-fn legacy_thinking_body(body: &str) -> String {
+pub(super) fn legacy_thinking_body(body: &str) -> String {
     use serde_json::{Value, json};
 
     let Ok(mut request) = serde_json::from_str::<Value>(body) else {
@@ -227,7 +227,7 @@ fn legacy_thinking_body(body: &str) -> String {
 }
 
 /// 将 profile_arn 注入到请求体 JSON 根对象
-fn inject_profile_arn(request_body: &str, profile_arn: &Option<String>) -> String {
+pub(super) fn inject_profile_arn(request_body: &str, profile_arn: &Option<String>) -> String {
     if let Some(arn) = profile_arn
         && let Ok(mut json) = serde_json::from_str::<serde_json::Value>(request_body)
     {

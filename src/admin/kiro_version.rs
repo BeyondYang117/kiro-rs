@@ -1,4 +1,4 @@
-//! 查询公开的 IDE 稳定版元数据。版本标识与主机平台无关，固定使用 Linux x64 源。
+//! Query the stable release feed for the running default transport.
 use std::time::Duration;
 
 use axum::{Json, extract::State, response::IntoResponse};
@@ -13,6 +13,8 @@ use crate::{
 
 const SOURCE_URL: &str =
     "https://prod.download.desktop.kiro.dev/stable/metadata-linux-x64-stable.json";
+
+const CLI_SOURCE_URL: &str = "https://prod.download.cli.kiro.dev/stable/latest/manifest.json";
 
 pub(super) fn valid_version(version: &str) -> bool {
     let parts: Vec<_> = version.split('.').collect();
@@ -32,6 +34,7 @@ pub(super) struct LatestVersion {
     published_at: Option<String>,
     checked_at: String,
     source_url: &'static str,
+    endpoint: &'static str,
 }
 
 fn parse_metadata(body: &str) -> anyhow::Result<LatestVersion> {
@@ -58,10 +61,34 @@ fn parse_metadata(body: &str) -> anyhow::Result<LatestVersion> {
         published_at,
         checked_at: chrono::Utc::now().to_rfc3339(),
         source_url: SOURCE_URL,
+        endpoint: "ide",
     })
 }
 
-async fn fetch(client: &reqwest::Client, url: &str) -> anyhow::Result<LatestVersion> {
+fn parse_cli_metadata(body: &str) -> anyhow::Result<LatestVersion> {
+    let document: Value = serde_json::from_str(body)?;
+    let version = document["version"]
+        .as_str()
+        .filter(|version| valid_version(version))
+        .ok_or_else(|| anyhow::anyhow!("invalid CLI version"))?;
+    anyhow::ensure!(
+        document["packages"]
+            .as_array()
+            .is_some_and(|packages| packages.iter().any(|package| package["download"]
+                .as_str()
+                .is_some_and(|path| path.starts_with(&format!("{version}/"))))),
+        "CLI release packages missing"
+    );
+    Ok(LatestVersion {
+        latest_version: version.to_owned(),
+        published_at: None,
+        checked_at: chrono::Utc::now().to_rfc3339(),
+        source_url: CLI_SOURCE_URL,
+        endpoint: "cli",
+    })
+}
+
+async fn fetch(client: &reqwest::Client, url: &str, cli: bool) -> anyhow::Result<LatestVersion> {
     let response = client.get(url).send().await?.error_for_status()?;
     // The shared HTTP client does not follow redirects. A non-JSON response fails closed.
     anyhow::ensure!(response.status().is_success(), "unexpected metadata status");
@@ -72,7 +99,11 @@ async fn fetch(client: &reqwest::Client, url: &str) -> anyhow::Result<LatestVers
         Duration::from_secs(10),
     )
     .await?;
-    parse_metadata(&body)
+    if cli {
+        parse_cli_metadata(&body)
+    } else {
+        parse_metadata(&body)
+    }
 }
 
 pub(super) async fn latest(config: &Config) -> Result<LatestVersion, AdminServiceError> {
@@ -83,7 +114,8 @@ pub(super) async fn latest(config: &Config) -> Result<LatestVersion, AdminServic
     });
     let result = async {
         let client = build_client(proxy.as_ref(), 15, config.tls_backend)?;
-        fetch(&client, SOURCE_URL).await
+        let cli = config.default_endpoint == "cli";
+        fetch(&client, if cli { CLI_SOURCE_URL } else { SOURCE_URL }, cli).await
     }
     .await;
     result.map_err(|_| {
@@ -106,6 +138,24 @@ mod tests {
     use super::*;
     use crate::model::config::TlsBackend;
     use axum::{Router, routing::get};
+
+    #[test]
+    fn cli_release_feed_requires_version_and_matching_packages() {
+        let parsed = parse_cli_metadata(
+            r#"{"version":"3.1.0","packages":[{"download":"3.1.0/kirocli-x86_64-linux.zip"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.latest_version, "3.1.0");
+        assert_eq!(parsed.endpoint, "cli");
+        assert_eq!(parsed.source_url, CLI_SOURCE_URL);
+        for body in [
+            "{}",
+            r#"{"version":"3.1.0","packages":[]}"#,
+            r#"{"version":"3.1.0","packages":[{"download":"1.4.121/other.zip"}]}"#,
+        ] {
+            assert!(parse_cli_metadata(body).is_err());
+        }
+    }
 
     #[test]
     fn metadata_requires_a_matching_stable_release() {
@@ -152,7 +202,7 @@ mod tests {
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = build_client(None, 5, TlsBackend::Rustls).unwrap();
         assert_eq!(
-            fetch(&client, &format!("http://{address}/ok"))
+            fetch(&client, &format!("http://{address}/ok"), false)
                 .await
                 .unwrap()
                 .latest_version,
@@ -160,7 +210,7 @@ mod tests {
         );
         for path in ["error", "redirect", "large"] {
             assert!(
-                fetch(&client, &format!("http://{address}/{path}"))
+                fetch(&client, &format!("http://{address}/{path}"), false)
                     .await
                     .is_err(),
                 "{path}"

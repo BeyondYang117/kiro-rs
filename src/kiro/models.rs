@@ -135,21 +135,39 @@ fn request(
     next_token: Option<&str>,
 ) -> reqwest::RequestBuilder {
     let machine = machine_id::generate_from_credentials(credentials, config);
-    let mut req = client
-        .get(url)
-        .query(&[("origin", "AI_EDITOR")])
+    let cli = crate::kiro::endpoint::is_cli(credentials, config);
+    let base = if cli {
+        client
+            .post(url)
+            .header("content-type", "application/x-amz-json-1.0")
+            .header(
+                "x-amz-target",
+                "KiroControlPlaneBearerService.ListAvailableModels",
+            )
+            .body("{}")
+    } else {
+        client.get(url)
+    };
+    let mut req = base
+        .query(&[("origin", crate::kiro::endpoint::origin(credentials, config))])
         .bearer_auth(token)
         .header("accept", "application/json")
-        .header(
-            "user-agent",
-            format!("KiroIDE-{}-{}", config.kiro_version, machine),
-        )
-        .header(
-            "x-amz-user-agent",
-            format!("KiroIDE-{}-{}", config.kiro_version, machine),
-        )
         .header("amz-sdk-invocation-id", uuid::Uuid::new_v4().to_string())
         .header("amz-sdk-request", "attempt=1; max=1");
+    if cli {
+        req = crate::kiro::endpoint::cli::decorate(
+            req,
+            credentials,
+            config,
+            token,
+            "kirocontrolplanebearer/0.1.0",
+        );
+    } else {
+        let ua = format!("KiroIDE-{}-{}", config.kiro_version, machine);
+        req = req
+            .header("user-agent", &ua)
+            .header("x-amz-user-agent", &ua);
+    }
     if let Some(arn) = &credentials.profile_arn {
         req = req.query(&[("profileArn", arn)]);
     }
@@ -157,7 +175,9 @@ fn request(
         req = req.query(&[("nextToken", cursor)]);
     }
     if credentials.is_api_key_credential() {
-        req = req.header("tokentype", "API_KEY");
+        if !cli {
+            req = req.header("tokentype", "API_KEY");
+        }
     } else if credentials.auth_method.as_deref().is_some_and(|method| {
         ["idc", "builder-id", "iam"]
             .iter()
@@ -250,11 +270,15 @@ pub(crate) async fn discover(
         .as_deref()
         .unwrap_or(&config.default_endpoint);
     ensure!(
-        endpoint == "ide",
-        "model discovery requires an IDE credential"
+        matches!(endpoint, "ide" | "cli"),
+        "model discovery requires an IDE or CLI credential"
     );
     let region = credentials.effective_api_region(config);
-    let url = format!("https://management.{region}.kiro.dev/List-Available-Models");
+    let url = if endpoint == "cli" {
+        format!("https://management.{region}.kiro.dev/")
+    } else {
+        format!("https://management.{region}.kiro.dev/List-Available-Models")
+    };
     let client = build_client(proxy, 15, config.tls_backend)?;
     tokio::time::timeout(
         Duration::from_secs(45),

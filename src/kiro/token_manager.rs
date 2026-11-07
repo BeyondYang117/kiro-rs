@@ -295,7 +295,11 @@ async fn refresh_social_token(
         .header("Content-Type", "application/json")
         .header(
             "User-Agent",
-            format!("KiroIDE-{}-{}", kiro_version, machine_id),
+            if crate::kiro::endpoint::is_cli(credentials, config) {
+                crate::kiro::endpoint::cli::user_agent(config, "kiro-auth")
+            } else {
+                format!("KiroIDE-{}-{}", kiro_version, machine_id)
+            },
         )
         .header("Accept-Encoding", "gzip, compress, deflate, br")
         .header("host", &refresh_domain)
@@ -338,7 +342,13 @@ async fn refresh_idc_token(
     let os_name = &config.system_version;
     let node_version = &config.node_version;
 
-    let x_amz_user_agent = "aws-sdk-js/3.980.0 KiroIDE";
+    let cli_ua = crate::kiro::endpoint::cli::user_agent(config, "ssooidc");
+    let cli = crate::kiro::endpoint::is_cli(credentials, config);
+    let x_amz_user_agent = if cli {
+        cli_ua.as_str()
+    } else {
+        "aws-sdk-js/3.980.0 KiroIDE"
+    };
     let user_agent = format!(
         "aws-sdk-js/3.980.0 ua/2.1 os/{} lang/js md/nodejs#{} api/sso-oidc#3.980.0 m/E KiroIDE",
         os_name, node_version
@@ -357,7 +367,7 @@ async fn refresh_idc_token(
         .post(&refresh_url)
         .header("content-type", "application/json")
         .header("x-amz-user-agent", x_amz_user_agent)
-        .header("user-agent", &user_agent)
+        .header("user-agent", if cli { &cli_ua } else { &user_agent })
         .header("host", format!("oidc.{}.amazonaws.com", region))
         .header("amz-sdk-invocation-id", uuid::Uuid::new_v4().to_string())
         .header("amz-sdk-request", "attempt=1; max=4")
@@ -397,8 +407,14 @@ pub(crate) async fn get_usage_limits(
 
     // 构建 URL
     let mut url = format!(
-        "https://{}/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST",
-        host
+        "https://{}/{}?origin={}&resourceType=AGENTIC_REQUEST",
+        host,
+        if crate::kiro::endpoint::is_cli(credentials, config) {
+            ""
+        } else {
+            "getUsageLimits"
+        },
+        crate::kiro::endpoint::origin(credentials, config)
     );
 
     // profileArn 是可选的
@@ -415,17 +431,37 @@ pub(crate) async fn get_usage_limits(
 
     let client = build_client(proxy, 60, config.tls_backend)?;
 
-    let mut request = client
-        .get(&url)
-        .header("x-amz-user-agent", &amz_user_agent)
-        .header("user-agent", &user_agent)
+    let cli = crate::kiro::endpoint::is_cli(credentials, config);
+    let base = if cli {
+        client
+            .post(&url)
+            .header("content-type", "application/x-amz-json-1.0")
+            .header("x-amz-target", "AmazonCodeWhispererService.GetUsageLimits")
+            .body("{}")
+    } else {
+        client.get(&url)
+    };
+    let mut request = base
         .header("host", &host)
         .header("amz-sdk-invocation-id", uuid::Uuid::new_v4().to_string())
         .header("amz-sdk-request", "attempt=1; max=1")
         .header("Authorization", format!("Bearer {}", token))
         .header("Connection", "close");
 
-    if credentials.is_api_key_credential() {
+    if cli {
+        request = crate::kiro::endpoint::cli::decorate(
+            request,
+            credentials,
+            config,
+            token,
+            "codewhispererruntime",
+        );
+    } else {
+        request = request
+            .header("user-agent", &user_agent)
+            .header("x-amz-user-agent", &amz_user_agent);
+    }
+    if credentials.is_api_key_credential() && !cli {
         request = request.header("tokentype", "API_KEY");
     }
 

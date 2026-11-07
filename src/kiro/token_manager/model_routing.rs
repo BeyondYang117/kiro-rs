@@ -137,21 +137,7 @@ impl MultiTokenManager {
         model: Option<&str>,
         controls: Option<&ModelControls>,
     ) -> Result<(), ModelParameterError> {
-        // Catalog discovery and native controls currently apply only to IDE transport.
-        if entry
-            .credentials
-            .endpoint
-            .as_deref()
-            .unwrap_or(&self.config.default_endpoint)
-            != "ide"
-            || self
-                .config
-                .endpoints
-                .get("ide")
-                .and_then(|value| value.get("nativeThinking"))
-                .and_then(serde_json::Value::as_bool)
-                != Some(true)
-        {
+        if !crate::kiro::endpoint::native_thinking(&entry.credentials, &self.config) {
             return Ok(());
         }
         if let (Some(model), Some(controls), Some(catalog)) =

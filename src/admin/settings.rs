@@ -26,6 +26,7 @@ macro_rules! settings {
 
 settings! {
     kiro_version: String,
+    kiro_cli_version: String,
     region: String,
     auth_region: Option<String>,
     api_region: Option<String>,
@@ -131,6 +132,10 @@ impl SystemSettings {
             anyhow::ensure!(
                 super::kiro_version::valid_version(&self.kiro_version),
                 "kiroVersion 必须是 major.minor.patch 格式的版本号"
+            );
+            anyhow::ensure!(
+                super::kiro_version::valid_version(&self.kiro_cli_version),
+                "kiroCliVersion 必须是 major.minor.patch 格式的版本号"
             );
             crate::common::region::validate("region", &self.region)?;
             for (name, region) in [
@@ -340,7 +345,7 @@ mod tests {
             );
             let app = create_admin_router(AdminState::new(
                 "test-admin",
-                AdminService::new(manager.clone(), ["ide".into()]),
+                AdminService::new(manager.clone(), ["ide".into(), "cli".into()]),
             ));
             Self {
                 directory,
@@ -410,12 +415,60 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(response["settings"]["kiroVersion"], "1.4.121");
+        assert_eq!(response["settings"]["kiroCliVersion"], "3.1.0");
+        assert_eq!(response["settings"]["defaultEndpoint"], "cli");
         assert_eq!(response["settings"]["concurrency"]["maxInFlight"], 64);
         assert_eq!(response["defaults"]["requestLogRetentionDays"], 30);
         assert_eq!(response["canSave"], true);
         assert_eq!(response["restartRequired"], serde_json::json!([]));
         assert!(response["settings"].get("apiKey").is_none());
         assert!(response["settings"].get("apiKeys").is_none());
+    }
+
+    #[tokio::test]
+    async fn cli_version_is_saved_independently_and_invalid_values_are_rejected() {
+        let fixture = Fixture::new();
+        let first = fixture.get().await;
+        let mut settings = first["settings"].clone();
+        settings["kiroCliVersion"] = "3.1.1".into();
+        let (status, saved) = fixture
+            .call(
+                "PUT",
+                "/settings",
+                serde_json::json!({
+                    "revision":first["revision"], "settings":settings
+                }),
+                true,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(saved["settings"]["kiroCliVersion"], "3.1.1");
+        assert_eq!(saved["running"]["kiroCliVersion"], "3.1.0");
+        assert_eq!(saved["settings"]["kiroVersion"], "1.4.121");
+        assert_eq!(
+            saved["restartRequired"],
+            serde_json::json!(["kiroCliVersion"])
+        );
+        assert_eq!(
+            Config::load(fixture.path()).unwrap().kiro_cli_version,
+            "3.1.1"
+        );
+        let mut invalid = saved["settings"].clone();
+        invalid["kiroCliVersion"] = "3.2".into();
+        assert_eq!(
+            fixture
+                .call(
+                    "PUT",
+                    "/settings",
+                    serde_json::json!({
+                        "revision":saved["revision"], "settings":invalid
+                    }),
+                    true
+                )
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[tokio::test]
@@ -527,7 +580,8 @@ mod tests {
             true,
         )
         .unwrap();
-        let restarted_response = read(&restarted, &HashSet::from(["ide".into()])).unwrap();
+        let restarted_response =
+            read(&restarted, &HashSet::from(["ide".into(), "cli".into()])).unwrap();
         assert!(restarted_response.restart_required.is_empty());
         assert!(restarted_response.running.force_stream);
         // 保存运行值即可取消待重启的修改。
@@ -678,7 +732,7 @@ mod tests {
     #[test]
     fn settings_without_config_path_are_read_only() {
         let manager = MultiTokenManager::new(Config::default(), vec![], None, None, true).unwrap();
-        let endpoints = HashSet::from(["ide".into()]);
+        let endpoints = HashSet::from(["ide".into(), "cli".into()]);
         let response = read(&manager, &endpoints).unwrap();
         assert!(!response.can_save);
         let request = SaveSettingsRequest {

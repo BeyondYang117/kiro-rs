@@ -265,6 +265,7 @@ async fn failed_fetch_invalidates_old_snapshot_but_not_a_more_recent_success() {
 
 fn native_manager(mode: &str) -> MultiTokenManager {
     let mut manager = manager(mode, "KIRO PRO");
+    manager.config.default_endpoint = "ide".into();
     manager
         .config
         .endpoints
@@ -277,6 +278,39 @@ fn controls(fields: serde_json::Value) -> ModelControls {
         &serde_json::json!({"additionalModelRequestFields":fields}).to_string(),
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn cli_native_controls_use_cli_options_and_catalog_limits() {
+    let mut manager = manager("priority", "KIRO PRO");
+    manager
+        .config
+        .endpoints
+        .insert("ide".into(), serde_json::json!({"nativeThinking":true}));
+    capabilities(&manager, 1, 1000, "low", "adaptive");
+    let fields = controls(serde_json::json!({"max_tokens":2000}));
+    // An IDE-only switch must not constrain the default CLI transport.
+    assert_eq!(
+        manager
+            .acquire_context_with_controls(Some(SONNET), None, Some(&fields))
+            .await
+            .unwrap()
+            .id,
+        1
+    );
+    manager
+        .config
+        .endpoints
+        .insert("cli".into(), serde_json::json!({"nativeThinking":true}));
+    capabilities(&manager, 2, 4000, "high", "adaptive");
+    assert_eq!(
+        manager
+            .acquire_context_with_controls(Some(SONNET), None, Some(&fields))
+            .await
+            .unwrap()
+            .id,
+        2
+    );
 }
 
 fn capabilities(manager: &MultiTokenManager, id: u64, limit: u64, effort: &str, thinking: &str) {

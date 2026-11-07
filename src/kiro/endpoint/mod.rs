@@ -11,9 +11,41 @@ use reqwest::RequestBuilder;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::model::config::Config;
 
+pub mod cli;
 pub mod ide;
 
+pub use cli::CliEndpoint;
 pub use ide::IdeEndpoint;
+
+pub(crate) fn is_cli(credentials: &KiroCredentials, config: &Config) -> bool {
+    credentials
+        .endpoint
+        .as_deref()
+        .unwrap_or(&config.default_endpoint)
+        == cli::CLI_ENDPOINT_NAME
+}
+
+pub(crate) fn origin(credentials: &KiroCredentials, config: &Config) -> &'static str {
+    if is_cli(credentials, config) {
+        "CLI"
+    } else {
+        "AI_EDITOR"
+    }
+}
+
+pub(crate) fn native_thinking(credentials: &KiroCredentials, config: &Config) -> bool {
+    let endpoint = credentials
+        .endpoint
+        .as_deref()
+        .unwrap_or(&config.default_endpoint);
+    matches!(endpoint, "ide" | "cli")
+        && config
+            .endpoints
+            .get(endpoint)
+            .and_then(|options| options.get("nativeThinking"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+}
 
 /// Kiro 端点
 ///
