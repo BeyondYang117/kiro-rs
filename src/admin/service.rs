@@ -56,12 +56,70 @@ pub struct AdminService {
     token_manager: Arc<MultiTokenManager>,
     balance_cache: Mutex<HashMap<u64, CachedBalance>>,
     model_catalog: super::models::CatalogCache,
+    model_test_slots: tokio::sync::Semaphore,
     cache_path: Option<PathBuf>,
     /// 已注册的端点名称集合（用于 add_credential 校验）
     known_endpoints: HashSet<String>,
 }
 
 impl AdminService {
+    pub(super) async fn test_model(
+        &self,
+        id: u64,
+        request: super::models::ModelTestRequest,
+    ) -> Result<super::models::ModelTestResponse, AdminServiceError> {
+        use super::models::ModelTestResponse;
+        use std::time::{Duration, Instant};
+        if request.model_id.is_empty()
+            || request.model_id.len() > 256
+            || request.model_id.chars().any(char::is_control)
+        {
+            return Err(AdminServiceError::InvalidSettings("模型 ID 无效".into()));
+        }
+        let _permit = self
+            .model_test_slots
+            .try_acquire()
+            .map_err(|_| AdminServiceError::InvalidSettings("模型测试繁忙，请稍后重试".into()))?;
+        let started = Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(60), async {
+            let catalog = self.available_models(id, false).await?;
+            if catalog.stale {
+                return Err(AdminServiceError::InvalidSettings(
+                    "模型目录已失效，请刷新后再测试".into(),
+                ));
+            }
+            let model = catalog
+                .catalog
+                .models
+                .iter()
+                .find(|model| model.model_id == request.model_id)
+                .ok_or_else(|| {
+                    AdminServiceError::InvalidSettings("该凭据的模型列表中没有此模型".into())
+                })?;
+            let result = self
+                .token_manager
+                .test_model_for(id, &catalog.scope_key, model)
+                .await;
+            Ok(result)
+        })
+        .await;
+        let (response, error) = match result {
+            Ok(Ok(Ok(text))) => (Some(text), None),
+            Ok(Ok(Err(error))) => (None, Some(error.to_string())),
+            Ok(Err(error)) => return Err(error),
+            Err(_) => (None, Some("模型测试超时（60 秒），请稍后重试".into())),
+        };
+        Ok(ModelTestResponse {
+            credential_id: id,
+            model_id: request.model_id,
+            success: error.is_none(),
+            duration_ms: started.elapsed().as_millis() as u64,
+            tested_at: Utc::now().to_rfc3339(),
+            response,
+            error,
+        })
+    }
+
     pub(super) async fn available_models(
         &self,
         id: u64,
@@ -165,6 +223,7 @@ impl AdminService {
             token_manager,
             balance_cache: Mutex::new(balance_cache),
             model_catalog: Default::default(),
+            model_test_slots: tokio::sync::Semaphore::new(4),
             cache_path,
             known_endpoints: known_endpoints.into_iter().collect(),
         }
@@ -624,6 +683,100 @@ impl AdminService {
 mod tests {
     use super::*;
     use crate::model::config::Config;
+
+    #[tokio::test]
+    async fn model_test_route_validates_auth_catalog_and_returns_safe_failure_results() {
+        use crate::admin::{AdminState, create_admin_router};
+        use crate::kiro::models::{AvailableModel, ModelCatalog};
+        use axum::{
+            body::{Body, to_bytes},
+            http::Request,
+        };
+        use tower::ServiceExt;
+        let manager = Arc::new(
+            MultiTokenManager::new(
+                Config::default(),
+                vec![KiroCredentials {
+                    id: Some(1),
+                    auth_method: Some("api_key".into()),
+                    ..Default::default()
+                }],
+                None,
+                None,
+                true,
+            )
+            .unwrap(),
+        );
+        let key = manager.model_catalog_key(1).unwrap();
+        let service = AdminService::new(manager.clone(), ["cli".into()]);
+        service
+            .model_catalog
+            .load(1, key.clone(), false, || async {
+                Ok((
+                    key,
+                    ModelCatalog {
+                        models: vec![AvailableModel {
+                            model_id: "gpt-5.6-sol".into(),
+                            model_name: "GPT".into(),
+                            provider: None,
+                            rate_multiplier: None,
+                            rate_unit: None,
+                            max_input_tokens: None,
+                            native_max_tokens: None,
+                            min_output_tokens: None,
+                            max_output_tokens: None,
+                            effort_levels: vec![],
+                            effort_schema_path: None,
+                            default_effort: None,
+                            thinking_types: vec![],
+                            default_thinking: None,
+                            thinking_displays: vec![],
+                            proxy_supported: true,
+                        }],
+                        default_model_id: None,
+                        region: "us-east-1".into(),
+                    },
+                ))
+            })
+            .await
+            .unwrap();
+        let app = create_admin_router(AdminState::new("admin", service));
+        for (id, authorized, body, expected) in [
+            ("bad", false, "{", 401),
+            ("1", true, "{", 400),
+            ("1", true, r#"{"modelId":"gpt-5.6-sol","extra":true}"#, 422),
+            ("1", true, r#"{"modelId":""}"#, 400),
+            ("999", true, r#"{"modelId":"gpt-5.6-sol"}"#, 404),
+            ("1", true, r#"{"modelId":"unknown"}"#, 400),
+            ("1", true, r#"{"modelId":"gpt-5.6-sol"}"#, 200),
+        ] {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(format!("/credentials/{id}/models/test"))
+                .header("content-type", "application/json");
+            if authorized {
+                request = request.header("x-api-key", "admin");
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::from(body)).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), expected);
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+            assert!(!String::from_utf8_lossy(&bytes).contains("kiroApiKey"));
+            if expected == 200 {
+                let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(value["success"], false);
+                assert_eq!(value["credentialId"], 1);
+                assert_eq!(value["modelId"], "gpt-5.6-sol");
+                assert!(value["error"].as_str().unwrap().contains("认证"));
+                assert!(value["response"].is_null());
+                assert!(value["durationMs"].is_u64());
+            }
+        }
+    }
 
     #[tokio::test]
     async fn import_preserves_metadata_and_disabled_state_without_balance_lookup() {

@@ -26,6 +26,7 @@ use super::{
 /// - `POST /credentials/:id/refresh` - 强制刷新 Token
 /// - `GET /credentials/:id/balance` - 获取凭据余额
 /// - `GET /credentials/:id/models` - 查询该账号的可用模型和原生参数能力
+/// - `POST /credentials/:id/models/test` - 使用指定凭据测试模型生成
 /// - `GET /config/load-balancing` - 获取负载均衡模式
 /// - `PUT /config/load-balancing` - 设置负载均衡模式
 /// - `GET /settings` - 系统设置、运行值及待重启项
@@ -64,6 +65,10 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/credentials/{id}/refresh", post(force_refresh_token))
         .route("/credentials/{id}/balance", get(get_credential_balance))
         .route("/credentials/{id}/models", get(super::models::get_models))
+        .route(
+            "/credentials/{id}/models/test",
+            post(super::models::test_model),
+        )
         .route(
             "/config/load-balancing",
             get(get_load_balancing_mode).put(set_load_balancing_mode),

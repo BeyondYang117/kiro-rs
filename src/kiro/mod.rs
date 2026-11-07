@@ -4,6 +4,7 @@ pub mod endpoint;
 pub mod machine_id;
 pub mod model;
 pub(crate) mod model_controls;
+pub(crate) mod model_test;
 pub(crate) mod models;
 pub mod parser;
 pub mod provider;

@@ -676,6 +676,7 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
   - `POST /api/admin/credentials/:id/reset` - 重置失败计数
   - `GET /api/admin/credentials/:id/balance` - 获取凭据余额
   - `GET /api/admin/credentials/:id/models` - 查询该账号在当前 API 区域的可用模型及参数（`?force=true` 刷新）
+  - `POST /api/admin/credentials/:id/models/test` - 测试指定模型（JSON：`{"modelId":"模型 ID"}`）
   - `GET /api/admin/settings` - 获取系统设置、当前运行值、默认值及待重启项
   - `PUT /api/admin/settings` - 校验并保存系统设置
   - `GET /api/admin/settings/kiro-version` - 查询 Kiro 官方最新稳定版
@@ -697,6 +698,8 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
 ### 账号可用模型
 
 凭据右侧更多操作 → **查看可用模型**，可查询该账号当前 API 区域中的模型、输入/输出 token 上限、输出下限、计费倍率、effort、thinking 类型与显示选项，并按名称、ID 或提供商搜索。列表区分“账号默认”“代理已适配”和“代理待适配”；上游未提供的参数显示“未上报”。支持 OAuth、IdC 和 API Key 凭据，使用凭据的代理与区域。
+
+每个模型下方的 **测试模型** 会使用当前凭据、区域、代理与端点发送一条 `Reply with OK only.` 请求，消耗少量额度。结果显示成功或失败、耗时及最多 512 字符的回复预览；单次最多等待 60 秒，全局最多同时运行 4 次测试，不重试或切换账号。只有完整且包含文本的响应才算成功，旧目录刷新失败时需先刷新再测试。“代理待适配”模型也可测试上游生成能力，但测试成功不代表 messages 接口已适配。
 
 成功查询的目录在 5 分钟内参与账号选路：优先选择已确认支持请求模型的账号，跳过目录明确未授权的账号；目录可覆盖旧的订阅名称判断。已确认账号满载或冷却时，仍可选择权限未知且通过原有订阅规则的账号。未查询、过期或刷新失败时恢复原有规则；生成请求不额外查询目录，可在此手动刷新。
 

@@ -2016,6 +2016,25 @@ impl MultiTokenManager {
         Ok((key, catalog))
     }
 
+    pub(crate) async fn test_model_for(
+        &self,
+        id: u64,
+        scope_key: &str,
+        model: &crate::kiro::models::AvailableModel,
+    ) -> Result<String, crate::kiro::model_test::ModelTestError> {
+        use crate::kiro::model_test::ModelTestError;
+        let (credentials, token) = self
+            .account_credentials(id)
+            .await
+            .map_err(|_| ModelTestError::Authentication)?;
+        if self.model_catalog_key_for(&credentials) != scope_key {
+            return Err(ModelTestError::Configuration);
+        }
+        let proxy = credentials.effective_proxy(self.proxy.as_ref());
+        crate::kiro::model_test::test(&credentials, &token, &self.config, proxy.as_ref(), model)
+            .await
+    }
+
     /// 获取指定凭据的使用额度。
     pub async fn get_usage_limits_for(&self, id: u64) -> anyhow::Result<UsageLimitsResponse> {
         let (credentials, token) = self.account_credentials(id).await?;

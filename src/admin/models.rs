@@ -13,7 +13,7 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 use super::{
     error::AdminServiceError,
-    extract::{AdminPath, AdminQuery},
+    extract::{AdminJson, AdminPath, AdminQuery},
     middleware::AdminState,
 };
 use crate::kiro::models::{CATALOG_TTL, ModelCatalog};
@@ -192,6 +192,35 @@ pub(super) async fn get_models(
     AdminQuery(query): AdminQuery<ModelsQuery>,
 ) -> impl IntoResponse {
     match state.service.available_models(id, query.force).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => (error.status_code(), Json(error.into_response())).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct ModelTestRequest {
+    pub model_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ModelTestResponse {
+    pub credential_id: u64,
+    pub model_id: String,
+    pub success: bool,
+    pub duration_ms: u64,
+    pub tested_at: String,
+    pub response: Option<String>,
+    pub error: Option<String>,
+}
+
+pub(super) async fn test_model(
+    State(state): State<AdminState>,
+    AdminPath(id): AdminPath<u64>,
+    AdminJson(request): AdminJson<ModelTestRequest>,
+) -> impl IntoResponse {
+    match state.service.test_model(id, request).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => (error.status_code(), Json(error.into_response())).into_response(),
     }

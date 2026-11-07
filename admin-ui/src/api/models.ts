@@ -30,6 +30,24 @@ export interface ModelCatalog {
   refreshError: string | null
 }
 
+export interface ModelTestResult {
+  credentialId: number
+  modelId: string
+  success: boolean
+  durationMs: number
+  testedAt: string
+  response: string | null
+  error: string | null
+}
+
+export async function testModel(id: number, modelId: string): Promise<ModelTestResult> {
+  return (
+    await api.post<ModelTestResult>(`/credentials/${id}/models/test`, { modelId }, {
+      timeout: 70000,
+    })
+  ).data
+}
+
 export async function getAvailableModels(
   id: number,
   force = false

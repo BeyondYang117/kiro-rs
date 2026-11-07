@@ -511,7 +511,7 @@ fn has_meaningful_text(text: &str, thinking_enabled: bool) -> bool {
 }
 
 #[derive(Default)]
-pub(super) struct UpstreamResponseDecoder {
+pub(crate) struct UpstreamResponseDecoder {
     frames: EventStreamDecoder,
     decoding_stopped_early: bool,
     pending_tools: HashMap<String, PendingTool>,

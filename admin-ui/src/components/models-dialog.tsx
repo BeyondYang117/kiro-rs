@@ -1,7 +1,7 @@
 import { useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { RefreshCw, Search } from 'lucide-react'
-import { getAvailableModels } from '@/api/models'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Loader2, Play, RefreshCw, Search } from 'lucide-react'
+import { getAvailableModels, testModel } from '@/api/models'
 import { extractErrorMessage } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -13,6 +13,52 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+
+function ModelTest({ credentialId, modelId, disabled }: {
+  credentialId: number
+  modelId: string
+  disabled: boolean
+}) {
+  const test = useMutation({
+    mutationFn: () => testModel(credentialId, modelId),
+    retry: false,
+  })
+  const result = test.data
+  const failed = test.isError || result?.success === false
+  return (
+    <div className="space-y-2 border-t pt-3">
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        disabled={disabled || test.isPending}
+        aria-label={`测试模型 ${modelId}`}
+        onClick={() => test.mutate()}
+      >
+        {test.isPending ? <Loader2 className="animate-spin" /> : <Play />}
+        {test.isPending ? '正在测试…' : '测试模型'}
+      </Button>
+      {(test.isPending || result || test.isError) && (
+        <div
+          role={failed ? 'alert' : 'status'}
+          className={`space-y-1 rounded-md border p-3 text-xs ${failed ? 'border-destructive/40 bg-destructive/5' : 'bg-muted/40'}`}
+        >
+          {test.isPending ? '正在使用当前凭据发送测试请求，最多等待 60 秒…' : (
+            <>
+              <p className={failed ? 'text-destructive' : 'text-emerald-600 dark:text-emerald-400'}>
+                {failed ? '测试失败' : '测试成功'}
+                {result && ` · ${result.durationMs.toLocaleString()} ms · ${new Date(result.testedAt).toLocaleString()}`}
+              </p>
+              <p className="whitespace-pre-wrap break-words">
+                {test.isError ? extractErrorMessage(test.error) : result?.error ?? result?.response}
+              </p>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
 
 export function ModelsDialog({
   credentialId,
@@ -104,6 +150,10 @@ export function ModelsDialog({
             onChange={(event) => setSearch(event.target.value)}
           />
         </label>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          点击“测试模型”会使用当前凭据向该模型发送“Reply with OK only.”，会消耗少量额度。
+          测试验证上游生成能力，结果显示耗时与回复；单次最多等待 60 秒。
+        </p>
         {query.isPending && busy && (
           <p
             role="status"
@@ -122,7 +172,7 @@ export function ModelsDialog({
         <div className="space-y-3">
           {models.map((model) => (
             <article
-              key={model.modelId}
+              key={`${credentialId}:${model.modelId}`}
               className="space-y-3 rounded-lg border p-4"
             >
               <div className="flex flex-wrap items-start justify-between gap-2">
@@ -202,13 +252,14 @@ export function ModelsDialog({
                   </dd>
                 </div>
               </dl>
+              <ModelTest credentialId={credentialId} modelId={model.modelId} disabled={busy || !!data?.stale} />
             </article>
           ))}
         </div>
         <p className="text-xs leading-relaxed text-muted-foreground">
           模型列表缓存 5 分钟。“代理待适配”的模型暂不能通过 messages
           接口调用；Claude 原生参数需启用 nativeThinking，GPT/Kimi 使用各自的原生参数。
-          这里只查询模型目录，不会发送生成请求或自动切换模型。
+          测试始终使用当前凭据和选定模型；“代理待适配”模型的测试成功仅代表上游可调用。
         </p>
       </DialogContent>
     </Dialog>
