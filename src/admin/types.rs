@@ -128,6 +128,18 @@ pub struct AddCredentialRequest {
     /// 用户邮箱（可选，用于前端显示）
     pub email: Option<String>,
 
+    /// 导入时保留 Profile ARN，刷新响应未返回时仍可用于额度查询。
+    pub profile_arn: Option<String>,
+
+    pub subscription_title: Option<String>,
+
+    #[serde(default)]
+    pub disabled: bool,
+
+    /// 是否在添加后查询额度；OAuth Token 刷新验证始终执行。
+    #[serde(default = "default_check_balance")]
+    pub check_balance: bool,
+
     /// 凭据级代理 URL（可选，特殊值 "direct" 表示不使用代理）
     pub proxy_url: Option<String>,
 
@@ -151,6 +163,10 @@ fn default_auth_method() -> String {
     "social".to_string()
 }
 
+fn default_check_balance() -> bool {
+    true
+}
+
 /// 添加凭据成功响应
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -162,6 +178,13 @@ pub struct AddCredentialResponse {
     /// 用户邮箱（如果获取成功）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub balance: Option<BalanceResponse>,
+
+    /// 添加已成功；额度查询失败不代表凭据无效。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub balance_error: Option<String>,
 }
 
 // ============ 余额查询 ============

@@ -2137,13 +2137,14 @@ impl MultiTokenManager {
                 .map_err(|_| anyhow::anyhow!("凭据 ID 已耗尽"))?
                 + 1;
             validated_cred.id = Some(new_id);
+            let disabled = validated_cred.disabled;
             entries.push(CredentialEntry {
                 id: new_id,
                 credentials: validated_cred,
                 failure_count: 0,
                 refresh_failure_count: 0,
-                disabled: false,
-                disabled_reason: None,
+                disabled,
+                disabled_reason: disabled.then_some(DisabledReason::Manual),
                 success_count: 0,
                 in_flight: Arc::new(AtomicU64::new(0)),
                 refresh_lock: Arc::new(TokioMutex::new(())),

@@ -121,6 +121,11 @@ export interface AddCredentialRequest {
   proxyPassword?: string
   kiroApiKey?: string
   endpoint?: string
+  profileArn?: string
+  email?: string
+  subscriptionTitle?: string
+  disabled?: boolean
+  checkBalance?: boolean
 }
 
 // 添加凭据响应
@@ -129,4 +134,6 @@ export interface AddCredentialResponse {
   message: string
   credentialId: number
   email?: string
+  balance?: BalanceResponse
+  balanceError?: string
 }

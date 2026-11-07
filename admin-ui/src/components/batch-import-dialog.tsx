@@ -1,532 +1,210 @@
-import { useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { CheckCircle2, XCircle, AlertCircle, Loader2 } from 'lucide-react'
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from '@/components/ui/dialog'
+import { CheckCircle2, XCircle, AlertCircle, Loader2, Upload } from 'lucide-react'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
-import { useCredentials, useAddCredential, useDeleteCredential } from '@/hooks/use-credentials'
-import { getCredentialBalance, setCredentialDisabled } from '@/api/credentials'
-import { extractErrorMessage, sha256Hex } from '@/lib/utils'
+import { addCredential, getCredentials, getCredentialBalance } from '@/api/credentials'
+import { extractErrorMessage, parseError, sha256Hex } from '@/lib/utils'
+import { parseCredentialImport, runCredentialImport, type ImportResult, type ImportStatus } from '@/lib/credential-import'
 
 interface BatchImportDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
 }
 
-interface CredentialInput {
-  refreshToken?: string
-  clientId?: string
-  clientSecret?: string
-  region?: string
-  authRegion?: string
-  apiRegion?: string
-  priority?: number
-  machineId?: string
-  kiroApiKey?: string
-  authMethod?: string
-  endpoint?: string
+const statusText: Record<ImportStatus, string> = {
+  pending: '等待中', checking: '检查重复…', verifying: '导入 / 验证中…',
+  verified: '导入成功，额度已验证', imported: '导入成功，未查询额度', duplicate: '重复凭据，已跳过',
+  warning: '已导入，额度验证失败（已保留）', failed: '添加失败（未创建）', cancelled: '未处理，已停止',
 }
 
-interface VerificationResult {
-  index: number
-  status: 'pending' | 'checking' | 'verifying' | 'verified' | 'duplicate' | 'failed'
-  error?: string
-  usage?: string
-  email?: string
-  credentialId?: number
-  rollbackStatus?: 'success' | 'failed' | 'skipped'
-  rollbackError?: string
+function StatusIcon({ status }: { status: ImportStatus }) {
+  if (status === 'checking' || status === 'verifying') return <Loader2 className="w-5 h-5 shrink-0 animate-spin text-blue-500" />
+  if (status === 'verified' || status === 'imported') return <CheckCircle2 className="w-5 h-5 shrink-0 text-green-500" />
+  if (status === 'failed') return <XCircle className="w-5 h-5 shrink-0 text-red-500" />
+  if (status === 'warning' || status === 'duplicate') return <AlertCircle className="w-5 h-5 shrink-0 text-amber-500" />
+  return <div className="w-5 h-5 shrink-0 rounded-full border-2 border-muted-foreground/40" />
 }
-
-
 
 export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps) {
   const [jsonInput, setJsonInput] = useState('')
+  const [verify, setVerify] = useState(true)
   const [importing, setImporting] = useState(false)
-  const [progress, setProgress] = useState({ current: 0, total: 0 })
-  const [currentProcessing, setCurrentProcessing] = useState<string>('')
-  const [results, setResults] = useState<VerificationResult[]>([])
+  const [stopping, setStopping] = useState(false)
+  const [results, setResults] = useState<ImportResult[]>([])
+  const [filter, setFilter] = useState<'all' | 'issues'>('all')
+  const cancel = useRef(false)
+  const running = useRef(false)
+  const fileInput = useRef<HTMLInputElement>(null)
+  const queryClient = useQueryClient()
 
-  const { data: existingCredentials } = useCredentials()
-  const { mutateAsync: addCredential } = useAddCredential()
-  const { mutateAsync: deleteCredential } = useDeleteCredential()
-
-  const rollbackCredential = async (id: number): Promise<{ success: boolean; error?: string }> => {
+  const { entries, parseError: inputError } = useMemo(() => {
+    if (!jsonInput.trim()) return { entries: [], parseError: '' }
     try {
-      await setCredentialDisabled(id, true)
+      return { entries: parseCredentialImport(jsonInput), parseError: '' }
     } catch (error) {
-      return {
-        success: false,
-        error: `禁用失败: ${extractErrorMessage(error)}`,
-      }
+      return { entries: [], parseError: extractErrorMessage(error) }
     }
-
-    try {
-      await deleteCredential(id)
-      return { success: true }
-    } catch (error) {
-      return {
-        success: false,
-        error: `删除失败: ${extractErrorMessage(error)}`,
-      }
-    }
-  }
+  }, [jsonInput])
 
   const resetForm = () => {
     setJsonInput('')
-    setProgress({ current: 0, total: 0 })
-    setCurrentProcessing('')
     setResults([])
+    setFilter('all')
+    setStopping(false)
   }
 
-  const handleBatchImport = async () => {
-    // 先单独解析 JSON，给出精准的错误提示
-    let credentials: CredentialInput[]
+  const handleImport = async (retry = false) => {
+    if (running.current || inputError || !entries.length) return
+    const selected = retry
+      ? entries.filter(entry => results.some(result => result.index === entry.index && ['warning', 'failed', 'cancelled'].includes(result.status)))
+      : entries
+    if (!selected.length) return
+    running.current = true
+    cancel.current = false
+    setStopping(false)
+    setImporting(true)
+    const next: ImportResult[] = retry ? [...results] : entries.map(entry => ({ index: entry.index, email: entry.email, status: 'pending' }))
+    const previous = retry ? [...results] : []
+    setResults([...next])
     try {
-      const parsed = JSON.parse(jsonInput)
-      credentials = Array.isArray(parsed) ? parsed : [parsed]
+      await runCredentialImport(selected, previous, verify, {
+        getCredentials, addCredential, getBalance: getCredentialBalance, hash: sha256Hex,
+        describeError: parseError,
+      }, result => {
+        const position = next.findIndex(item => item.index === result.index)
+        next[position] = result
+        setResults([...next])
+      }, () => cancel.current)
+      const count = (statuses: ImportStatus[]) => next.filter(item => statuses.includes(item.status)).length
+      const message = `导入完成：成功 ${count(['verified', 'imported'])}，待验证 ${count(['warning'])}，重复 ${count(['duplicate'])}，失败 ${count(['failed'])}，未处理 ${count(['cancelled'])}`
+      if (next.every(item => item.status === 'verified' || item.status === 'imported')) toast.success(message)
+      else toast.info(message)
     } catch (error) {
-      toast.error('JSON 格式错误: ' + extractErrorMessage(error))
-      return
-    }
-
-    if (credentials.length === 0) {
-      toast.error('没有可导入的凭据')
-      return
-    }
-
-    try {
-      setImporting(true)
-      setProgress({ current: 0, total: credentials.length })
-
-      // 2. 初始化结果
-      const initialResults: VerificationResult[] = credentials.map((_, i) => ({
-        index: i + 1,
-        status: 'pending'
-      }))
-      setResults(initialResults)
-
-      // 3. 检测重复：OAuth 与 API Key 分别使用对应的 hash 集合
-      const existingOauthHashes = new Set(
-        existingCredentials?.credentials
-          .map(c => c.refreshTokenHash)
-          .filter((hash): hash is string => Boolean(hash)) || []
-      )
-      const existingApiKeyHashes = new Set(
-        existingCredentials?.credentials
-          .map(c => c.apiKeyHash)
-          .filter((hash): hash is string => Boolean(hash)) || []
-      )
-
-      let successCount = 0
-      let duplicateCount = 0
-      let failCount = 0
-      let rollbackSuccessCount = 0
-      let rollbackFailedCount = 0
-      let rollbackSkippedCount = 0
-
-      // 4. 导入并验活
-      for (let i = 0; i < credentials.length; i++) {
-        const cred = credentials[i]
-        const isApiKeyCred = !!(cred.kiroApiKey?.trim()) || cred.authMethod === 'api_key'
-
-        // 更新状态为检查中
-        setCurrentProcessing(`正在处理凭据 ${i + 1}/${credentials.length}`)
-        setResults(prev => {
-          const newResults = [...prev]
-          newResults[i] = { ...newResults[i], status: 'checking' }
-          return newResults
-        })
-
-        // 客户端去重：OAuth 基于 refreshToken hash，API Key 基于 kiroApiKey hash
-        let credHash = ''
-        if (isApiKeyCred) {
-          const apiKey = cred.kiroApiKey?.trim() || ''
-          if (!apiKey) {
-            setResults(prev => {
-              const newResults = [...prev]
-              newResults[i] = {
-                ...newResults[i],
-                status: 'failed',
-                error: '缺少 kiroApiKey',
-              }
-              return newResults
-            })
-            failCount++
-            setProgress({ current: i + 1, total: credentials.length })
-            continue
-          }
-          credHash = await sha256Hex(apiKey)
-          if (existingApiKeyHashes.has(credHash)) {
-            duplicateCount++
-            const existingCred = existingCredentials?.credentials.find(c => c.apiKeyHash === credHash)
-            setResults(prev => {
-              const newResults = [...prev]
-              newResults[i] = {
-                ...newResults[i],
-                status: 'duplicate',
-                error: '该凭据已存在',
-                email: existingCred?.email || undefined
-              }
-              return newResults
-            })
-            setProgress({ current: i + 1, total: credentials.length })
-            continue
-          }
-        } else {
-          const token = cred.refreshToken?.trim() || ''
-          if (!token) {
-            setResults(prev => {
-              const newResults = [...prev]
-              newResults[i] = {
-                ...newResults[i],
-                status: 'failed',
-                error: '缺少 refreshToken',
-              }
-              return newResults
-            })
-            failCount++
-            setProgress({ current: i + 1, total: credentials.length })
-            continue
-          }
-          credHash = await sha256Hex(token)
-          if (existingOauthHashes.has(credHash)) {
-            duplicateCount++
-            const existingCred = existingCredentials?.credentials.find(c => c.refreshTokenHash === credHash)
-            setResults(prev => {
-              const newResults = [...prev]
-              newResults[i] = {
-                ...newResults[i],
-                status: 'duplicate',
-                error: '该凭据已存在',
-                email: existingCred?.email || undefined
-              }
-              return newResults
-            })
-            setProgress({ current: i + 1, total: credentials.length })
-            continue
-          }
-        }
-
-        // 更新状态为验活中
-        setResults(prev => {
-          const newResults = [...prev]
-          newResults[i] = { ...newResults[i], status: 'verifying' }
-          return newResults
-        })
-
-        let addedCredId: number | null = null
-
-        try {
-          // 添加凭据
-          if (isApiKeyCred) {
-            // API Key 凭据
-            const addedCred = await addCredential({
-              authMethod: 'api_key',
-              kiroApiKey: cred.kiroApiKey?.trim(),
-              priority: cred.priority || 0,
-              authRegion: cred.authRegion?.trim() || cred.region?.trim() || undefined,
-              apiRegion: cred.apiRegion?.trim() || undefined,
-              machineId: cred.machineId?.trim() || undefined,
-              endpoint: cred.endpoint?.trim() || undefined,
-            })
-
-            addedCredId = addedCred.credentialId
-
-            // 延迟 1 秒
-            await new Promise(resolve => setTimeout(resolve, 1000))
-
-            // 验活
-            const balance = await getCredentialBalance(addedCred.credentialId)
-
-            successCount++
-            existingApiKeyHashes.add(credHash)
-            setCurrentProcessing(addedCred.email ? `验活成功: ${addedCred.email}` : `验活成功: 凭据 ${i + 1}`)
-            setResults(prev => {
-              const newResults = [...prev]
-              newResults[i] = {
-                ...newResults[i],
-                status: 'verified',
-                usage: `${balance.currentUsage}/${balance.usageLimit}`,
-                email: addedCred.email || undefined,
-                credentialId: addedCred.credentialId
-              }
-              return newResults
-            })
-            setProgress({ current: i + 1, total: credentials.length })
-            continue
-          }
-
-          // OAuth 凭据
-          const token = cred.refreshToken!.trim()
-          const clientId = cred.clientId?.trim() || undefined
-          const clientSecret = cred.clientSecret?.trim() || undefined
-          const authMethod = clientId && clientSecret ? 'idc' : 'social'
-
-          // idc 模式下必须同时提供 clientId 和 clientSecret
-          if (authMethod === 'social' && (clientId || clientSecret)) {
-            throw new Error('idc 模式需要同时提供 clientId 和 clientSecret')
-          }
-
-          const addedCred = await addCredential({
-            refreshToken: token,
-            authMethod,
-            authRegion: cred.authRegion?.trim() || cred.region?.trim() || undefined,
-            apiRegion: cred.apiRegion?.trim() || undefined,
-            clientId,
-            clientSecret,
-            priority: cred.priority || 0,
-            machineId: cred.machineId?.trim() || undefined,
-            endpoint: cred.endpoint?.trim() || undefined,
-          })
-
-          addedCredId = addedCred.credentialId
-
-          // 延迟 1 秒
-          await new Promise(resolve => setTimeout(resolve, 1000))
-
-          // 验活
-          const balance = await getCredentialBalance(addedCred.credentialId)
-
-          // 验活成功
-          successCount++
-          existingOauthHashes.add(credHash)
-          setCurrentProcessing(addedCred.email ? `验活成功: ${addedCred.email}` : `验活成功: 凭据 ${i + 1}`)
-          setResults(prev => {
-            const newResults = [...prev]
-            newResults[i] = {
-              ...newResults[i],
-              status: 'verified',
-              usage: `${balance.currentUsage}/${balance.usageLimit}`,
-              email: addedCred.email || undefined,
-              credentialId: addedCred.credentialId
-            }
-            return newResults
-          })
-        } catch (error) {
-          // 验活失败，尝试回滚（先禁用再删除）
-          let rollbackStatus: VerificationResult['rollbackStatus'] = 'skipped'
-          let rollbackError: string | undefined
-
-          if (addedCredId) {
-            const rollbackResult = await rollbackCredential(addedCredId)
-            if (rollbackResult.success) {
-              rollbackStatus = 'success'
-              rollbackSuccessCount++
-            } else {
-              rollbackStatus = 'failed'
-              rollbackFailedCount++
-              rollbackError = rollbackResult.error
-            }
-          } else {
-            rollbackSkippedCount++
-          }
-
-          failCount++
-          setResults(prev => {
-            const newResults = [...prev]
-            newResults[i] = {
-              ...newResults[i],
-              status: 'failed',
-              error: extractErrorMessage(error),
-              email: undefined,
-              rollbackStatus,
-              rollbackError,
-            }
-            return newResults
-          })
-        }
-
-        setProgress({ current: i + 1, total: credentials.length })
-      }
-
-      // 显示结果
-      if (failCount === 0 && duplicateCount === 0) {
-        toast.success(`成功导入并验活 ${successCount} 个凭据`)
-      } else {
-        const failureSummary = failCount > 0
-          ? `，失败 ${failCount} 个（已排除 ${rollbackSuccessCount}，未排除 ${rollbackFailedCount}，无需排除 ${rollbackSkippedCount}）`
-          : ''
-        toast.info(`验活完成：成功 ${successCount} 个，重复 ${duplicateCount} 个${failureSummary}`)
-
-        if (rollbackFailedCount > 0) {
-          toast.warning(`有 ${rollbackFailedCount} 个失败凭据回滚未完成，请手动禁用并删除`)
-        }
-      }
-    } catch (error) {
-      toast.error('导入失败: ' + extractErrorMessage(error))
+      // A failed list request prevents any mutation and can be retried safely.
+      setResults(retry ? previous : [])
+      toast.error('读取凭据列表失败，请重试：' + extractErrorMessage(error))
     } finally {
+      running.current = false
       setImporting(false)
+      setStopping(false)
+      void queryClient.invalidateQueries({ queryKey: ['credentials'] })
     }
   }
 
-  const getStatusIcon = (status: VerificationResult['status']) => {
-    switch (status) {
-      case 'pending':
-        return <div className="w-5 h-5 rounded-full border-2 border-gray-300" />
-      case 'checking':
-      case 'verifying':
-        return <Loader2 className="w-5 h-5 animate-spin text-blue-500" />
-      case 'verified':
-        return <CheckCircle2 className="w-5 h-5 text-green-500" />
-      case 'duplicate':
-        return <AlertCircle className="w-5 h-5 text-yellow-500" />
-      case 'failed':
-        return <XCircle className="w-5 h-5 text-red-500" />
+  const loadFile = async (file?: File) => {
+    if (!file) return
+    try {
+      setJsonInput(await file.text())
+    } catch (error) {
+      toast.error('读取文件失败：' + extractErrorMessage(error))
     }
   }
 
-  const getStatusText = (result: VerificationResult) => {
-    switch (result.status) {
-      case 'pending':
-        return '等待中'
-      case 'checking':
-        return '检查重复...'
-      case 'verifying':
-        return '验活中...'
-      case 'verified':
-        return '验活成功'
-      case 'duplicate':
-        return '重复凭据'
-      case 'failed':
-        if (result.rollbackStatus === 'success') return '验活失败（已排除）'
-        if (result.rollbackStatus === 'failed') return '验活失败（未排除）'
-        return '验活失败（未创建）'
-    }
-  }
+  const completed = results.filter(result => !['pending', 'checking', 'verifying'].includes(result.status)).length
+  const retryCount = results.filter(result => ['warning', 'failed', 'cancelled'].includes(result.status)).length
+  const visibleResults = filter === 'all' ? results : results.filter(result => ['warning', 'failed', 'cancelled'].includes(result.status))
+  const invalidEntries = entries.filter(entry => entry.error)
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(newOpen) => {
-        // 关闭时清空表单（但不在导入过程中清空）
-        if (!newOpen && !importing) {
-          resetForm()
-        }
-        onOpenChange(newOpen)
-      }}
-    >
-      <DialogContent className="sm:max-w-2xl max-h-[80vh] flex flex-col">
+    <Dialog open={open} onOpenChange={nextOpen => {
+      if (!nextOpen && running.current) return
+      if (!nextOpen) resetForm()
+      onOpenChange(nextOpen)
+    }}>
+      <DialogContent className="sm:max-w-3xl max-h-[90vh] flex flex-col">
         <DialogHeader>
-          <DialogTitle>批量导入凭据（自动验活）</DialogTitle>
+          <DialogTitle>批量导入凭据</DialogTitle>
+          <DialogDescription>支持 OAuth 和 API Key，自动检查重复，逐条显示导入结果。</DialogDescription>
         </DialogHeader>
 
-        <div className="flex-1 overflow-y-auto space-y-4 py-4">
+        <div className="flex-1 min-h-0 overflow-y-auto space-y-4 py-2">
           <div className="space-y-2">
-            <label className="text-sm font-medium">
-              JSON 格式凭据
-            </label>
-            <textarea
-              placeholder={'粘贴 JSON 格式的凭据（支持单个对象或数组）\n\nOAuth: [{"refreshToken":"...","clientId":"...","clientSecret":"..."}]\nAPI Key: [{"kiroApiKey":"ksk_xxx"}]\n\n支持 region 字段自动映射为 authRegion'}
-              value={jsonInput}
-              onChange={(e) => setJsonInput(e.target.value)}
-              disabled={importing}
-              className="flex min-h-[200px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 font-mono"
+            <div className="flex items-center justify-between gap-2">
+              <label htmlFor="batch-credentials" className="text-sm font-medium">JSON 格式凭据</label>
+              <input ref={fileInput} type="file" accept=".json,application/json" className="hidden" aria-label="选择凭据 JSON 文件" disabled={importing || results.length > 0} onChange={event => {
+                void loadFile(event.target.files?.[0])
+                event.target.value = ''
+              }} />
+              <Button type="button" variant="outline" size="sm" disabled={importing || results.length > 0} onClick={() => fileInput.current?.click()}>
+                <Upload className="w-4 h-4 mr-2" />选择 JSON 文件
+              </Button>
+            </div>
+            <textarea id="batch-credentials"
+              placeholder={'粘贴单个凭据、凭据数组或 {"credentials": [...]}\n\nOAuth: [{"refreshToken":"...","profileArn":"..."}]\nIdC: [{"refreshToken":"...","clientId":"...","clientSecret":"..."}]\nAPI Key: [{"kiroApiKey":"ksk_xxx"}]'}
+              value={jsonInput} onChange={event => setJsonInput(event.target.value)} disabled={importing || results.length > 0}
+              className="flex min-h-[160px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
             />
-            <p className="text-xs text-muted-foreground">
-              💡 导入时自动验活，失败的凭据会被排除
-            </p>
+            <p className="text-xs text-muted-foreground">兼容 camelCase / snake_case 字段及 accounts 导出格式，保留区域、Profile ARN、邮箱、代理和禁用状态。</p>
+            {inputError && <p role="alert" className="text-sm text-red-600">JSON 解析失败：{inputError}</p>}
+            {entries.length > 0 && results.length === 0 && (
+              <div className="space-y-1 text-sm">
+                <p>识别到 {entries.length} 个凭据，可导入 {entries.length - invalidEntries.length} 个，格式错误 {invalidEntries.length} 个。</p>
+                {invalidEntries.length > 0 && <div className="max-h-24 overflow-y-auto text-xs text-red-600">
+                  {invalidEntries.map(entry => <p key={entry.index}>凭据 #{entry.index}：{entry.error}</p>)}
+                </div>}
+              </div>
+            )}
           </div>
 
-          {(importing || results.length > 0) && (
-            <>
-              {/* 进度条 */}
-              <div className="space-y-2">
-                <div className="flex justify-between text-sm">
-                  <span>{importing ? '验活进度' : '验活完成'}</span>
-                  <span>{progress.current} / {progress.total}</span>
-                </div>
-                <div className="w-full bg-secondary rounded-full h-2">
-                  <div
-                    className="bg-primary h-2 rounded-full transition-all"
-                    style={{ width: `${(progress.current / progress.total) * 100}%` }}
-                  />
-                </div>
-                {importing && currentProcessing && (
-                  <div className="text-xs text-muted-foreground">
-                    {currentProcessing}
-                  </div>
-                )}
-              </div>
+          <div className="rounded-md border p-3 space-y-2">
+            <label className="flex items-center gap-2 text-sm font-medium">
+              <input type="checkbox" checked={verify} disabled={importing || results.length > 0} onChange={event => setVerify(event.target.checked)} />
+              导入后验证额度
+            </label>
+            <p className="text-xs text-muted-foreground">OAuth 添加时会验证 Token。额度查询失败的凭据仍会保留，可重试验证；关闭此项可跳过额度查询。API Key 的有效性通过额度查询确认。</p>
+          </div>
 
-              {/* 统计 */}
-              <div className="flex gap-4 text-sm">
-                <span className="text-green-600 dark:text-green-400">
-                  ✓ 成功: {results.filter(r => r.status === 'verified').length}
-                </span>
-                <span className="text-yellow-600 dark:text-yellow-400">
-                  ⚠ 重复: {results.filter(r => r.status === 'duplicate').length}
-                </span>
-                <span className="text-red-600 dark:text-red-400">
-                  ✗ 失败: {results.filter(r => r.status === 'failed').length}
-                </span>
+          {results.length > 0 && <>
+            <div className="space-y-2" aria-live="polite">
+              <div className="flex justify-between text-sm">
+                <span>{importing ? stopping ? '正在停止，等待当前凭据处理完成…' : '导入中…' : results.some(result => result.status === 'cancelled') ? '导入已停止' : '导入完成'}</span>
+                <span>{completed} / {results.length}</span>
               </div>
-
-              {/* 结果列表 */}
-              <div className="border rounded-md divide-y max-h-[300px] overflow-y-auto">
-                {results.map((result) => (
-                  <div key={result.index} className="p-3">
-                    <div className="flex items-start gap-3">
-                      {getStatusIcon(result.status)}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium">
-                            {result.email || `凭据 #${result.index}`}
-                          </span>
-                          <span className="text-xs text-muted-foreground">
-                            {getStatusText(result)}
-                          </span>
-                        </div>
-                        {result.usage && (
-                          <div className="text-xs text-muted-foreground mt-1">
-                            用量: {result.usage}
-                          </div>
-                        )}
-                        {result.error && (
-                          <div className="text-xs text-red-600 dark:text-red-400 mt-1">
-                            {result.error}
-                          </div>
-                        )}
-                        {result.rollbackError && (
-                          <div className="text-xs text-red-600 dark:text-red-400 mt-1">
-                            回滚失败: {result.rollbackError}
-                          </div>
-                        )}
-                      </div>
-                    </div>
+              <div role="progressbar" aria-label="导入进度" aria-valuenow={completed} aria-valuemin={0} aria-valuemax={results.length} className="w-full bg-secondary rounded-full h-2">
+                <div className="bg-primary h-2 rounded-full transition-all" style={{ width: `${completed / results.length * 100}%` }} />
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+              <span className="text-green-600">成功：{results.filter(result => ['verified', 'imported'].includes(result.status)).length}</span>
+              <span className="text-amber-600">待验证：{results.filter(result => result.status === 'warning').length}</span>
+              <span className="text-muted-foreground">重复：{results.filter(result => result.status === 'duplicate').length}</span>
+              <span className="text-red-600">失败：{results.filter(result => result.status === 'failed').length}</span>
+              <span className="text-muted-foreground">未处理：{results.filter(result => result.status === 'cancelled').length}</span>
+            </div>
+            <div className="flex gap-2">
+              <Button size="sm" variant={filter === 'all' ? 'secondary' : 'ghost'} onClick={() => setFilter('all')}>全部</Button>
+              <Button size="sm" variant={filter === 'issues' ? 'secondary' : 'ghost'} onClick={() => setFilter('issues')}>待处理（{retryCount}）</Button>
+            </div>
+            <div className="border rounded-md divide-y max-h-[300px] overflow-y-auto">
+              {visibleResults.length === 0 && <p className="p-3 text-sm text-muted-foreground">没有待处理的凭据</p>}
+              {visibleResults.map(result => <div key={result.index} className="p-3 flex items-start gap-3">
+                <StatusIcon status={result.status} />
+                <div className="flex-1 min-w-0 space-y-1">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <span className="text-sm font-medium break-all">{result.email || `凭据 #${result.index}`}</span>
+                    {result.credentialId !== undefined && <span className="text-xs text-muted-foreground">ID: {result.credentialId}</span>}
+                    <span className="text-xs text-muted-foreground">{statusText[result.status]}</span>
                   </div>
-                ))}
-              </div>
-            </>
-          )}
+                  {result.usage && <p className="text-xs text-muted-foreground">用量：{result.usage}</p>}
+                  {result.error && <p className={`text-xs break-words whitespace-pre-wrap ${result.status === 'warning' ? 'text-amber-600' : 'text-red-600'}`}>{result.error}</p>}
+                  {result.detail && <details className="text-xs text-muted-foreground"><summary className="cursor-pointer">错误详情</summary><p className="mt-1 whitespace-pre-wrap break-words">{result.detail}</p></details>}
+                  {result.status === 'warning' && <p className="text-xs text-muted-foreground">凭据已保存。请检查区域、Profile ARN 或上游权限后重试额度验证。</p>}
+                </div>
+              </div>)}
+            </div>
+          </>}
         </div>
 
-        <DialogFooter>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => {
-              onOpenChange(false)
-              resetForm()
-            }}
-            disabled={importing}
-          >
-            {importing ? '验活中...' : results.length > 0 ? '关闭' : '取消'}
-          </Button>
-          {results.length === 0 && (
-            <Button
-              type="button"
-              onClick={handleBatchImport}
-              disabled={importing || !jsonInput.trim()}
-            >
-              开始导入并验活
-            </Button>
-          )}
+        <DialogFooter className="gap-2">
+          {importing ? <Button variant="outline" disabled={stopping} onClick={() => { cancel.current = true; setStopping(true) }}>停止后续导入</Button> : <>
+            <Button variant="outline" onClick={() => { onOpenChange(false); resetForm() }}>{results.length ? '关闭' : '取消'}</Button>
+            {results.length > 0 ? <>
+              <Button variant="outline" onClick={resetForm}>导入下一批</Button>
+              {retryCount > 0 && <Button onClick={() => void handleImport(true)}>重试待处理（{retryCount}）</Button>}
+            </> : <Button onClick={() => void handleImport()} disabled={!entries.some(entry => entry.request) || !!inputError}>{verify ? '开始导入并验证' : '开始导入'}</Button>}
+          </>}
         </DialogFooter>
       </DialogContent>
     </Dialog>

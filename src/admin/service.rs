@@ -365,7 +365,7 @@ impl AdminService {
             id: None,
             access_token: None,
             refresh_token: req.refresh_token,
-            profile_arn: None,
+            profile_arn: req.profile_arn,
             expires_at: None,
             auth_method: Some(req.auth_method),
             client_id: req.client_id,
@@ -376,11 +376,11 @@ impl AdminService {
             api_region: req.api_region,
             machine_id: req.machine_id,
             email: req.email,
-            subscription_title: None, // 将在首次获取使用额度时自动更新
+            subscription_title: req.subscription_title,
             proxy_url: req.proxy_url,
             proxy_username: req.proxy_username,
             proxy_password: req.proxy_password,
-            disabled: false, // 新添加的凭据默认启用
+            disabled: req.disabled,
             disabled_reason: None,
             kiro_api_key: req.kiro_api_key,
             endpoint: req.endpoint,
@@ -393,16 +393,26 @@ impl AdminService {
             .await
             .map_err(|e| self.classify_add_error(e))?;
 
-        // 主动获取订阅等级，避免首次请求时 Free 账号绕过 Opus 模型过滤
-        if let Err(e) = self.token_manager.get_usage_limits_for(credential_id).await {
-            tracing::warn!("添加凭据后获取订阅等级失败（不影响凭据添加）: {}", e);
-        }
+        // 一次查询同时返回验证结果并写入余额缓存，前端无需重复请求。
+        let (balance, balance_error) = if req.check_balance {
+            match self.get_balance(credential_id, false).await {
+                Ok(balance) => (Some(balance), None),
+                Err(error) => {
+                    tracing::warn!("添加凭据后获取订阅等级失败（不影响凭据添加）: {}", error);
+                    (None, Some(error.to_string()))
+                }
+            }
+        } else {
+            (None, None)
+        };
 
         Ok(AddCredentialResponse {
             success: true,
             message: format!("凭据添加成功，ID: {}", credential_id),
             credential_id,
             email,
+            balance,
+            balance_error,
         })
     }
 
@@ -614,6 +624,71 @@ impl AdminService {
 mod tests {
     use super::*;
     use crate::model::config::Config;
+
+    #[tokio::test]
+    async fn import_preserves_metadata_and_disabled_state_without_balance_lookup() {
+        let directory = CacheTestDirectory::new();
+        let path = directory.0.join("credentials.json");
+        let manager = Arc::new(
+            MultiTokenManager::new(Config::default(), vec![], None, Some(path.clone()), true)
+                .unwrap(),
+        );
+        let service = AdminService::new(manager.clone(), ["ide".into()]);
+        let request = serde_json::from_value(serde_json::json!({
+            "kiroApiKey": "ksk_import_test",
+            "authMethod": "api_key",
+            "profileArn": "arn:test:import",
+            "email": "import@example.test",
+            "subscriptionTitle": "KIRO STUDENT",
+            "disabled": true,
+            "checkBalance": false,
+            "apiRegion": "eu-west-1",
+            "proxyUrl": "direct"
+        }))
+        .unwrap();
+        let response = service.add_credential(request).await.unwrap();
+        assert!(response.balance.is_none());
+        assert!(response.balance_error.is_none());
+        assert_eq!(response.email.as_deref(), Some("import@example.test"));
+        assert_eq!(manager.available_count(), 0);
+        let credentials: Vec<KiroCredentials> =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let credential = &credentials[0];
+        assert_eq!(credential.profile_arn.as_deref(), Some("arn:test:import"));
+        assert_eq!(
+            credential.subscription_title.as_deref(),
+            Some("KIRO STUDENT")
+        );
+        assert_eq!(credential.api_region.as_deref(), Some("eu-west-1"));
+        assert_eq!(credential.proxy_url.as_deref(), Some("direct"));
+        assert!(credential.disabled);
+    }
+
+    #[tokio::test]
+    async fn import_balance_failure_returns_warning_and_keeps_saved_credential() {
+        // A closed local proxy causes an immediate network failure without reaching AWS.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let manager =
+            Arc::new(MultiTokenManager::new(Config::default(), vec![], None, None, false).unwrap());
+        let service = AdminService::new(manager.clone(), ["ide".into()]);
+        let request = serde_json::from_value(serde_json::json!({
+            "kiroApiKey": "ksk_warning_test",
+            "authMethod": "api_key",
+            "proxyUrl": format!("http://{address}")
+        }))
+        .unwrap();
+        let response = service.add_credential(request).await.unwrap();
+        assert!(response.success);
+        assert!(response.balance.is_none());
+        assert!(response.balance_error.is_some());
+        assert_eq!(manager.total_count(), 1);
+        assert_eq!(
+            service.get_all_credentials().credentials[0].id,
+            response.credential_id
+        );
+    }
 
     struct CacheTestDirectory(PathBuf);
 
