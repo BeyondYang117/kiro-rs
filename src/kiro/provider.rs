@@ -1459,12 +1459,14 @@ mod retry_tests {
             rate_multiplier: None,
             rate_unit: None,
             max_input_tokens: None,
+            min_output_tokens: Some(512),
             max_output_tokens: Some(1000),
             effort_levels: vec![],
             effort_schema_path: None,
             default_effort: None,
             thinking_types: vec![],
             default_thinking: None,
+            thinking_displays: vec!["omitted".into()],
             proxy_supported: true,
         };
         manager.update_model_catalog(
@@ -1484,18 +1486,27 @@ mod retry_tests {
             mock.provider.endpoints.clone(),
             "mock".into(),
         );
-        let body = serde_json::json!({"conversationState":{"currentMessage":{"userInputMessage":{"modelId":"claude-sonnet-4.6"}}},
-            "additionalModelRequestFields":{"max_tokens":1001}}).to_string();
-        for streaming in [false, true] {
-            let error = provider
-                .call_api_with_retry(&body, streaming)
-                .await
-                .err()
-                .unwrap();
-            assert_eq!(
-                error.downcast_ref::<ModelParameterError>().unwrap().0,
-                "max_tokens"
-            );
+        for (fields, parameter) in [
+            (serde_json::json!({"max_tokens":1001}), "max_tokens"),
+            (serde_json::json!({"max_tokens":511}), "max_tokens"),
+            (
+                serde_json::json!({"max_tokens":512,"thinking":{"type":"enabled","display":"summarized"}}),
+                "thinking.display",
+            ),
+        ] {
+            let body = serde_json::json!({"conversationState":{"currentMessage":{"userInputMessage":{"modelId":"claude-sonnet-4.6"}}},
+                "additionalModelRequestFields":fields}).to_string();
+            for streaming in [false, true] {
+                let error = provider
+                    .call_api_with_retry(&body, streaming)
+                    .await
+                    .err()
+                    .unwrap();
+                assert_eq!(
+                    error.downcast_ref::<ModelParameterError>().unwrap().0,
+                    parameter
+                );
+            }
         }
         assert!(mock.calls.lock().is_empty());
         let snapshot = manager.snapshot();

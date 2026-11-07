@@ -101,6 +101,60 @@ fn model(id: &str) -> Value {
 }
 
 #[test]
+fn output_bounds_and_display_constraints_follow_complete_schema_values() {
+    let mut value = model("claude-sonnet-5.5");
+    value["additionalModelRequestFieldsSchema"] = serde_json::json!({"properties":{
+        "max_tokens":{"type":"integer","minimum":1024,"maximum":128000},
+        "thinking":{"properties":{"display":{"enum":["omitted","summarized","omitted"]}}}
+    }});
+    let normalized = normalize(&value).unwrap();
+    assert_eq!(normalized.min_output_tokens, Some(1024));
+    assert_eq!(normalized.max_output_tokens, Some(64_000));
+    assert_eq!(normalized.thinking_displays, ["omitted", "summarized"]);
+    let serialized = serde_json::to_value(&normalized).unwrap();
+    assert_eq!(serialized["minOutputTokens"], 1024);
+    assert_eq!(
+        serialized["thinkingDisplays"],
+        serde_json::json!(["omitted", "summarized"])
+    );
+    assert!(
+        serialized
+            .get("additionalModelRequestFieldsSchema")
+            .is_none()
+    );
+
+    value["tokenLimits"] = serde_json::json!({});
+    assert_eq!(normalize(&value).unwrap().max_output_tokens, Some(128_000));
+    value["additionalModelRequestFieldsSchema"]["properties"]["max_tokens"]["maximum"] =
+        8192.into();
+    assert_eq!(normalize(&value).unwrap().max_output_tokens, Some(8192));
+
+    for invalid in [
+        serde_json::json!(-1),
+        serde_json::json!(0),
+        serde_json::json!(1.5),
+        serde_json::json!("1024"),
+        Value::Null,
+    ] {
+        value["additionalModelRequestFieldsSchema"]["properties"]["max_tokens"]["minimum"] =
+            invalid;
+        let normalized = normalize(&value).unwrap();
+        assert_eq!(normalized.min_output_tokens, None);
+        assert_eq!(normalized.max_output_tokens, Some(8192));
+    }
+    value["additionalModelRequestFieldsSchema"]["properties"]["max_tokens"]["minimum"] =
+        9000.into();
+    let normalized = normalize(&value).unwrap();
+    assert_eq!(
+        (normalized.min_output_tokens, normalized.max_output_tokens),
+        (None, None)
+    );
+    value["additionalModelRequestFieldsSchema"]["properties"]["thinking"]["properties"]["display"]
+        ["enum"] = serde_json::json!(["omitted", 123]);
+    assert!(normalize(&value).unwrap().thinking_displays.is_empty());
+}
+
+#[test]
 fn discovers_provider_specific_schemas_without_promoting_unknown_models() {
     for (id, path, supported) in [
         ("claude-sonnet-5.5", "output_config", true),

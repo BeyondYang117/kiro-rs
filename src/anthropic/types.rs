@@ -57,6 +57,9 @@ pub struct Model {
 pub struct ModelsResponse {
     pub object: String,
     pub data: Vec<Model>,
+    pub has_more: bool,
+    pub first_id: Option<String>,
+    pub last_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

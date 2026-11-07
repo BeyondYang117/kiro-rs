@@ -155,6 +155,11 @@ export function ModelsDialog({
                   <dd>
                     {model.maxInputTokens?.toLocaleString() ?? '未上报'} /{' '}
                     {model.maxOutputTokens?.toLocaleString() ?? '未上报'}
+                    {model.minOutputTokens != null && (
+                      <span className="block text-muted-foreground">
+                        输出下限 {model.minOutputTokens.toLocaleString()}
+                      </span>
+                    )}
                   </dd>
                 </div>
                 <div>
@@ -184,6 +189,11 @@ export function ModelsDialog({
                     {model.thinkingTypes.length
                       ? `${model.thinkingTypes.join(' / ')}${model.defaultThinking ? `（默认 ${model.defaultThinking}）` : ''}`
                       : '未上报'}
+                    {!!model.thinkingDisplays?.length && (
+                      <span className="block text-muted-foreground">
+                        显示：{model.thinkingDisplays.join(' / ')}
+                      </span>
+                    )}
                   </dd>
                 </div>
               </dl>

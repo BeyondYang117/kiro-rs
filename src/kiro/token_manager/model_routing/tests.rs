@@ -86,12 +86,14 @@ fn catalog(ids: &[&str]) -> ModelCatalog {
                 rate_multiplier: None,
                 rate_unit: None,
                 max_input_tokens: None,
+                min_output_tokens: None,
                 max_output_tokens: None,
                 effort_levels: vec![],
                 effort_schema_path: None,
                 default_effort: None,
                 thinking_types: vec![],
                 default_thinking: None,
+                thinking_displays: vec![],
                 proxy_supported: crate::anthropic::map_model(id).as_deref() == Some(*id),
             })
             .collect(),
@@ -377,6 +379,64 @@ fn capabilities(manager: &MultiTokenManager, id: u64, limit: u64, effort: &str, 
 }
 
 #[tokio::test]
+async fn output_minimum_and_thinking_display_route_without_mutating_client_intent() {
+    for mode in ["priority", "balanced"] {
+        let manager = native_manager(mode);
+        for (id, minimum, display) in [(1, 2048, "summarized"), (2, 1024, "omitted")] {
+            let mut catalog = catalog(&[SONNET]);
+            catalog.models[0].min_output_tokens = Some(minimum);
+            catalog.models[0].max_output_tokens = Some(8192);
+            catalog.models[0].thinking_displays = vec![display.into()];
+            manager.update_model_catalog(
+                id,
+                &manager.model_catalog_key(id).unwrap(),
+                &catalog,
+                Instant::now(),
+                false,
+            );
+        }
+        for fields in [
+            serde_json::json!({"max_tokens":1024}),
+            serde_json::json!({"thinking":{"type":"enabled","display":"omitted"}}),
+        ] {
+            let ctx = manager
+                .acquire_context_with_controls(Some(SONNET), None, Some(&controls(fields)))
+                .await
+                .unwrap();
+            assert_eq!(ctx.id, 2);
+        }
+        for (fields, parameter) in [
+            (serde_json::json!({"max_tokens":1023}), "max_tokens"),
+            (
+                serde_json::json!({"max_tokens":1024,"thinking":{"type":"adaptive","display":"summarized"}}),
+                "max_tokens",
+            ),
+        ] {
+            let error = manager
+                .acquire_context_with_controls(Some(SONNET), None, Some(&controls(fields)))
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.downcast_ref::<ModelParameterError>().unwrap().0,
+                parameter
+            );
+        }
+        // Missing constraints and omitted controls must not impose new defaults.
+        assert!(manager.acquire_context(Some(SONNET)).await.is_ok());
+        let snapshot = manager.snapshot();
+        assert_eq!(snapshot.concurrency.in_flight, 0);
+        assert_eq!(snapshot.concurrency.waiting, 0);
+        assert!(
+            snapshot
+                .entries
+                .iter()
+                .all(|entry| entry.failure_count == 0 && !entry.disabled)
+        );
+    }
+}
+
+#[tokio::test]
 async fn native_parameters_choose_an_account_with_matching_limits_and_enums() {
     for mode in ["balanced", "priority"] {
         for fields in [
@@ -441,7 +501,9 @@ async fn missing_stale_expired_and_legacy_capabilities_do_not_reject_parameters(
             }
             "expired" => {
                 let mut data = catalog(&[SONNET]);
+                data.models[0].min_output_tokens = Some(4096);
                 data.models[0].max_output_tokens = Some(1);
+                data.models[0].thinking_displays = vec!["omitted".into()];
                 manager.update_model_catalog(
                     1,
                     &manager.model_catalog_key(1).unwrap(),
@@ -451,7 +513,20 @@ async fn missing_stale_expired_and_legacy_capabilities_do_not_reject_parameters(
                 );
             }
             _ => {
-                capabilities(&manager, 1, 1, "low", "disabled");
+                let mut data = catalog(&[SONNET]);
+                data.models[0].min_output_tokens = Some(4096);
+                data.models[0].max_output_tokens = Some(1);
+                data.models[0].effort_schema_path = Some("output_config.effort".into());
+                data.models[0].effort_levels = vec!["low".into()];
+                data.models[0].thinking_types = vec!["disabled".into()];
+                data.models[0].thinking_displays = vec!["omitted".into()];
+                manager.update_model_catalog(
+                    1,
+                    &manager.model_catalog_key(1).unwrap(),
+                    &data,
+                    Instant::now(),
+                    false,
+                );
                 match case {
                     "stale" => manager.invalidate_model_catalog(
                         1,
@@ -469,7 +544,7 @@ async fn missing_stale_expired_and_legacy_capabilities_do_not_reject_parameters(
             }
         }
         let fields = controls(
-            serde_json::json!({"max_tokens":2000,"output_config":{"effort":"high"},"thinking":{"type":"enabled"}}),
+            serde_json::json!({"max_tokens":2000,"output_config":{"effort":"high"},"thinking":{"type":"enabled","display":"summarized"}}),
         );
         assert_eq!(
             manager

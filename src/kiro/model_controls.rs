@@ -9,6 +9,7 @@ pub(crate) struct ModelControls {
     effort: Option<String>,
     reasoning_effort: Option<String>,
     thinking_type: Option<String>,
+    thinking_display: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -55,6 +56,11 @@ impl ModelControls {
                 .and_then(|value| value.get("effort"))
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            thinking_display: fields
+                .get("thinking")
+                .and_then(|value| value.get("display"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             thinking_type: fields
                 .get("thinking")
                 .and_then(|v| v.get("type"))
@@ -64,6 +70,17 @@ impl ModelControls {
     }
 
     pub(crate) fn validate(&self, model: &AvailableModel) -> Result<(), ModelParameterError> {
+        if let (Some(requested), Some(minimum)) = (self.max_tokens, model.min_output_tokens)
+            && requested < minimum
+        {
+            return Err(ModelParameterError("max_tokens"));
+        }
+        if let Some(display) = &self.thinking_display
+            && !model.thinking_displays.is_empty()
+            && !model.thinking_displays.contains(display)
+        {
+            return Err(ModelParameterError("thinking.display"));
+        }
         if let (Some(requested), Some(limit)) = (self.max_tokens, model.max_output_tokens)
             && requested > limit
         {
@@ -108,12 +125,14 @@ mod tests {
             rate_multiplier: None,
             rate_unit: None,
             max_input_tokens: None,
+            min_output_tokens: None,
             max_output_tokens: None,
             effort_levels: vec![],
             effort_schema_path: None,
             default_effort: None,
             thinking_types: vec![],
             default_thinking: None,
+            thinking_displays: vec![],
             proxy_supported: true,
         }
     }
@@ -138,6 +157,44 @@ mod tests {
             assert!(controls.validate(&model).is_ok(), "{id}: {kind}");
             model.thinking_types = vec!["different-type".into()];
             assert_eq!(controls.validate(&model).unwrap_err().0, "thinking.type");
+        }
+    }
+
+    #[test]
+    fn native_output_bounds_and_display_only_constrain_explicit_values() {
+        let mut model = model("claude-sonnet-4.6");
+        model.min_output_tokens = Some(1024);
+        model.max_output_tokens = Some(8192);
+        model.thinking_displays = vec!["omitted".into()];
+        for (fields, expected) in [
+            (serde_json::json!({"max_tokens":1023}), Some("max_tokens")),
+            (serde_json::json!({"max_tokens":8193}), Some("max_tokens")),
+            (
+                serde_json::json!({"thinking":{"type":"enabled","display":"summarized"}}),
+                Some("thinking.display"),
+            ),
+            (
+                serde_json::json!({"max_tokens":1024,"thinking":{"type":"enabled","display":"omitted"}}),
+                None,
+            ),
+            (serde_json::json!({"max_tokens":8192}), None),
+            (serde_json::json!({}), None),
+        ] {
+            let controls = ModelControls::from_value(
+                &serde_json::json!({"additionalModelRequestFields":fields}),
+            )
+            .unwrap();
+            assert_eq!(
+                controls.validate(&model).err().map(|error| error.0),
+                expected
+            );
+            model.min_output_tokens = None;
+            model.max_output_tokens = None;
+            model.thinking_displays.clear();
+            assert!(controls.validate(&model).is_ok());
+            model.min_output_tokens = Some(1024);
+            model.max_output_tokens = Some(8192);
+            model.thinking_displays = vec!["omitted".into()];
         }
     }
 

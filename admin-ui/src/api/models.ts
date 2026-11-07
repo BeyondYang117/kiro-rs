@@ -7,12 +7,14 @@ export interface AvailableModel {
   rateMultiplier: number | null
   rateUnit: string | null
   maxInputTokens: number | null
+  minOutputTokens: number | null
   maxOutputTokens: number | null
   effortLevels: string[]
   effortSchemaPath: string | null
   defaultEffort: string | null
   thinkingTypes: string[]
   defaultThinking: string | null
+  thinkingDisplays: string[]
   proxySupported: boolean
 }
 

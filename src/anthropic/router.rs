@@ -110,6 +110,140 @@ mod tests {
     use std::{collections::HashMap, sync::Arc};
     use tower::ServiceExt;
 
+    async fn models_response(app: Router, path: &str) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn model_pagination_traverses_both_directions_and_details_are_stable() {
+        let app = create_router_with_provider(["test-key"], None, true, true, false);
+        for prefix in ["/v1", "/cc/v1"] {
+            let (status, all) = models_response(app.clone(), &format!("{prefix}/models")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(all["has_more"], false);
+            let expected: Vec<_> = all["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|model| model["id"].as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(all["first_id"], expected[0]);
+            assert_eq!(all["last_id"], *expected.last().unwrap());
+            for backwards in [false, true] {
+                let mut cursor = None;
+                let mut seen = Vec::new();
+                for _ in 0..expected.len() {
+                    let path = match &cursor {
+                        Some(cursor) => format!(
+                            "{prefix}/models?limit=3&{}={cursor}",
+                            if backwards { "before_id" } else { "after_id" }
+                        ),
+                        None => format!("{prefix}/models?limit=3"),
+                    };
+                    // Start backward traversal just before the final item.
+                    if backwards && cursor.is_none() {
+                        seen.push(expected.last().unwrap().clone());
+                        cursor = Some(expected.last().unwrap().clone());
+                        continue;
+                    }
+                    let (status, page) = models_response(app.clone(), &path).await;
+                    assert_eq!(status, StatusCode::OK);
+                    let ids: Vec<_> = page["data"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|model| model["id"].as_str().unwrap().to_owned())
+                        .collect();
+                    assert!(ids.len() <= 3);
+                    assert_eq!(page["first_id"], *ids.first().unwrap());
+                    assert_eq!(page["last_id"], *ids.last().unwrap());
+                    cursor = Some(
+                        if backwards { ids.first() } else { ids.last() }
+                            .unwrap()
+                            .clone(),
+                    );
+                    if backwards {
+                        seen.splice(0..0, ids);
+                    } else {
+                        seen.extend(ids);
+                    }
+                    if page["has_more"] == false {
+                        break;
+                    }
+                }
+                assert_eq!(seen, expected);
+            }
+            for id in &expected {
+                let (_, detail) =
+                    models_response(app.clone(), &format!("{prefix}/models/{id}")).await;
+                let (_, again) =
+                    models_response(app.clone(), &format!("{prefix}/models/{id}")).await;
+                assert_eq!(detail, again);
+                let created =
+                    chrono::DateTime::parse_from_rfc3339(detail["created_at"].as_str().unwrap())
+                        .unwrap()
+                        .timestamp();
+                let entry = all["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|model| model["id"] == *id)
+                    .unwrap();
+                assert_eq!(entry["created"], created);
+                assert_eq!(entry["max_tokens"], detail["max_tokens"]);
+                assert_eq!(entry["max_input_tokens"], detail["max_input_tokens"]);
+            }
+            for (name, id) in [
+                ("before_id", expected.first().unwrap()),
+                ("after_id", expected.last().unwrap()),
+            ] {
+                let (status, empty) =
+                    models_response(app.clone(), &format!("{prefix}/models?{name}={id}")).await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(empty["data"], serde_json::json!([]));
+                assert_eq!(empty["has_more"], false);
+                assert!(empty["first_id"].is_null() && empty["last_id"].is_null());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_model_pagination_returns_anthropic_errors() {
+        let app = create_router_with_provider(["test-key"], None, true, true, false);
+        for prefix in ["/v1", "/cc/v1"] {
+            for query in [
+                "limit=0",
+                "limit=1001",
+                "limit=-1",
+                "limit=abc",
+                "limit=1&limit=2",
+                "before_id=kimi-k3&after_id=gpt-5.6-sol",
+                "after_id=unknown",
+                "before_id=",
+                "limit=99999999999999999999999999",
+            ] {
+                let (status, error) =
+                    models_response(app.clone(), &format!("{prefix}/models?{query}")).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {error}");
+                assert_eq!(error["error"]["type"], "invalid_request_error");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn stop_sequences_defaults_pass_validation_on_both_message_routes() {
         use axum::body::to_bytes;

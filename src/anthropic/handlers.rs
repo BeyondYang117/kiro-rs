@@ -9,7 +9,7 @@ use anyhow::Error;
 use axum::{
     Json as JsonExtractor,
     body::Body,
-    extract::State,
+    extract::{Query, State, rejection::QueryRejection},
     http::{StatusCode, header},
     response::{IntoResponse, Json, Response},
 };
@@ -116,12 +116,66 @@ pub(super) fn map_provider_error(err: Error) -> Response {
         .into_response()
 }
 
-/// GET /v1/models
-///
-/// 返回可用的模型列表
-pub async fn get_models() -> impl IntoResponse {
-    tracing::info!("Received GET /v1/models request");
+/// Pagination over the local compatibility list; no upstream discovery is performed.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ModelsQuery {
+    limit: Option<usize>,
+    after_id: Option<String>,
+    before_id: Option<String>,
+}
 
+/// GET /v1/models and /cc/v1/models, preserving the existing order and full-list default.
+pub async fn get_models(query: Result<Query<ModelsQuery>, QueryRejection>) -> Response {
+    let query = match query {
+        Ok(Query(query)) => query,
+        Err(_) => return model_list_error("Invalid model pagination parameters"),
+    };
+    let limit = query.limit.unwrap_or(1000);
+    if !(1..=1000).contains(&limit) {
+        return model_list_error("limit must be between 1 and 1000");
+    }
+    if query.after_id.is_some() && query.before_id.is_some() {
+        return model_list_error("after_id and before_id cannot be used together");
+    }
+    let models = local_models();
+    let (start, end, has_more) = if let Some(cursor) = &query.before_id {
+        let Some(end) = models.iter().position(|model| &model.id == cursor) else {
+            return model_list_error("before_id must refer to a listed model ID");
+        };
+        let start = end.saturating_sub(limit);
+        (start, end, start > 0)
+    } else {
+        let start = if let Some(cursor) = &query.after_id {
+            let Some(position) = models.iter().position(|model| &model.id == cursor) else {
+                return model_list_error("after_id must refer to a listed model ID");
+            };
+            position + 1
+        } else {
+            0
+        };
+        let end = (start + limit).min(models.len());
+        (start, end, end < models.len())
+    };
+    let data: Vec<_> = models.into_iter().skip(start).take(end - start).collect();
+    Json(ModelsResponse {
+        object: "list".into(),
+        has_more,
+        first_id: data.first().map(|model| model.id.clone()),
+        last_id: data.last().map(|model| model.id.clone()),
+        data,
+    })
+    .into_response()
+}
+
+fn model_list_error(message: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse::new("invalid_request_error", message)),
+    )
+        .into_response()
+}
+
+fn local_models() -> Vec<Model> {
     let mut models = vec![
         Model {
             id: "claude-fable-5-1".to_string(),
@@ -421,10 +475,7 @@ pub async fn get_models() -> impl IntoResponse {
         });
     }
 
-    Json(ModelsResponse {
-        object: "list".to_string(),
-        data: models,
-    })
+    models
 }
 
 /// GET /v1/models/{model_id}: expose the mapped context and output limits.
@@ -436,11 +487,19 @@ pub async fn get_model(axum::extract::Path(model_id): axum::extract::Path<String
         )
             .into_response();
     };
+    // Resolve aliases to the same static metadata as the model list. A retrieval
+    // must not report the current time as the model's creation date.
+    let metadata = local_models()
+        .into_iter()
+        .find(|model| super::converter::map_model(&model.id).as_deref() == Some(&kiro_model))
+        .expect("mapped models have local metadata");
     let context = super::converter::get_context_window_size(&model_id);
     let detail = super::types::ModelDetail {
         id: model_id.clone(),
         object: "model".into(),
-        created_at: chrono::Utc::now().to_rfc3339(),
+        created_at: chrono::DateTime::from_timestamp(metadata.created, 0)
+            .expect("local model timestamp is valid")
+            .to_rfc3339(),
         display_name: kiro_model,
         type_name: "model".into(),
         max_input_tokens: context,
@@ -2066,7 +2125,9 @@ mod model_capability_tests {
     #[tokio::test]
     async fn model_list_and_detail_expose_sonnet_55_and_opus_output_caps() {
         use axum::{body::to_bytes, response::IntoResponse};
-        let list = super::get_models().await.into_response();
+        let list = super::get_models(Ok(axum::extract::Query(super::ModelsQuery::default())))
+            .await
+            .into_response();
         let list: serde_json::Value =
             serde_json::from_slice(&to_bytes(list.into_body(), 100_000).await.unwrap()).unwrap();
         for (model, expected) in [

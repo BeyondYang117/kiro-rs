@@ -1,5 +1,15 @@
 # Kiro CLI 适配（2026-11-07）
 
+## 增强：目录参数边界与模型分页
+
+- 新鲜账号目录从 `additionalModelRequestFieldsSchema.properties.max_tokens` 提取正整数 `minimum` / `maximum`；上限同时存在于 `tokenLimits.maxOutputTokens` 时取两者较小值。上下限冲突时不使用该组约束，缺失或非法值不推测默认值。
+- 提取完整的 `thinking.display` 枚举，并与输出上下限一起参与原生参数账号选路；全部已授权账号明确不兼容时，在刷新令牌和发送生成请求前返回 `400 invalid_request_error`。Claude 仍受相应端点的 `nativeThinking` 控制，GPT / Kimi 沿用原生参数规则。未知 display 字符串仍先按现有兼容规则忽略。
+- 管理接口新增 `minOutputTokens`、`thinkingDisplays`，管理页面显示输出下限和 reasoning 显示选项；不返回原始 schema。
+- `/v1/models` 与 `/cc/v1/models` 支持 `limit`（1–1000，省略时保留完整列表）、`after_id` / `before_id`（互斥，使用列表中的精确 ID）。返回 `has_more`、`first_id`、`last_id`，空页 ID 为 null；`has_more` 按所请求的方向判断。非法分页参数返回统一 JSON 400。
+- 模型详情 `created_at` 使用与列表 `created` 一致的固定元数据，重复查询不再产生变化。列表顺序及本地兼容表的含义保持不变，分页不查询账号或触发上游生成。
+
+上述增强已增加目录解析、缺失/非法 schema、账号路由和双入口正反向分页回归；仍属于本地协议验证，未新增真实账号联调。
+
 ## 近期官方更新与本轮补齐
 
 截至 2026-11-07，重新查询[官方稳定版 manifest](https://prod.download.cli.kiro.dev/stable/latest/manifest.json)仍为 `3.1.0`；无需继续提高版本标识。[官方更新日志](https://kiro.dev/changelog/)记录：

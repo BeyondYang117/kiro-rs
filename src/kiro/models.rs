@@ -89,12 +89,14 @@ pub(crate) struct AvailableModel {
     pub rate_multiplier: Option<f64>,
     pub rate_unit: Option<String>,
     pub max_input_tokens: Option<u64>,
+    pub min_output_tokens: Option<u64>,
     pub max_output_tokens: Option<u64>,
     pub effort_levels: Vec<String>,
     pub effort_schema_path: Option<String>,
     pub default_effort: Option<String>,
     pub thinking_types: Vec<String>,
     pub default_thinking: Option<String>,
+    pub thinking_displays: Vec<String>,
     pub proxy_supported: bool,
 }
 
@@ -141,6 +143,25 @@ fn choices(value: &Value) -> Vec<String> {
         .collect()
 }
 
+// Ignore contradictory or malformed bounds instead of inventing a constraint.
+fn output_bounds(model: &Value, schema: &Value) -> (Option<u64>, Option<u64>) {
+    let positive = |value: &Value| value.as_u64().filter(|value| *value > 0);
+    let output = &schema["properties"]["max_tokens"];
+    let minimum = positive(&output["minimum"]);
+    let maximum = match (
+        positive(&output["maximum"]),
+        positive(&model["tokenLimits"]["maxOutputTokens"]),
+    ) {
+        (Some(schema), Some(tokens)) => Some(schema.min(tokens)),
+        (schema, tokens) => schema.or(tokens),
+    };
+    if minimum.zip(maximum).is_some_and(|(min, max)| min > max) {
+        (None, None)
+    } else {
+        (minimum, maximum)
+    }
+}
+
 fn normalize(model: &Value) -> anyhow::Result<AvailableModel> {
     let model_id = text(&model["modelId"], 256).context("model ID missing or too long")?;
     let schema = &model["additionalModelRequestFieldsSchema"];
@@ -157,6 +178,7 @@ fn normalize(model: &Value) -> anyhow::Result<AvailableModel> {
             break;
         }
     }
+    let (min_output_tokens, max_output_tokens) = output_bounds(model, schema);
     let thinking = &schema["properties"]["thinking"]["properties"]["type"];
     let thinking_types = choices(&thinking["enum"]);
     let default_thinking =
@@ -175,14 +197,16 @@ fn normalize(model: &Value) -> anyhow::Result<AvailableModel> {
         max_input_tokens: model["tokenLimits"]["maxInputTokens"]
             .as_u64()
             .filter(|v| *v > 0),
-        max_output_tokens: model["tokenLimits"]["maxOutputTokens"]
-            .as_u64()
-            .filter(|v| *v > 0),
+        min_output_tokens,
+        max_output_tokens,
         effort_levels,
         effort_schema_path,
         default_effort,
         thinking_types,
         default_thinking,
+        thinking_displays: choices(
+            &schema["properties"]["thinking"]["properties"]["display"]["enum"],
+        ),
         proxy_supported,
     })
 }

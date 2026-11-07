@@ -694,13 +694,15 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
 
 ### 账号可用模型
 
-凭据右侧更多操作 → **查看可用模型**，可查询该账号当前 API 区域中的模型、输入/输出 token 上限、计费倍率、effort 与 thinking 能力，并按名称、ID 或提供商搜索。列表区分“账号默认”“代理已适配”和“代理待适配”；上游未提供的参数显示“未上报”。支持 OAuth、IdC 和 API Key 凭据，使用凭据的代理与区域。
+凭据右侧更多操作 → **查看可用模型**，可查询该账号当前 API 区域中的模型、输入/输出 token 上限、输出下限、计费倍率、effort、thinking 类型与显示选项，并按名称、ID 或提供商搜索。列表区分“账号默认”“代理已适配”和“代理待适配”；上游未提供的参数显示“未上报”。支持 OAuth、IdC 和 API Key 凭据，使用凭据的代理与区域。
 
 成功查询的目录在 5 分钟内参与账号选路：优先选择已确认支持请求模型的账号，跳过目录明确未授权的账号；目录可覆盖旧的订阅名称判断。已确认账号满载或冷却时，仍可选择权限未知且通过原有订阅规则的账号。未查询、过期或刷新失败时恢复原有规则；生成请求不额外查询目录，可在此手动刷新。
 
-启用相应端点的 `endpoints.cli.nativeThinking` / `endpoints.ide.nativeThinking` 后，新鲜目录还会检查 `max_tokens`、`output_config.effort` 和实际传输的 thinking 类型，并选择参数兼容的账号。所有具备模型权限的启用账号均被目录明确判定为不兼容时，发送上游请求前返回 HTTP 400；未上报的能力保持兼容处理，不自动修改请求参数。
+启用相应端点的 `endpoints.cli.nativeThinking` / `endpoints.ide.nativeThinking` 后，新鲜目录还会检查 `max_tokens` 上下限、`output_config.effort`、实际传输的 thinking 类型及 `thinking.display`，并选择参数兼容的账号。GPT / Kimi 默认参与原生参数检查，GPT 使用 `reasoning.effort`。所有具备模型权限的启用账号均被目录明确判定为不兼容时，发送上游请求前返回 HTTP 400；未上报的能力保持兼容处理，不自动修改请求参数。
 
 刷新失败时展示旧记录并标明过期；账号身份、Profile ARN、区域或端点变化会隔离缓存。分页失败时不返回不完整的授权表。该功能不会自动切换请求模型，标为“代理待适配”的未知模型仍不能通过 messages 调用；普通 `/v1/models` 是本地兼容表，包含已适配的 Claude、GPT-5.6 和 Kimi K3。完整行为及限制见 [兼容性记录](docs/KIRO_COMPATIBILITY.md)。
+
+`GET /v1/models` 和 `/cc/v1/models` 可传 `limit=1..1000` 及互斥的 `after_id` / `before_id`，游标使用列表中的模型 ID。响应包含 `has_more`、`first_id`、`last_id`；省略分页参数仍返回完整兼容列表。例如 `/v1/models?limit=5`，下一页使用该页的 `last_id` 作为 `after_id`。模型详情的 `created_at` 与列表的固定创建时间一致。
 
 ### 系统设置
 
