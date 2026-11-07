@@ -42,6 +42,55 @@ fn model_catalog_scope_changes_with_account_profile_region_and_endpoint() {
     assert_eq!(manager.model_catalog_key(7).unwrap(), original);
 }
 
+#[test]
+fn cli_usage_limits_binds_members_in_json_and_ide_keeps_its_query_protocol() {
+    let client = reqwest::Client::new();
+    let credential = KiroCredentials {
+        api_region: Some("eu-central-1".into()),
+        profile_arn: Some("profile+/=&".into()),
+        kiro_api_key: Some("test-key".into()),
+        ..Default::default()
+    };
+    for endpoint in ["cli", "ide"] {
+        let mut config = Config::default();
+        config.default_endpoint = endpoint.into();
+        let request = usage_limits_request(&client, &credential, &config, "test-token")
+            .build()
+            .unwrap();
+        assert_eq!(request.headers()["authorization"], "Bearer test-token");
+        assert_eq!(request.headers()["tokentype"], "API_KEY");
+        if endpoint == "cli" {
+            assert_eq!(request.method(), reqwest::Method::POST);
+            assert_eq!(
+                request.url().as_str(),
+                "https://q.eu-central-1.amazonaws.com/"
+            );
+            assert_eq!(
+                request.headers()["content-type"],
+                "application/x-amz-json-1.0"
+            );
+            assert_eq!(
+                request.headers()["x-amz-target"],
+                "AmazonCodeWhispererService.GetUsageLimits"
+            );
+            let body: serde_json::Value =
+                serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
+            assert_eq!(
+                body,
+                serde_json::json!({"origin":"KIRO_CLI","resourceType":"AGENTIC_REQUEST","profileArn":"profile+/=&"})
+            );
+        } else {
+            assert_eq!(request.method(), reqwest::Method::GET);
+            assert_eq!(request.url().path(), "/getUsageLimits");
+            let query: std::collections::HashMap<_, _> =
+                request.url().query_pairs().into_owned().collect();
+            assert_eq!(query["origin"], "AI_EDITOR");
+            assert_eq!(query["profileArn"], "profile+/=&");
+            assert!(request.body().is_none());
+        }
+    }
+}
+
 #[tokio::test]
 async fn refresh_errors_preserve_status_and_retry_after_for_shared_backoff() {
     for status in [429, 503] {

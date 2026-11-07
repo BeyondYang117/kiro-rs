@@ -46,7 +46,7 @@
 - **Thinking 模式**: 支持 Claude 的 extended thinking 功能
 - **工具调用**: 完整支持 function calling / tool use
 - **WebSearch**: 内置 WebSearch 工具转换逻辑
-- **多模型支持**: 支持 Sonnet、Opus、Haiku 系列模型
+- **多模型支持**: 支持 Claude、GPT-5.6 Sol / Terra / Luna 和 Kimi K3
 - **Admin 管理**: 可选的 Web 管理界面和 API，支持凭据管理、余额查询等
 - **调用日志**: SQLite 持久化逐次调用，管理页可查询用量、耗时、错误原因与重试记录
 - **多级 Region 配置**: 支持全局和凭据级别的 Auth Region / API Region 配置
@@ -626,7 +626,7 @@ claude --model claude-haiku-5-5 --effort high
 
 ## 模型映射
 
-2026-11-06 的新版 Kiro 适配范围、协议依据及尚未接入的功能见 [兼容性记录](docs/KIRO_COMPATIBILITY.md)。
+2026-11-07 的新版 Kiro CLI 适配范围、协议依据及验证边界见 [兼容性记录](docs/KIRO_COMPATIBILITY.md)。
 
 | Anthropic 模型 | Kiro 模型 |
 |----------------|-----------|
@@ -643,6 +643,21 @@ claude --model claude-haiku-5-5 --effort high
 | `*opus*`（含 4.5/4-5） | `claude-opus-4.5` |
 | `*haiku*` | `claude-haiku-4.5` |
 | `*haiku-5-5*` / `*haiku-5.5*` | `claude-haiku-5.5` |
+| `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` | 同名 ID（精确匹配，不支持 `-thinking` 别名） |
+| `kimi-k3` | `kimi-k3`（精确匹配） |
+
+GPT / Kimi 仍使用本项目的 Messages API，可调用 `/v1/messages` 和 `/cc/v1/messages`，支持工具、图片、SSE、用量和代理侧压缩；没有新增 OpenAI `/v1/responses` 或 `/v1/chat/completions` 入口。这些模型直接发送原生参数，不需要开启 Claude 的 `nativeThinking`。GPT 可使用 `reasoning.effort`，接受 `none / low / medium / high / xhigh / max`；也兼容将 `output_config.effort` 转换到该字段，两者同时提供时必须一致。省略 effort 时保留上游默认值（官方当前为 `high`）。
+
+```json
+{
+  "model": "gpt-5.6-sol",
+  "max_tokens": 4096,
+  "reasoning": { "effort": "high" },
+  "messages": [{ "role": "user", "content": "分析这个 Rust 项目" }]
+}
+```
+
+Kimi K3 目前仅映射通用 `max_tokens`，其他模型参数待账号 schema 确认后再开放。GPT / Kimi 不接受 Claude 的 thinking 配置（`disabled` 可兼容省略），切换模型时不回放 Claude 推理签名。模型目录支持新鲜账号权限、输出上限和 GPT effort 枚举校验；没有新鲜目录时，已知 FREE 账号不会用于这些付费模型。模型支持表不代表账号授权，Kimi K3 的区域限制仍由上游执行。本地已验证协议转换和模拟上游，尚未完成真实账号联调。
 
 Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/claude-sonnet-5.md)。
 
@@ -685,7 +700,7 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
 
 启用相应端点的 `endpoints.cli.nativeThinking` / `endpoints.ide.nativeThinking` 后，新鲜目录还会检查 `max_tokens`、`output_config.effort` 和实际传输的 thinking 类型，并选择参数兼容的账号。所有具备模型权限的启用账号均被目录明确判定为不兼容时，发送上游请求前返回 HTTP 400；未上报的能力保持兼容处理，不自动修改请求参数。
 
-刷新失败时展示旧记录并标明过期；账号身份、Profile ARN、区域或端点变化会隔离缓存。分页失败时不返回不完整的授权表。该功能不会自动切换请求模型，GPT/Kimi 等待适配模型暂不能通过 messages 调用；普通 `/v1/models` 仍是本地兼容表。完整行为及限制见 [兼容性记录](docs/KIRO_COMPATIBILITY.md)。
+刷新失败时展示旧记录并标明过期；账号身份、Profile ARN、区域或端点变化会隔离缓存。分页失败时不返回不完整的授权表。该功能不会自动切换请求模型，标为“代理待适配”的未知模型仍不能通过 messages 调用；普通 `/v1/models` 是本地兼容表，包含已适配的 Claude、GPT-5.6 和 Kimi K3。完整行为及限制见 [兼容性记录](docs/KIRO_COMPATIBILITY.md)。
 
 ### 系统设置
 

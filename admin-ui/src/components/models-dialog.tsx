@@ -192,8 +192,8 @@ export function ModelsDialog({
         </div>
         <p className="text-xs leading-relaxed text-muted-foreground">
           模型列表缓存 5 分钟。“代理待适配”的模型暂不能通过 messages
-          接口调用；原生参数需启用
-          nativeThinking。这里只查询模型目录，不会发送生成请求或自动切换模型。
+          接口调用；Claude 原生参数需启用 nativeThinking，GPT/Kimi 使用各自的原生参数。
+          这里只查询模型目录，不会发送生成请求或自动切换模型。
         </p>
       </DialogContent>
     </Dialog>

@@ -118,6 +118,15 @@ fn chunked_tool_suffix(name: &str) -> &'static str {
 pub fn map_model(model: &str) -> Option<String> {
     let model_lower = model.to_lowercase();
 
+    // Provider IDs are exact: never silently route a future tier/version to an
+    // older model, or reinterpret a Claude thinking alias as a GPT control.
+    if matches!(
+        model_lower.as_str(),
+        "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" | "kimi-k3"
+    ) {
+        return Some(model_lower);
+    }
+
     if model_lower.contains("fable") {
         // Kiro 侧 ID 为点号形式 claude-fable-5.1（实测 claude-fable-5-1 / claude-fable-5 均被上游拒绝）
         // 目前 Kiro 仅上线 5.1 一个 Fable 版本，故与 haiku 分支一致采用无条件映射
@@ -162,6 +171,17 @@ pub fn map_model(model: &str) -> Option<String> {
     }
 }
 
+pub fn is_gpt(model: &str) -> bool {
+    matches!(
+        map_model(model).as_deref(),
+        Some("gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna")
+    )
+}
+
+pub fn is_non_claude(model: &str) -> bool {
+    is_gpt(model) || model.eq_ignore_ascii_case("kimi-k3")
+}
+
 /// Proxy defaults follow Claude Code's model-specific effort choices.
 pub fn default_effort(model: &str) -> &'static str {
     match map_model(model).as_deref() {
@@ -179,7 +199,8 @@ pub fn default_effort(model: &str) -> &'static str {
 pub fn get_context_window_size(model: &str) -> i32 {
     match map_model(model) {
         Some(mapped)
-            if mapped == "claude-fable-5.1"
+            if is_non_claude(&mapped)
+                || mapped == "claude-fable-5.1"
                 || mapped == "claude-sonnet-5"
                 || mapped == "claude-sonnet-5.5"
                 || mapped == "claude-haiku-5.5"
@@ -200,6 +221,25 @@ pub fn get_context_window_size(model: &str) -> i32 {
 pub fn additional_model_request_fields(req: &MessagesRequest) -> Option<serde_json::Value> {
     let mut fields = serde_json::Map::new();
     fields.insert("max_tokens".into(), req.max_tokens.into());
+    if is_non_claude(&req.model) {
+        if is_gpt(&req.model) {
+            let effort = req
+                .extra_controls
+                .get("reasoning")
+                .and_then(|reasoning| reasoning.get("effort"))
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    req.output_config
+                        .as_ref()
+                        .map(|config| config.effort.as_str())
+                        .filter(|effort| !effort.is_empty())
+                });
+            if let Some(effort) = effort {
+                fields.insert("reasoning".into(), serde_json::json!({"effort":effort}));
+            }
+        }
+        return Some(fields.into());
+    }
     if let Some(thinking) = &req.thinking {
         // Keep client intent here; endpoint-specific normalization belongs to
         // native transport so legacy enabled budgets retain their semantics.
@@ -1034,6 +1074,41 @@ fn merge_assistant_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_models_map_exactly_and_use_their_own_controls() {
+        for id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "kimi-k3"] {
+            assert_eq!(map_model(&id.to_uppercase()).as_deref(), Some(id));
+            assert_eq!(map_model(&format!("{id}-thinking")), None);
+            assert_eq!(get_context_window_size(id), 1_000_000);
+            assert!(!supports_adaptive_thinking(id));
+            let mut request: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "model":id,"max_tokens":4096,"messages":[{"role":"user","content":"hello"}],
+                "output_config":{"effort":"max"}
+            }))
+            .unwrap();
+            let fields = additional_model_request_fields(&request).unwrap();
+            assert_eq!(fields["max_tokens"], 4096);
+            assert!(fields.get("thinking").is_none());
+            assert!(fields.get("output_config").is_none());
+            if is_gpt(id) {
+                assert_eq!(fields["reasoning"]["effort"], "max");
+                request.output_config = None;
+                request
+                    .extra_controls
+                    .insert("reasoning".into(), serde_json::json!({"effort":"none"}));
+                assert_eq!(
+                    additional_model_request_fields(&request).unwrap()["reasoning"]["effort"],
+                    "none"
+                );
+            } else {
+                assert_eq!(fields, serde_json::json!({"max_tokens":4096}));
+            }
+        }
+        for id in ["gpt-5.6-unknown", "gpt-5.6-sol-extra", "kimi-k4"] {
+            assert_eq!(map_model(id), None);
+        }
+    }
 
     #[test]
     fn test_map_model_sonnet() {

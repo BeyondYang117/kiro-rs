@@ -1,5 +1,32 @@
 # Kiro CLI 适配（2026-11-07）
 
+## 近期官方更新与本轮补齐
+
+截至 2026-11-07，重新查询[官方稳定版 manifest](https://prod.download.cli.kiro.dev/stable/latest/manifest.json)仍为 `3.1.0`；无需继续提高版本标识。[官方更新日志](https://kiro.dev/changelog/)记录：
+
+- **11 月 5 日，3.1.0**：`PreCompact` / `PostCompact` Hooks；`/usage`、状态栏和工作流步骤的 session credits；环境默认设置、可选会话 recap、子代理读取父级 Memory、通知合并及 headless / workflow 修复。
+- **11 月 3 日，3.0.0**：V3 默认启用，独立二进制；Classic、桌面应用和内联补全退役，`doctor` 改为指引使用 `diagnostic` / `issue`；提供云会话、Memory、Approve for me、sandbox、自主模式和 Workflows。无 `--trust-all-tools` 的既有 headless 脚本及既有 ACP 客户端仍有 V2 兼容规则，不能笼统认为全部默认 V3。
+- **10 月 30 日，2.37.0 / 2.37.1**：默认迁移 V2 自定义 agent，支持 ACP 终端登录及 `KIRO_RUNTIME_DIR`。
+- **11 月 4 日，模型更新**：Haiku 5.5、Kimi K3 正式可用；10 月 30 日 Opus 5.5、GPT-5.6 Sol 转为正式可用。
+
+本轮在已有 CLI 传输上补齐代理层缺口：
+
+| 项目 | 新行为 |
+|------|--------|
+| 非 Claude 生成 | 精确接受 `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`、`kimi-k3`，普通和 `/cc` Messages 入口均可调用；不支持这些模型的 `-thinking` 别名，不猜测未来模型 ID |
+| GPT 参数 | 接受 `reasoning.effort: none / low / medium / high / xhigh / max`；兼容转换 `output_config.effort`，两者冲突时在发送前返回 400；未提供 effort 时不覆盖上游默认值 |
+| 原生传输 | GPT / Kimi 无论 Claude 的 `nativeThinking` 开关如何都发送原生 `max_tokens`；GPT effort 使用 `reasoning.effort`，不注入 Claude thinking 提示词 |
+| 跨模型历史 | GPT / Kimi 保留文本、图片、工具定义、工具调用及结果，移除 Claude 专用 reasoning/signature/redacted 历史；不接受 Claude 的 thinking 配置，兼容省略 `disabled` |
+| 模型能力 | 模型列表、详情及账号目录包含新增模型；GPT 明示 effort 路径及六种枚举，Kimi 不宣称支持尚未确认的 effort/thinking schema；上下文声明 1M |
+| 账号路由 | 新鲜目录继续判断模型权限；GPT `reasoning.effort` 和输出上限参与账号选择，全部账号不兼容时提前返回 400；未获取目录时沿用订阅启发式，已知 FREE 不用于新增付费模型 |
+| CLI 余额 | `GetUsageLimits` 的 `origin`、`resourceType`、`profileArn` 放入 AWS JSON 请求体，不再放在 URL；IDE 保留 GET 查询协议 |
+
+新增回归覆盖精确模型映射、参数非法值和冲突、CLI 传输、跨提供商历史、账号目录约束、工具输入/输出、JSON、实时和缓冲 SSE、摘要压缩、用量，以及 CLI / IDE 的额度请求绑定。**这些是本地模拟上游测试，未使用真实账号联调**。GPT 参数依据[官方 effort 文档](https://kiro.dev/docs/models/effort.md)，Kimi 仅开放通用输出上限，具体支持值仍由账号目录和上游决定。新增模型继续走 AWS Event Stream，不新增 OpenAI Responses / Chat Completions API，不声称实现 CLI 的 Hooks、审批、沙箱、云会话、Memory 或工作流执行器。
+
+本轮已完整下载官方 Linux ARM64 3.1.0 发布包，SHA-256 为 `acf8e80a10a079bad0c4e28b38a00aa4b3c537067c7844490384fddf94f88e7d`，与 manifest 一致。未安装或执行其中二进制；静态字符串确认 runtime / management 主机、生成 / MCP / 模型目录 targets、SDK `0.1.19636`、`additionalModelRequestFields`、`KIRO_CLI` 及 `GetUsageLimits` target。额度请求体字段同时依据下述开源生成序列化器确认。静态证据不证明账号可以使用任一模型。
+
+## 已有传输适配
+
 生产排查修正：新版 Kiro CLI 的 origin 为 `KIRO_CLI`，此前误用了 Amazon Q 前身的 `CLI`，现统一修正模型目录、当前/历史生成消息及余额请求的客户端来源。旧 origin 下只返回两个模型的目录不能据此认定账号仅有两种模型权限；修正后需重新查询并进行真实生成验证。
 
 CLI 模型目录的 AWS JSON 操作不使用 IDE 的 URL 查询参数绑定，现将 origin、profileArn 和分页游标放入 JSON 请求体。查询失败时管理页显示上游 HTTP 状态、白名单错误类型及 UUID 请求 ID；不返回原始响应或凭证。此修正用于恢复目录查询，生成请求的 `INVALID_MODEL_ID` 仍须依据账号目录核对。
@@ -20,17 +47,17 @@ CLI 模型目录的 AWS JSON 操作不使用 IDE 的 URL 查询参数绑定，�
 | 生成 | `POST https://runtime.<apiRegion>.kiro.dev/`，`x-amz-target: AmazonCodeWhispererStreamingService.GenerateAssistantResponse` |
 | WebSearch / MCP | 同一 runtime 根路径，`x-amz-target: AmazonCodeWhispererStreamingService.InvokeMCP`，保留 JSON-RPC 字段并注入 `profileArn` |
 | 模型目录 | `POST https://management.<apiRegion>.kiro.dev/`，`x-amz-target: KiroControlPlaneBearerService.ListAvailableModels`；`origin: KIRO_CLI`、`profileArn`、`nextToken` 放在 JSON 请求体中 |
-| 余额 | `POST https://q.<apiRegion>.amazonaws.com/?origin=KIRO_CLI&resourceType=AGENTIC_REQUEST`，`x-amz-target: AmazonCodeWhispererService.GetUsageLimits` |
+| 余额 | `POST https://q.<apiRegion>.amazonaws.com/`，`x-amz-target: AmazonCodeWhispererService.GetUsageLimits`；`origin: KIRO_CLI`、`resourceType: AGENTIC_REQUEST`、可选 `profileArn` 放在 JSON 请求体中 |
 | 版本检查 | 按运行中的默认端点选择 CLI / IDE 官方发布源；CLI 更新 `kiroCliVersion`，IDE 更新 `kiroVersion` |
 
 CLI 使用 `application/x-amz-json-1.0`、Rust SDK 风格 User-Agent（`md/appVersion-3.1.0 app/AmazonQ-For-CLI`）及 bearer 认证。当前和历史用户消息均改为 `origin: KIRO_CLI`，包括旧协议 thinking 注入的历史；触发类型为 `MANUAL`，移除 IDE continuation/task 字段。工具、图片和对话 ID 保留。Token 刷新继续使用凭据对应的 Social / IdC OAuth 流程，CLI 分支使用 CLI 标识。API Key 沿用已有 bearer / `API_KEY` 扩展，未声明实现 AWS SigV4。
 
-原生参数默认仍关闭；CLI 可单独设置 `endpoints.cli.nativeThinking: true`，启用后复用原生模型参数、reasoning 历史及新鲜账号目录的参数校验。IDE 开关不影响 CLI。生成模型仍为现有 Claude 映射。
+Claude 原生参数默认仍关闭；CLI 可单独设置 `endpoints.cli.nativeThinking: true`，启用后复用原生模型参数、reasoning 历史及新鲜账号目录的参数校验。IDE 开关不影响 CLI。新增 GPT / Kimi 总是使用各自的原生参数通路。
 
 核对来源：
 
 - [官方安装脚本](https://cli.kiro.dev/install)与[CLI 稳定版 manifest](https://prod.download.cli.kiro.dev/stable/latest/manifest.json)：当前 `3.1.0`。
-- 官方 CLI 3.1.0 Linux 发布包的部分解压静态字符串：确认 runtime/management 主机、Rust streaming SDK `0.1.19636`、三个 operation target、`additionalModelRequestFields`、CLI app/version 标识。下载较慢，仅检查部分内容，未安装或运行 CLI，未完成完整包校验。
+- 官方 CLI 3.1.0 Linux 发布包静态字符串：确认 runtime/management 主机、Rust streaming SDK `0.1.19636`、operation targets、`additionalModelRequestFields`、CLI app/version 标识。本轮已完成 ARM64 完整包校验，见上文。
 - [Amazon Q CLI 开源前身](https://github.com/aws/amazon-q-developer-cli/tree/15cc8f3cd18c4272925ce1c7053268eedff1ea0a)的生成/余额序列化器与 User-Agent 拦截器。旧仓库的 `CLI` origin 不代表新版 Kiro CLI。
 - 本机 Kiro 共享客户端 `extensions/kiro.kiro-agent/dist/extension.js` 中 `resolveServerOrigin` 映射：`kiro-cli` / `kiro-cli-non-interactive` → `KIRO_CLI`；该来源用于模型目录与生成。官方 CLI 3.1.0 发布包静态字符串也包含独立的 `KiroCli` origin 枚举。
 
@@ -39,6 +66,8 @@ CLI 使用 `application/x-amz-json-1.0`、Rust SDK 风格 User-Agent（`md/appVe
 ---
 
 # Kiro 兼容性记录（2026-11-06）
+
+以下保留此前 IDE 适配记录；CLI 支持范围、非 Claude 模型及验证状态以上文 2026-11-07 更新为准。
 
 核对依据：Kiro 官方更新日志、模型文档，以及本机安装的 Kiro IDE 1.4.86（代理扩展 1.1.718）的请求构造和事件 schema。客户端代码可以确认字段与调用方式；本次未使用真实账号调用上游，账号、区域、组织授权及服务端模型 schema 仍需实际验证。
 
@@ -114,7 +143,7 @@ thinking 校验复用原生传输转换：现代 Claude 的 `enabled` 按 `adapt
 
 | 新特性 | 对本项目的影响 |
 |--------|----------------|
-| GPT-5.6 Sol / Terra / Luna、Kimi K3 | 已能在账号目录发现并展示参数；生成路由仍只接受 Claude，需继续实现非 Claude 推理参数和生成协议。GPT 使用 `reasoning.effort`，不能套用 Claude 的 `output_config.effort` |
+| GPT-5.6 Sol / Terra / Luna、Kimi K3 | 2026-11-07 已补齐 Messages 生成及 GPT `reasoning.effort` 转换、校验；Kimi 其他参数和真实上游验证仍待完成，见本文开头 |
 | 动态模型路由与 schema 校验 | 已实现账号目录、模型及原生参数感知的账号选择；支持输出上限、effort/thinking 枚举校验。`/v1/models` 仍使用本地兼容表，完整 JSON Schema 和新增生成模型仍需继续适配 |
 | Runtime Responses 接口 | 新 IDE 除 `generateAssistantResponse` 外，还包含受功能开关控制的 `/v1/responses` 路径。本次保留现有 AWS Event Stream 通路，未声明支持新的 SSE 协议 |
 | CLI V3、Workflows、Memory、审批及 MCP elicitation | 属于 Kiro agent harness 和工具执行层。本项目提供模型 API 代理，未实现这些客户端工作流功能 |

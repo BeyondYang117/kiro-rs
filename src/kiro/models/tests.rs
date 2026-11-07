@@ -55,7 +55,7 @@ async fn cli_catalog_uses_control_plane_operation_and_keeps_pagination() {
         catalog
             .models
             .iter()
-            .any(|model| model.model_id == "gpt-5.6-sol" && !model.proxy_supported)
+            .any(|model| model.model_id == "gpt-5.6-sol" && model.proxy_supported)
     );
     assert_eq!(
         catalog.default_model_id.as_deref(),
@@ -104,8 +104,8 @@ fn model(id: &str) -> Value {
 fn discovers_provider_specific_schemas_without_promoting_unknown_models() {
     for (id, path, supported) in [
         ("claude-sonnet-5.5", "output_config", true),
-        ("gpt-5.6-sol", "reasoning", false),
-        ("kimi-k3", "reasoning", false),
+        ("gpt-5.6-sol", "reasoning", true),
+        ("kimi-k3", "reasoning", true),
         ("claude-haiku-6", "output_config", false),
         ("claude-opus-5.9", "output_config", false),
     ] {

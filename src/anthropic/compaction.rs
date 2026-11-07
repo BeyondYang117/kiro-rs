@@ -941,6 +941,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_models_complete_messages_tools_and_compaction_across_response_modes() {
+        for model in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "kimi-k3"] {
+            for (cc, buffered, streaming) in [
+                (false, false, false),
+                (false, false, true),
+                (true, true, true),
+            ] {
+                for compact in [false, true] {
+                    let mut bytes = frame(
+                        "assistantResponseEvent",
+                        json!({"content":"<summary>Complete answer</summary>"}),
+                    );
+                    if !compact {
+                        bytes.extend(frame("toolUseEvent", json!({"toolUseId":"next-tool","name":"read","input":"{\"path\":\"next\"}","stop":true})));
+                    }
+                    bytes.extend(frame("metadataEvent", json!({"stopReason":"end_turn","tokenUsage":{"uncachedInputTokens":17,"outputTokens":23}})));
+                    let mut upstream = mock(bytes).await;
+                    upstream.state.cc_buffered_stream = buffered;
+                    let mut payload = json!({"model":model,"max_tokens":4096,"stream":streaming,
+                        "messages":[{"role":"user","content":"read"},
+                            {"role":"assistant","content":[{"type":"thinking","thinking":"old thought","signature":"claude-signature"},
+                                {"type":"tool_use","id":"tool-1","name":"read","input":{"path":"test"}}]},
+                            {"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"file contents"}]}],
+                        "tools":[{"name":"read","description":"Read a file","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}]});
+                    if super::super::converter::is_gpt(model) {
+                        payload["reasoning"] = json!({"effort":"max"});
+                    }
+                    if compact {
+                        payload["compaction"] = json!({"type":"summarize"});
+                    }
+                    let response = if compact {
+                        handle_request(upstream.state.clone(), request(payload), cc).await
+                    } else {
+                        dispatch(upstream.state.clone(), request(payload), cc).await
+                    };
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::OK,
+                        "{model}: compact={compact}"
+                    );
+                    let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                    let text = std::str::from_utf8(&body).unwrap();
+                    assert!(!text.contains("event: error"), "{model}: {text}");
+                    assert!(!text.contains("claude-signature"));
+                    assert!(text.contains("23"), "reported output usage: {text}");
+                    if !compact {
+                        assert!(text.contains("next-tool"), "tool output: {text}");
+                        assert!(text.contains("tool_use"), "tool stop reason: {text}");
+                    }
+                    let calls = upstream.requests.lock().unwrap();
+                    assert_eq!(calls.len(), 1);
+                    let call = &calls[0];
+                    assert_eq!(
+                        call["conversationState"]["currentMessage"]["userInputMessage"]["modelId"],
+                        model
+                    );
+                    let fields = &call["additionalModelRequestFields"];
+                    assert_eq!(fields["max_tokens"], 4096);
+                    assert!(fields.get("thinking").is_none());
+                    assert!(fields.get("output_config").is_none());
+                    if !compact && super::super::converter::is_gpt(model) {
+                        assert_eq!(fields["reasoning"]["effort"], "max");
+                    }
+                    if !compact {
+                        assert_eq!(
+                            call["conversationState"]["currentMessage"]["userInputMessage"]["userInputMessageContext"]
+                                ["toolResults"][0]["toolUseId"],
+                            "tool-1"
+                        );
+                        assert!(!call.to_string().contains("claude-signature"));
+                        assert!(!call.to_string().contains("<thinking_effort>"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn reported_tokens_override_estimates_across_json_streams_and_summaries() {
         for (cc, buffered) in [(false, false), (true, false), (true, true)] {
             for streaming in [false, true] {

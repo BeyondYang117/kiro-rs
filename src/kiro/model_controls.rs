@@ -7,6 +7,7 @@ use super::models::AvailableModel;
 pub(crate) struct ModelControls {
     max_tokens: Option<u64>,
     effort: Option<String>,
+    reasoning_effort: Option<String>,
     thinking_type: Option<String>,
 }
 
@@ -49,6 +50,11 @@ impl ModelControls {
                 .and_then(|v| v.get("effort"))
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            reasoning_effort: fields
+                .get("reasoning")
+                .and_then(|value| value.get("effort"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             thinking_type: fields
                 .get("thinking")
                 .and_then(|v| v.get("type"))
@@ -69,6 +75,13 @@ impl ModelControls {
             && !model.effort_levels.contains(effort)
         {
             return Err(ModelParameterError("output_config.effort"));
+        }
+        if let Some(effort) = &self.reasoning_effort
+            && model.effort_schema_path.as_deref() == Some("reasoning.effort")
+            && !model.effort_levels.is_empty()
+            && !model.effort_levels.contains(effort)
+        {
+            return Err(ModelParameterError("reasoning.effort"));
         }
         if let Some(kind) = &self.thinking_type
             && !model.thinking_types.is_empty()

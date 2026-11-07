@@ -386,17 +386,12 @@ async fn refresh_idc_token(
     )
 }
 
-/// 获取使用额度信息
-pub(crate) async fn get_usage_limits(
+fn usage_limits_request(
+    client: &reqwest::Client,
     credentials: &KiroCredentials,
     config: &Config,
     token: &str,
-    proxy: Option<&ProxyConfig>,
-) -> anyhow::Result<UsageLimitsResponse> {
-    config.validate_regions()?;
-    credentials.validate_regions()?;
-    tracing::debug!("正在获取使用额度信息...");
-
+) -> reqwest::RequestBuilder {
     // 优先级：凭据.api_region > config.api_region > config.region
     let region = credentials.effective_api_region(config);
     let host = format!("q.{}.amazonaws.com", region);
@@ -405,23 +400,6 @@ pub(crate) async fn get_usage_limits(
     let os_name = &config.system_version;
     let node_version = &config.node_version;
 
-    // 构建 URL
-    let mut url = format!(
-        "https://{}/{}?origin={}&resourceType=AGENTIC_REQUEST",
-        host,
-        if crate::kiro::endpoint::is_cli(credentials, config) {
-            ""
-        } else {
-            "getUsageLimits"
-        },
-        crate::kiro::endpoint::origin(credentials, config)
-    );
-
-    // profileArn 是可选的
-    if let Some(profile_arn) = &credentials.profile_arn {
-        url.push_str(&format!("&profileArn={}", urlencoding::encode(profile_arn)));
-    }
-
     // 构建 User-Agent headers
     let user_agent = format!(
         "aws-sdk-js/1.0.0 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererruntime#1.0.0 m/N,E KiroIDE-{}-{}",
@@ -429,17 +407,28 @@ pub(crate) async fn get_usage_limits(
     );
     let amz_user_agent = format!("aws-sdk-js/1.0.0 KiroIDE-{}-{}", kiro_version, machine_id);
 
-    let client = build_client(proxy, 60, config.tls_backend)?;
-
     let cli = crate::kiro::endpoint::is_cli(credentials, config);
     let base = if cli {
+        let mut input = serde_json::json!({
+            "origin":crate::kiro::endpoint::cli::CLI_ORIGIN,
+            "resourceType":"AGENTIC_REQUEST"
+        });
+        if let Some(arn) = &credentials.profile_arn {
+            input["profileArn"] = arn.clone().into();
+        }
         client
-            .post(&url)
+            .post(format!("https://{host}/"))
             .header("content-type", "application/x-amz-json-1.0")
             .header("x-amz-target", "AmazonCodeWhispererService.GetUsageLimits")
-            .body("{}")
+            .json(&input)
     } else {
-        client.get(&url)
+        let mut request = client
+            .get(format!("https://{host}/getUsageLimits"))
+            .query(&[("origin", "AI_EDITOR"), ("resourceType", "AGENTIC_REQUEST")]);
+        if let Some(arn) = &credentials.profile_arn {
+            request = request.query(&[("profileArn", arn)]);
+        }
+        request
     };
     let mut request = base
         .header("host", &host)
@@ -464,6 +453,21 @@ pub(crate) async fn get_usage_limits(
     if credentials.is_api_key_credential() && !cli {
         request = request.header("tokentype", "API_KEY");
     }
+    request
+}
+
+/// 获取使用额度信息
+pub(crate) async fn get_usage_limits(
+    credentials: &KiroCredentials,
+    config: &Config,
+    token: &str,
+    proxy: Option<&ProxyConfig>,
+) -> anyhow::Result<UsageLimitsResponse> {
+    config.validate_regions()?;
+    credentials.validate_regions()?;
+    tracing::debug!("正在获取使用额度信息...");
+    let client = build_client(proxy, 60, config.tls_backend)?;
+    let request = usage_limits_request(&client, credentials, config, token);
 
     let response = request.send().await?;
 
@@ -957,9 +961,10 @@ impl MultiTokenManager {
     /// 复用当前凭据和重新选择凭据时使用相同的模型资格检查。
     fn eligible_for_model(&self, entry: &CredentialEntry, model: Option<&str>) -> bool {
         !entry.disabled
-            && self
-                .catalog_support(entry, model)
-                .unwrap_or_else(|| !Self::requires_opus(model) || entry.credentials.supports_opus())
+            && self.catalog_support(entry, model).unwrap_or_else(|| {
+                !(Self::requires_opus(model) || model.is_some_and(crate::anthropic::is_non_claude))
+                    || entry.credentials.supports_opus()
+            })
     }
 
     fn dispatchable(&self, entry: &CredentialEntry, model: Option<&str>, now: Instant) -> bool {

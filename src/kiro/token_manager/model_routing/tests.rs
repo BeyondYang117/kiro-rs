@@ -4,6 +4,53 @@ use crate::kiro::models::AvailableModel;
 const SONNET: &str = "claude-sonnet-4.6";
 const OPUS: &str = "claude-opus-4.6";
 
+#[tokio::test]
+async fn provider_models_use_catalog_permissions_and_native_reasoning_limits_by_default() {
+    let manager = manager("priority", "KIRO FREE");
+    assert!(manager.acquire_context(Some("gpt-5.6-sol")).await.is_err());
+    for (id, effort, limit) in [(1, "low", 1024), (2, "max", 8192)] {
+        let mut catalog = catalog(&["gpt-5.6-sol", "kimi-k3"]);
+        let model = &mut catalog.models[0];
+        model.effort_schema_path = Some("reasoning.effort".into());
+        model.effort_levels = vec![effort.into()];
+        model.max_output_tokens = Some(limit);
+        manager.update_model_catalog(
+            id,
+            &manager.model_catalog_key(id).unwrap(),
+            &catalog,
+            Instant::now(),
+            false,
+        );
+    }
+    let fields = controls(serde_json::json!({"max_tokens":4096,"reasoning":{"effort":"max"}}));
+    assert_eq!(
+        manager
+            .acquire_context_with_controls(Some("gpt-5.6-sol"), None, Some(&fields))
+            .await
+            .unwrap()
+            .id,
+        2
+    );
+    let fields = controls(serde_json::json!({"reasoning":{"effort":"high"}}));
+    let error = manager
+        .acquire_context_with_controls(Some("gpt-5.6-sol"), None, Some(&fields))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.downcast_ref::<ModelParameterError>().unwrap().0,
+        "reasoning.effort"
+    );
+    assert!(manager.acquire_context(Some("kimi-k3")).await.is_ok());
+    assert!(
+        manager
+            .snapshot()
+            .entries
+            .iter()
+            .all(|entry| entry.failure_count == 0)
+    );
+}
+
 fn manager(mode: &str, tier: &str) -> MultiTokenManager {
     MultiTokenManager::new(
         serde_json::from_value(serde_json::json!({

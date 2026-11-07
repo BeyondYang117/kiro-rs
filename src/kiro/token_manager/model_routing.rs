@@ -137,7 +137,9 @@ impl MultiTokenManager {
         model: Option<&str>,
         controls: Option<&ModelControls>,
     ) -> Result<(), ModelParameterError> {
-        if !crate::kiro::endpoint::native_thinking(&entry.credentials, &self.config) {
+        if !crate::kiro::endpoint::native_thinking(&entry.credentials, &self.config)
+            && !model.is_some_and(crate::anthropic::is_non_claude)
+        {
             return Ok(());
         }
         if let (Some(model), Some(controls), Some(catalog)) =

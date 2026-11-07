@@ -114,12 +114,24 @@ impl KiroEndpoint for IdeEndpoint {
             .and_then(|options| options.get("nativeThinking"))
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        if native_thinking {
+        if native_thinking || non_claude_body(&body) {
             native_model_body(&body)
         } else {
             legacy_thinking_body(&body)
         }
     }
+}
+
+pub(super) fn non_claude_body(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|request| {
+            request
+                .pointer("/conversationState/currentMessage/userInputMessage/modelId")
+                .and_then(serde_json::Value::as_str)
+                .map(crate::anthropic::is_non_claude)
+        })
+        .unwrap_or(false)
 }
 
 /// Normalize compatibility controls only for native Kiro model schemas.
@@ -133,6 +145,24 @@ pub(super) fn native_model_body(body: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
+    if crate::anthropic::is_non_claude(&model) {
+        // Claude signatures and redacted reasoning cannot be replayed to a
+        // different provider. Text, images and tool history remain intact.
+        if let Some(history) = request
+            .pointer_mut("/conversationState/history")
+            .and_then(Value::as_array_mut)
+        {
+            for message in history {
+                if let Some(assistant) = message
+                    .get_mut("assistantResponseMessage")
+                    .and_then(Value::as_object_mut)
+                {
+                    assistant.remove("reasoningContent");
+                }
+            }
+        }
+        return serde_json::to_string(&request).unwrap_or_else(|_| body.to_owned());
+    }
     if let Some(thinking) = request.pointer_mut("/additionalModelRequestFields/thinking") {
         let kind = thinking.get("type").and_then(Value::as_str);
         let normalized = kind

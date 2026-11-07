@@ -32,5 +32,6 @@ pub mod types;
 mod upstream;
 mod websearch;
 
+pub(crate) use converter::is_non_claude;
 pub(crate) use converter::map_model;
 pub use router::create_router_with_provider;

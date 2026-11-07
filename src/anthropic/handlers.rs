@@ -122,7 +122,7 @@ pub(super) fn map_provider_error(err: Error) -> Response {
 pub async fn get_models() -> impl IntoResponse {
     tracing::info!("Received GET /v1/models request");
 
-    let models = vec![
+    let mut models = vec![
         Model {
             id: "claude-fable-5-1".to_string(),
             object: "model".to_string(),
@@ -403,6 +403,24 @@ pub async fn get_models() -> impl IntoResponse {
         },
     ];
 
+    for (id, name, provider) in [
+        ("gpt-5.6-sol", "GPT-5.6 Sol", "openai"),
+        ("gpt-5.6-terra", "GPT-5.6 Terra", "openai"),
+        ("gpt-5.6-luna", "GPT-5.6 Luna", "openai"),
+        ("kimi-k3", "Kimi K3", "moonshot"),
+    ] {
+        models.push(Model {
+            id: id.into(),
+            object: "model".into(),
+            created: 1793318400,
+            owned_by: provider.into(),
+            display_name: name.into(),
+            model_type: "chat".into(),
+            max_tokens: super::converter::get_max_output_tokens(id),
+            max_input_tokens: model_input_limit(id),
+        });
+    }
+
     Json(ModelsResponse {
         object: "list".to_string(),
         data: models,
@@ -433,6 +451,17 @@ pub async fn get_model(axum::extract::Path(model_id): axum::extract::Path<String
 }
 
 fn model_capabilities(model: &str) -> serde_json::Value {
+    if super::converter::is_non_claude(model) {
+        let gpt = super::converter::is_gpt(model);
+        return json!({
+            "thinking":{"supported":false,"types":{"enabled":false,"adaptive":false,"disabled":true,"between_tools":false}},
+            "effort": if gpt { json!({"supported":true,"schema_path":"reasoning.effort","default":"high",
+                "none":{"supported":true},"low":{"supported":true},"medium":{"supported":true},
+                "high":{"supported":true},"xhigh":{"supported":true},"max":{"supported":true}}) }
+                else { json!({"supported":false}) },
+            "context_management":{"supported":true,"compact_20260112":{"supported":true}}
+        });
+    }
     let mapped = super::converter::map_model(model).unwrap_or_default();
     // Haiku 4.5 supports budgeted thinking; Haiku 5.5 also supports adaptive thinking.
     let thinking = !mapped.is_empty();
@@ -535,6 +564,45 @@ fn validate_and_normalize_request(payload: &mut MessagesRequest) -> Result<(), S
         return Err("max_tokens must be greater than zero".into());
     }
     normalize_message_input(&payload.model, &mut payload.system, &mut payload.messages)?;
+    let non_claude = super::converter::is_non_claude(&payload.model);
+    let gpt = super::converter::is_gpt(&payload.model);
+    if let Some(reasoning) = payload
+        .extra_controls
+        .get("reasoning")
+        .filter(|value| !value.is_null())
+    {
+        if !gpt {
+            return Err("reasoning.effort is only supported for GPT-5.6 models".into());
+        }
+        let Some(object) = reasoning.as_object() else {
+            return Err("reasoning must be an object containing effort".into());
+        };
+        if object.keys().any(|key| key != "effort") {
+            return Err("Only reasoning.effort is supported".into());
+        }
+        let effort = object.get("effort").and_then(serde_json::Value::as_str);
+        if !effort.is_some_and(|value| {
+            matches!(value, "none" | "low" | "medium" | "high" | "xhigh" | "max")
+        }) {
+            return Err("reasoning.effort must be none, low, medium, high, xhigh, or max".into());
+        }
+        if let Some(config) = &payload.output_config
+            && !config.effort.is_empty()
+            && Some(config.effort.as_str()) != effort
+        {
+            return Err(
+                "reasoning.effort and output_config.effort must agree when both are provided"
+                    .into(),
+            );
+        }
+    }
+    if non_claude
+        && payload.thinking.as_ref().is_some_and(|thinking| {
+            thinking.thinking_type != "disabled" || thinking.display.is_some()
+        })
+    {
+        return Err("Claude thinking controls are unsupported for this model; GPT-5.6 accepts reasoning.effort".into());
+    }
     if let Some(thinking) = &mut payload.thinking {
         if !matches!(
             thinking.thinking_type.as_str(),
@@ -1217,6 +1285,9 @@ async fn handle_non_stream_request(
 /// Model aliases supply thinking defaults; explicit client controls take priority.
 /// Adaptive requests share model-specific effort defaults, with or without an alias.
 fn apply_thinking_defaults(payload: &mut MessagesRequest) {
+    if super::converter::is_non_claude(&payload.model) {
+        return;
+    }
     if payload.thinking.is_none() && payload.model.to_lowercase().contains("thinking") {
         let adaptive = model_capabilities(&payload.model)["thinking"]["types"]["adaptive"]
             .as_bool()
@@ -1588,6 +1659,109 @@ pub(super) async fn count_tokens_route(
 #[cfg(test)]
 mod model_capability_tests {
     use super::model_capabilities;
+
+    #[test]
+    fn gpt_and_kimi_controls_are_validated_before_dispatch() {
+        for (model, controls, valid) in [
+            (
+                "gpt-5.6-sol",
+                serde_json::json!({"reasoning":{"effort":"none"}}),
+                true,
+            ),
+            (
+                "gpt-5.6-terra",
+                serde_json::json!({"output_config":{"effort":"max"}}),
+                true,
+            ),
+            (
+                "gpt-5.6-luna",
+                serde_json::json!({"reasoning":{"effort":"low"},"output_config":{"effort":"low"}}),
+                true,
+            ),
+            (
+                "gpt-5.6-sol",
+                serde_json::json!({"reasoning":{"effort":"low"},"output_config":{"effort":"high"}}),
+                false,
+            ),
+            (
+                "gpt-5.6-sol",
+                serde_json::json!({"reasoning":{"effort":"ultra"}}),
+                false,
+            ),
+            (
+                "gpt-5.6-sol",
+                serde_json::json!({"reasoning":{"effort":null}}),
+                false,
+            ),
+            (
+                "gpt-5.6-sol",
+                serde_json::json!({"reasoning":"high"}),
+                false,
+            ),
+            (
+                "gpt-5.6-sol",
+                serde_json::json!({"reasoning":{"effort":"high","summary":"auto"}}),
+                false,
+            ),
+            (
+                "gpt-5.6-sol",
+                serde_json::json!({"thinking":{"type":"enabled"}}),
+                false,
+            ),
+            (
+                "gpt-5.6-sol",
+                serde_json::json!({"thinking":{"type":"disabled"}}),
+                true,
+            ),
+            ("kimi-k3", serde_json::json!({}), true),
+            (
+                "kimi-k3",
+                serde_json::json!({"reasoning":{"effort":"high"}}),
+                false,
+            ),
+            (
+                "kimi-k3",
+                serde_json::json!({"output_config":{"effort":"high"}}),
+                false,
+            ),
+            (
+                "kimi-k3",
+                serde_json::json!({"thinking":{"type":"adaptive"}}),
+                false,
+            ),
+            (
+                "claude-opus-5.5",
+                serde_json::json!({"reasoning":{"effort":"high"}}),
+                false,
+            ),
+        ] {
+            let mut value = serde_json::json!({"model":model,"max_tokens":4096,"messages":[{"role":"user","content":"hi"}]});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(controls.as_object().unwrap().clone());
+            let mut request = serde_json::from_value(value).unwrap();
+            assert_eq!(
+                super::validate_and_normalize_request(&mut request).is_ok(),
+                valid,
+                "{model}: {controls}"
+            );
+            if valid {
+                super::apply_thinking_defaults(&mut request);
+                assert!(
+                    !request
+                        .thinking
+                        .as_ref()
+                        .is_some_and(|thinking| thinking.is_enabled())
+                );
+            }
+        }
+        assert_eq!(
+            model_capabilities("gpt-5.6-sol")["effort"]["schema_path"],
+            "reasoning.effort"
+        );
+        assert_eq!(model_capabilities("kimi-k3")["effort"]["supported"], false);
+    }
 
     #[test]
     fn adaptive_effort_defaults_match_claude_code_and_preserve_explicit_values() {

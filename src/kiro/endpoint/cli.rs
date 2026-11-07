@@ -114,11 +114,12 @@ impl KiroEndpoint for CliEndpoint {
 
     fn transform_api_body(&self, body: &str, ctx: &RequestContext<'_>) -> String {
         let body = ide::inject_profile_arn(body, &ctx.credentials.profile_arn);
-        let body = if super::native_thinking(ctx.credentials, ctx.config) {
-            ide::native_model_body(&body)
-        } else {
-            ide::legacy_thinking_body(&body)
-        };
+        let body =
+            if super::native_thinking(ctx.credentials, ctx.config) || ide::non_claude_body(&body) {
+                ide::native_model_body(&body)
+            } else {
+                ide::legacy_thinking_body(&body)
+            };
         let Ok(mut request) = serde_json::from_str::<Value>(&body) else {
             return body;
         };
@@ -167,6 +168,51 @@ fn set_origin(message: &mut Value) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn provider_models_keep_native_fields_without_replaying_claude_reasoning() {
+        let credentials = KiroCredentials::default();
+        let config = Config::default();
+        let ctx = RequestContext {
+            credentials: &credentials,
+            config: &config,
+            token: "test",
+            machine_id: "test",
+        };
+        for model in ["gpt-5.6-sol", "kimi-k3"] {
+            let body = json!({"conversationState":{
+                "currentMessage":{"userInputMessage":{"modelId":model,"content":"hello"}},
+                "history":[{"assistantResponseMessage":{"content":"answer","toolUses":[{"name":"read"}],
+                    "reasoningContent":{"reasoningText":{"text":"private thought","signature":"claude-signature"}}}}]
+            },"additionalModelRequestFields":{"max_tokens":4096,"reasoning":{"effort":"high"}}});
+            let transformed: Value = serde_json::from_str(
+                &CliEndpoint::new().transform_api_body(&body.to_string(), &ctx),
+            )
+            .unwrap();
+            assert_eq!(
+                transformed["additionalModelRequestFields"],
+                body["additionalModelRequestFields"]
+            );
+            let history = transformed["conversationState"]["history"]
+                .as_array()
+                .unwrap();
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0]["assistantResponseMessage"]["content"], "answer");
+            assert_eq!(
+                history[0]["assistantResponseMessage"]["toolUses"],
+                body["conversationState"]["history"][0]["assistantResponseMessage"]["toolUses"]
+            );
+            assert!(
+                history[0]["assistantResponseMessage"]
+                    .get("reasoningContent")
+                    .is_none()
+            );
+            assert_eq!(
+                transformed["conversationState"]["currentMessage"]["userInputMessage"]["origin"],
+                "KIRO_CLI"
+            );
+        }
+    }
 
     #[test]
     fn cli_wire_preserves_tools_images_and_history_with_cli_origins() {
