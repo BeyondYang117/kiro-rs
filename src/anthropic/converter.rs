@@ -307,6 +307,7 @@ pub struct ConversionResult {
 pub enum ConversionError {
     UnsupportedModel(String),
     EmptyMessages,
+    InvalidToolFormat(String),
 }
 
 impl std::fmt::Display for ConversionError {
@@ -314,6 +315,7 @@ impl std::fmt::Display for ConversionError {
         match self {
             ConversionError::UnsupportedModel(model) => write!(f, "模型不支持: {}", model),
             ConversionError::EmptyMessages => write!(f, "消息列表为空"),
+            ConversionError::InvalidToolFormat(message) => write!(f, "工具格式错误: {message}"),
         }
     }
 }
@@ -390,6 +392,63 @@ fn create_placeholder_tool(name: &str) -> Tool {
     }
 }
 
+/// Validate raw blocks before permissive ContentBlock decoding can silently discard them.
+/// Missing/null input retains the existing no-argument compatibility behavior.
+fn validate_tool_blocks(messages: &[super::types::Message]) -> Result<(), ConversionError> {
+    for (message_index, message) in messages.iter().enumerate() {
+        let Some(blocks) = message.content.as_array() else {
+            continue;
+        };
+        for (block_index, block) in blocks.iter().enumerate() {
+            let kind = block.get("type").and_then(|value| value.as_str());
+            if !matches!(kind, Some("tool_use" | "tool_result")) {
+                continue;
+            }
+            let path = format!("messages[{message_index}].content[{block_index}]");
+            let invalid =
+                |reason: &str| ConversionError::InvalidToolFormat(format!("{path}: {reason}"));
+            if serde_json::from_value::<ContentBlock>(block.clone()).is_err() {
+                return Err(invalid("invalid tool block field types"));
+            }
+            if kind == Some("tool_use") {
+                if message.role != "assistant" {
+                    return Err(invalid("tool_use requires assistant role"));
+                }
+                block
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .filter(|id| !id.trim().is_empty())
+                    .ok_or_else(|| invalid("id must be a nonempty string"))?;
+                if !block
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|name| !name.trim().is_empty())
+                {
+                    return Err(invalid("name must be a nonempty string"));
+                }
+                if block
+                    .get("input")
+                    .is_some_and(|input| !input.is_null() && !input.is_object())
+                {
+                    return Err(invalid("input must be a JSON object"));
+                }
+            } else {
+                if message.role != "user" {
+                    return Err(invalid("tool_result requires user role"));
+                }
+                if !block
+                    .get("tool_use_id")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|id| !id.trim().is_empty())
+                {
+                    return Err(invalid("tool_use_id must be a nonempty string"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 将 Anthropic 请求转换为 Kiro 请求
 pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, ConversionError> {
     // 1. 映射模型
@@ -415,6 +474,23 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
         &req.messages
     };
 
+    validate_tool_blocks(messages)?;
+    if let Some(tools) = &req.tools {
+        let mut names = HashMap::new();
+        for (index, tool) in tools.iter().enumerate() {
+            let mut definition = serde_json::to_value(tool).expect("tool definition is JSON");
+            definition["name"] = serde_json::json!(tool.name.to_lowercase());
+            let conflict = names
+                .insert(tool.name.to_lowercase(), definition.clone())
+                .is_some_and(|previous| previous != definition);
+            if tool.name.trim().is_empty() || conflict {
+                return Err(ConversionError::InvalidToolFormat(format!(
+                    "tools[{index}].name is empty or has conflicting definitions (case-insensitive)"
+                )));
+            }
+        }
+    }
+
     // 3. 生成会话 ID 和代理 ID
     // 优先从 metadata.user_id 中提取 session UUID 作为 conversationId
     let conversation_id = req
@@ -437,7 +513,7 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
     let merged_current = merge_user_messages(&current_messages, &model_id)?.user_input_message;
     let text_content = merged_current.content;
     let images = merged_current.images;
-    let tool_results = merged_current.user_input_message_context.tool_results;
+    let mut tool_results = merged_current.user_input_message_context.tool_results;
 
     // 6. 转换工具定义（超长名称自动缩短并记录映射）
     let mut tool_name_map = HashMap::new();
@@ -450,6 +526,7 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
         &model_id,
         &mut tool_name_map,
     )?;
+    normalize_tool_use_ids(&mut history, &mut tool_results)?;
     sanitize_history_tool_results(&mut history);
 
     // 8. 验证并过滤 tool_use/tool_result 配对
@@ -465,13 +542,13 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
     // Kiro API 要求：历史消息中引用的工具必须在 tools 列表中有定义
     // 注意：Kiro 匹配工具名称时忽略大小写，所以这里也需要忽略大小写比较
     let history_tool_names = collect_history_tool_names(&history);
-    let existing_tool_names: std::collections::HashSet<_> = tools
+    let mut existing_tool_names: std::collections::HashSet<_> = tools
         .iter()
         .map(|t| t.tool_specification.name.to_lowercase())
         .collect();
 
     for tool_name in history_tool_names {
-        if !existing_tool_names.contains(&tool_name.to_lowercase()) {
+        if existing_tool_names.insert(tool_name.to_lowercase()) {
             tools.push(create_placeholder_tool(&tool_name));
         }
     }
@@ -635,6 +712,101 @@ fn extract_tool_result_content(content: &Option<serde_json::Value>) -> (String, 
         None => String::new(),
     };
     (text, images)
+}
+
+/// Keep IDs unique on the wire without rejecting clients that reuse IDs across turns.
+/// Identical calls in a merged assistant turn are replays; conflicting calls are ambiguous.
+fn normalize_tool_use_ids(
+    history: &mut [Message],
+    current_results: &mut [ToolResult],
+) -> Result<(), ConversionError> {
+    let mut reserved = std::collections::HashSet::new();
+    for message in history.iter() {
+        match message {
+            Message::Assistant(message) => {
+                if let Some(calls) = &message.assistant_response_message.tool_uses {
+                    reserved.extend(calls.iter().map(|call| call.tool_use_id.clone()));
+                }
+            }
+            Message::User(message) => reserved.extend(
+                message
+                    .user_input_message
+                    .user_input_message_context
+                    .tool_results
+                    .iter()
+                    .map(|result| result.tool_use_id.clone()),
+            ),
+        }
+    }
+    reserved.extend(
+        current_results
+            .iter()
+            .map(|result| result.tool_use_id.clone()),
+    );
+    let mut seen = std::collections::HashSet::new();
+    let mut remap = HashMap::new();
+    for (index, message) in history.iter_mut().enumerate() {
+        match message {
+            Message::Assistant(message) => {
+                remap.clear();
+                let Some(calls) = &mut message.assistant_response_message.tool_uses else {
+                    continue;
+                };
+                let mut unique: Vec<ToolUseEntry> = Vec::new();
+                for call in std::mem::take(calls) {
+                    if let Some(previous) = unique
+                        .iter()
+                        .find(|previous| previous.tool_use_id == call.tool_use_id)
+                    {
+                        if previous.name != call.name || previous.input != call.input {
+                            return Err(ConversionError::InvalidToolFormat(format!(
+                                "history[{index}]: conflicting tool_use calls share an id in the same assistant turn"
+                            )));
+                        }
+                        continue;
+                    }
+                    unique.push(call);
+                }
+                for call in &mut unique {
+                    if !seen.insert(call.tool_use_id.clone()) {
+                        // Stable across retries, and disjoint from every client-provided ID.
+                        let mut salt = 0usize;
+                        let replacement = loop {
+                            let digest = Sha256::digest(
+                                format!("{}:{index}:{salt}", call.tool_use_id).as_bytes(),
+                            );
+                            let candidate = format!("toolu_{}", &hex::encode(digest)[..32]);
+                            if reserved.insert(candidate.clone()) {
+                                break candidate;
+                            }
+                            salt += 1;
+                        };
+                        remap.insert(call.tool_use_id.clone(), replacement.clone());
+                        call.tool_use_id = replacement;
+                    }
+                }
+                *calls = unique;
+            }
+            Message::User(message) => {
+                for result in &mut message
+                    .user_input_message
+                    .user_input_message_context
+                    .tool_results
+                {
+                    if let Some(id) = remap.get(&result.tool_use_id) {
+                        result.tool_use_id = id.clone();
+                    }
+                }
+                remap.clear();
+            }
+        }
+    }
+    for result in current_results {
+        if let Some(id) = remap.get(&result.tool_use_id) {
+            result.tool_use_id = id.clone();
+        }
+    }
+    Ok(())
 }
 
 /// 历史结果只能消费紧邻的 assistant 调用一次，不能与其他轮次或未来的调用配对。
@@ -812,10 +984,11 @@ fn shorten_tool_name(name: &str) -> String {
     let hash_suffix = &hash_hex[..8];
     // 54 prefix + 1 underscore + 8 hash = 63
     let prefix_max = TOOL_NAME_MAX_LEN - 1 - 8;
-    let prefix = match name.char_indices().nth(prefix_max) {
-        Some((idx, _)) => &name[..idx],
-        None => name,
-    };
+    let mut prefix_end = name.len().min(prefix_max);
+    while !name.is_char_boundary(prefix_end) {
+        prefix_end -= 1;
+    }
+    let prefix = &name[..prefix_end];
     format!("{}_{}", prefix, hash_suffix)
 }
 
@@ -838,8 +1011,10 @@ fn convert_tools(
         return Vec::new();
     };
 
+    let mut names = std::collections::HashSet::new();
     tools
         .iter()
+        .filter(|tool| names.insert(tool.name.to_lowercase()))
         .map(|t| {
             let mut description = t.description.clone();
 
@@ -1893,6 +2068,444 @@ mod tests {
                 .count(),
             4
         );
+    }
+
+    fn tool_validation_request(messages: serde_json::Value) -> MessagesRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "claude-opus-5-5", "max_tokens": 1024, "messages": messages
+        }))
+        .unwrap()
+    }
+
+    fn assert_wire_tool_pairs(state: &ConversationState) {
+        let mut seen = std::collections::HashSet::new();
+        let mut pending = std::collections::HashSet::new();
+        for message in &state.history {
+            match message {
+                Message::Assistant(message) => {
+                    assert!(pending.is_empty());
+                    for call in message
+                        .assistant_response_message
+                        .tool_uses
+                        .iter()
+                        .flatten()
+                    {
+                        assert!(seen.insert(call.tool_use_id.clone()));
+                        pending.insert(call.tool_use_id.clone());
+                    }
+                }
+                Message::User(message) => {
+                    for result in &message
+                        .user_input_message
+                        .user_input_message_context
+                        .tool_results
+                    {
+                        assert!(pending.remove(&result.tool_use_id));
+                    }
+                    assert!(pending.is_empty());
+                }
+            }
+        }
+        for result in &state
+            .current_message
+            .user_input_message
+            .user_input_message_context
+            .tool_results
+        {
+            assert!(pending.remove(&result.tool_use_id));
+        }
+        assert!(pending.is_empty());
+        assert!(!seen.is_empty());
+    }
+
+    #[test]
+    fn missing_and_null_input_preserve_empty_object_compatibility() {
+        for call in [
+            serde_json::json!({"type":"tool_use", "id":"a", "name":"read"}),
+            serde_json::json!({"type":"tool_use", "id":"a", "name":"read", "input":null}),
+            serde_json::json!({"type":"tool_use", "id":"a", "name":"read", "input":{}}),
+        ] {
+            let req = tool_validation_request(serde_json::json!([
+                {"role":"assistant", "content":[call]},
+                {"role":"user", "content":[{"type":"tool_result", "tool_use_id":"a", "content":"ok"}]}
+            ]));
+            let state = convert_request(&req).unwrap().conversation_state;
+            let wire = serde_json::to_value(&state).unwrap();
+            assert_eq!(
+                wire["history"][0]["assistantResponseMessage"]["toolUses"][0]["input"],
+                serde_json::json!({})
+            );
+            assert_wire_tool_pairs(&state);
+        }
+    }
+
+    #[test]
+    fn conflicting_calls_in_same_turn_remain_rejected() {
+        for second in [
+            serde_json::json!({"type":"tool_use","id":"a","name":"write","input":{}}),
+            serde_json::json!({"type":"tool_use","id":"a","name":"read","input":{"path":"other"}}),
+        ] {
+            let req = tool_validation_request(serde_json::json!([
+                {"role":"assistant","content":[{"type":"tool_use","id":"a","name":"read","input":{}}]},
+                {"role":"assistant","content":[second]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"ok"}]}
+            ]));
+            assert!(
+                convert_request(&req)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("conflicting tool_use")
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_tool_blocks_fail_locally_with_location() {
+        let valid = serde_json::json!({"type":"tool_use", "id":"a", "name":"read", "input":{}});
+        for (field, value) in [
+            ("id", serde_json::json!("")),
+            ("id", serde_json::json!(123)),
+            ("name", serde_json::json!("  ")),
+            ("input", serde_json::json!("{}")),
+            ("input", serde_json::json!([])),
+            ("input", serde_json::json!(false)),
+        ] {
+            let mut block = valid.clone();
+            block[field] = value;
+            let req = tool_validation_request(serde_json::json!([
+                {"role":"assistant", "content":[block]}, {"role":"user", "content":"continue"}
+            ]));
+            let error = convert_request(&req).unwrap_err().to_string();
+            assert!(error.contains("messages[0].content[0]"), "{error}");
+        }
+        for (role, block) in [
+            ("user", valid),
+            (
+                "assistant",
+                serde_json::json!({"type":"tool_result", "tool_use_id":"a"}),
+            ),
+            (
+                "user",
+                serde_json::json!({"type":"tool_result", "tool_use_id":""}),
+            ),
+        ] {
+            let req = tool_validation_request(serde_json::json!([
+                {"role":role,"content":[block]}, {"role":"user","content":"continue"}
+            ]));
+            assert!(matches!(
+                convert_request(&req),
+                Err(ConversionError::InvalidToolFormat(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn duplicate_tool_use_ids_are_normalized_within_and_across_turns() {
+        let call = serde_json::json!({"type":"tool_use", "id":"a", "name":"read", "input":{}});
+        let result = serde_json::json!({"type":"tool_result", "tool_use_id":"a", "content":"ok"});
+        for messages in [
+            serde_json::json!([
+                {"role":"assistant", "content":[call, call]},
+                {"role":"user", "content":[result]}
+            ]),
+            serde_json::json!([
+                {"role":"assistant", "content":[call]},
+                {"role":"assistant", "content":[call]},
+                {"role":"user", "content":[result]}
+            ]),
+            serde_json::json!([
+                {"role":"assistant", "content":[call]},
+                {"role":"user", "content":[result]},
+                {"role":"assistant", "content":[call]},
+                {"role":"user", "content":[result]}
+            ]),
+        ] {
+            let state = convert_request(&tool_validation_request(messages))
+                .unwrap()
+                .conversation_state;
+            assert_wire_tool_pairs(&state);
+        }
+    }
+
+    #[test]
+    fn history_placeholder_names_are_unique_ignoring_case() {
+        let req = tool_validation_request(serde_json::json!([
+            {"role":"assistant", "content":[
+                {"type":"tool_use", "id":"a", "name":"Read", "input":{}},
+                {"type":"tool_use", "id":"b", "name":"read", "input":{}}
+            ]},
+            {"role":"user", "content":[
+                {"type":"tool_result", "tool_use_id":"a", "content":"one"},
+                {"type":"tool_result", "tool_use_id":"b", "content":"two"}
+            ]}
+        ]));
+        let state = convert_request(&req).unwrap().conversation_state;
+        let wire = serde_json::to_value(state).unwrap();
+        let context = &wire["currentMessage"]["userInputMessage"]["userInputMessageContext"];
+        assert_eq!(context["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(context["toolResults"].as_array().unwrap().len(), 2);
+        let calls = wire["history"][0]["assistantResponseMessage"]["toolUses"]
+            .as_array()
+            .unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["toolUseId"], "a");
+        assert!(calls.iter().all(|call| call["input"].is_object()));
+    }
+
+    #[test]
+    fn explicit_tool_definitions_reject_empty_and_conflicting_names() {
+        for names in [vec![""], vec!["Read", "read"]] {
+            let mut req =
+                tool_validation_request(serde_json::json!([{"role":"user","content":"hi"}]));
+            req.tools = Some(
+                names
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, name)| {
+                        serde_json::from_value(serde_json::json!({
+                            "name":name, "description":format!("read {index}"), "input_schema":{"type":"object"}
+                        }))
+                        .unwrap()
+                    })
+                    .collect(),
+            );
+            assert!(matches!(
+                convert_request(&req),
+                Err(ConversionError::InvalidToolFormat(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn identical_tool_definitions_are_deduplicated() {
+        let mut req = tool_validation_request(serde_json::json!([{"role":"user","content":"hi"}]));
+        req.tools = Some(
+            ["Read", "read"]
+                .into_iter()
+                .map(|name| {
+                    serde_json::from_value(serde_json::json!({
+                        "name":name,"description":"read","input_schema":{"type":"object"}
+                    }))
+                    .unwrap()
+                })
+                .collect(),
+        );
+        let state = convert_request(&req).unwrap().conversation_state;
+        assert_eq!(
+            state
+                .current_message
+                .user_input_message
+                .user_input_message_context
+                .tools
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn reused_ids_keep_each_turns_arguments_and_results() {
+        for first_result in [true, false] {
+            let mut messages = Vec::new();
+            for index in 0..3 {
+                messages.push(serde_json::json!({"role":"assistant","content":[
+                    {"type":"tool_use","id":"a","name":"read","input":{"index":index}}
+                ]}));
+                messages.push(if index == 0 && !first_result {
+                    serde_json::json!({"role":"user","content":"skip"})
+                } else {
+                    serde_json::json!({"role":"user","content":[
+                        {"type":"tool_result","tool_use_id":"a","content":format!("result {index}")}
+                    ]})
+                });
+            }
+            let req = tool_validation_request(serde_json::json!(messages));
+            let state = convert_request(&req).unwrap().conversation_state;
+            assert_wire_tool_pairs(&state);
+            let retry = convert_request(&req).unwrap().conversation_state;
+            assert_eq!(
+                serde_json::to_value(&state.history).unwrap(),
+                serde_json::to_value(&retry.history).unwrap()
+            );
+            let wire = serde_json::to_value(&state).unwrap();
+            for index in 0..3 {
+                let call = &wire["history"][index * 2]["assistantResponseMessage"]["toolUses"][0];
+                if index == 0 && !first_result {
+                    assert!(call.is_null());
+                    continue;
+                }
+                assert_eq!(call["input"]["index"], index);
+                let result = if index == 2 {
+                    &wire["currentMessage"]["userInputMessage"]["userInputMessageContext"]["toolResults"]
+                        [0]
+                } else {
+                    &wire["history"][index * 2 + 1]["userInputMessage"]["userInputMessageContext"]["toolResults"]
+                        [0]
+                };
+                assert_eq!(call["toolUseId"], result["toolUseId"]);
+                assert_eq!(result["content"][0]["text"], format!("result {index}"));
+            }
+            assert_eq!(
+                req.messages[4].content[0]["id"], "a",
+                "client request must not be mutated"
+            );
+        }
+    }
+
+    #[test]
+    fn remapped_ids_avoid_client_calls_and_orphan_results() {
+        let call = serde_json::json!({"type":"tool_use","id":"a","name":"read","input":{}});
+        let result = serde_json::json!({"type":"tool_result","tool_use_id":"a","content":"ok"});
+        let messages = serde_json::json!([
+            {"role":"assistant","content":[call]}, {"role":"user","content":[result]},
+            {"role":"assistant","content":[call]}, {"role":"user","content":[result]}
+        ]);
+        let baseline = convert_request(&tool_validation_request(messages.clone()))
+            .unwrap()
+            .conversation_state;
+        let wire = serde_json::to_value(baseline).unwrap();
+        let candidate = wire["history"][2]["assistantResponseMessage"]["toolUses"][0]["toolUseId"]
+            .as_str()
+            .unwrap();
+        for reserve_as_call in [false, true] {
+            let mut messages = messages.clone();
+            if reserve_as_call {
+                messages.as_array_mut().unwrap().extend([
+                    serde_json::json!({"role":"assistant","content":[{"type":"tool_use","id":candidate,"name":"read","input":{"path":"later"}}]}),
+                    serde_json::json!({"role":"user","content":[{"type":"tool_result","tool_use_id":candidate,"content":"later result"}]}),
+                ]);
+            } else {
+                messages[3]["content"].as_array_mut().unwrap().push(serde_json::json!(
+                    {"type":"tool_result","tool_use_id":candidate,"content":"orphan must not match generated ID"}
+                ));
+            }
+            let state = convert_request(&tool_validation_request(messages))
+                .unwrap()
+                .conversation_state;
+            assert_wire_tool_pairs(&state);
+            let wire = serde_json::to_value(state).unwrap();
+            assert_ne!(
+                wire["history"][2]["assistantResponseMessage"]["toolUses"][0]["toolUseId"],
+                candidate
+            );
+            let current = &wire["currentMessage"]["userInputMessage"]["userInputMessageContext"]["toolResults"];
+            assert_eq!(current.as_array().unwrap().len(), 1);
+            assert_eq!(
+                current[0]["content"][0]["text"],
+                if reserve_as_call {
+                    "later result"
+                } else {
+                    "ok"
+                }
+            );
+            if reserve_as_call {
+                assert_eq!(current[0]["toolUseId"], candidate);
+            }
+        }
+    }
+
+    #[test]
+    fn remapping_does_not_leak_past_a_result_turn() {
+        let req = tool_validation_request(serde_json::json!([
+            {"role":"assistant","content":[{"type":"tool_use","id":"a","name":"read","input":{}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"first"}]},
+            {"role":"assistant","content":[{"type":"tool_use","id":"a","name":"read","input":{}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"second"}]},
+            {"role":"assistant","content":"finished"},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"stale"}]},
+            {"role":"assistant","content":[{"type":"tool_use","id":"a","name":"read","input":{}}]},
+            {"role":"user","content":"skip this call"},
+            {"role":"assistant","content":"continue"},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"too late"}]}
+        ]));
+        let state = convert_request(&req).unwrap().conversation_state;
+        assert_wire_tool_pairs(&state);
+        let wire = serde_json::to_value(state).unwrap();
+        assert!(
+            wire["history"][5]["userInputMessage"]["userInputMessageContext"]["toolResults"]
+                .is_null()
+        );
+        assert!(wire["history"][6]["assistantResponseMessage"]["toolUses"].is_null());
+        assert_eq!(
+            wire["history"][7]["userInputMessage"]["content"],
+            "skip this call"
+        );
+        assert!(
+            wire["currentMessage"]["userInputMessage"]["userInputMessageContext"]["toolResults"]
+                .is_null()
+        );
+    }
+
+    #[test]
+    fn split_results_preserve_text_images_reasoning_and_error_status() {
+        let mut messages = Vec::new();
+        // Each user turn is split across messages; the second turn also reuses IDs.
+        for turn in 0..2 {
+            messages.extend([
+                serde_json::json!({"role":"assistant","content":[
+                    {"type":"text","text":"calling"},
+                    {"type":"thinking","thinking":"reason","signature":"sig"},
+                    {"type":"tool_use","id":"a","name":"read","input":{"turn":turn}},
+                    {"type":"tool_use","id":"b","name":"read","input":{"turn":turn}}
+                ]}),
+                serde_json::json!({"role":"user","content":[
+                    {"type":"text","text":"first text"},
+                    {"type":"tool_result","tool_use_id":"b","is_error":true,"content":"failed"}
+                ]}),
+                serde_json::json!({"role":"user","content":[
+                    {"type":"text","text":"second text"},
+                    {"type":"tool_result","tool_use_id":"a","content":[
+                        {"type":"text","text":"image result"},
+                        {"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}
+                    ]}
+                ]}),
+            ]);
+        }
+        let req = tool_validation_request(serde_json::json!(messages));
+        let state = convert_request(&req).unwrap().conversation_state;
+        assert_wire_tool_pairs(&state);
+        let wire = serde_json::to_value(state).unwrap();
+        for (index, user) in [&wire["history"][1], &wire["currentMessage"]]
+            .iter()
+            .enumerate()
+        {
+            let assistant = &wire["history"][index * 2]["assistantResponseMessage"];
+            assert_eq!(assistant["content"], "calling");
+            assert_eq!(
+                assistant["reasoningContent"]["reasoningText"]["signature"],
+                "sig"
+            );
+            let user = &user["userInputMessage"];
+            assert_eq!(user["content"], "first text\nsecond text");
+            assert_eq!(user["images"][0]["source"]["bytes"], "aGVsbG8=");
+            let results = user["userInputMessageContext"]["toolResults"]
+                .as_array()
+                .unwrap();
+            assert_eq!(results.len(), 2);
+            assert_eq!(results[0]["status"], "error");
+            assert_eq!(results[0]["content"][0]["text"], "failed");
+            assert_eq!(
+                results[0]["toolUseId"],
+                assistant["toolUses"][1]["toolUseId"]
+            );
+            assert_eq!(
+                results[1]["toolUseId"],
+                assistant["toolUses"][0]["toolUseId"]
+            );
+            assert_eq!(results[1]["content"][0]["text"], "image result");
+            if index == 0 {
+                assert_eq!(assistant["toolUses"][0]["toolUseId"], "a");
+                assert_eq!(assistant["toolUses"][1]["toolUseId"], "b");
+            }
+        }
+    }
+
+    #[test]
+    fn shortened_unicode_tool_names_respect_byte_limit() {
+        let original = "工具".repeat(40);
+        let mut names = HashMap::new();
+        let short = map_tool_name(&original, &mut names);
+        assert!(short.len() <= TOOL_NAME_MAX_LEN);
+        assert_eq!(names.get(&short), Some(&original));
     }
 
     #[test]

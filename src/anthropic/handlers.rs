@@ -907,6 +907,7 @@ pub(super) async fn post_messages_inner(
                 ConversionError::EmptyMessages => {
                     ("invalid_request_error", "消息列表为空".to_string())
                 }
+                ConversionError::InvalidToolFormat(_) => ("invalid_request_error", e.to_string()),
             };
             tracing::warn!("请求转换失败: {}", e);
             return (
@@ -1494,6 +1495,7 @@ pub(super) async fn post_messages_cc_inner(
                 ConversionError::EmptyMessages => {
                     ("invalid_request_error", "消息列表为空".to_string())
                 }
+                ConversionError::InvalidToolFormat(_) => ("invalid_request_error", e.to_string()),
             };
             tracing::warn!("请求转换失败: {}", e);
             return (
