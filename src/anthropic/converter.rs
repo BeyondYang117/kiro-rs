@@ -428,16 +428,29 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
     // 4. 确定触发类型
     let chat_trigger_type = determine_chat_trigger_type(req);
 
-    // 5. 处理最后一条消息作为 current_message（经过 prefill 预处理，末尾必为 user）
-    let last_message = messages.last().unwrap();
-    let (text_content, images, tool_results) = process_message_content(&last_message.content)?;
+    // 5. 将末尾连续的 user 合并为当前轮次，避免拆开同一批工具结果。
+    let current_start = messages
+        .iter()
+        .rposition(|message| message.role != "user")
+        .map_or(0, |index| index + 1);
+    let current_messages: Vec<_> = messages[current_start..].iter().collect();
+    let merged_current = merge_user_messages(&current_messages, &model_id)?.user_input_message;
+    let text_content = merged_current.content;
+    let images = merged_current.images;
+    let tool_results = merged_current.user_input_message_context.tool_results;
 
     // 6. 转换工具定义（超长名称自动缩短并记录映射）
     let mut tool_name_map = HashMap::new();
     let mut tools = convert_tools(&req.tools, &mut tool_name_map);
 
     // 7. 构建历史消息（需要先构建，以便收集历史中使用的工具）
-    let mut history = build_history(req, messages, &model_id, &mut tool_name_map)?;
+    let mut history = build_history(
+        req,
+        &messages[..=current_start],
+        &model_id,
+        &mut tool_name_map,
+    )?;
+    sanitize_history_tool_results(&mut history);
 
     // 8. 验证并过滤 tool_use/tool_result 配对
     // 移除孤立的 tool_result（没有对应的 tool_use）
@@ -624,6 +637,38 @@ fn extract_tool_result_content(content: &Option<serde_json::Value>) -> (String, 
     (text, images)
 }
 
+/// 历史结果只能消费紧邻的 assistant 调用一次，不能与其他轮次或未来的调用配对。
+fn sanitize_history_tool_results(history: &mut [Message]) {
+    let mut pending = std::collections::HashSet::new();
+    for message in history {
+        match message {
+            Message::Assistant(message) => {
+                pending.clear();
+                if let Some(uses) = &message.assistant_response_message.tool_uses {
+                    pending.extend(uses.iter().map(|call| call.tool_use_id.clone()));
+                }
+            }
+            Message::User(message) => {
+                message
+                    .user_input_message
+                    .user_input_message_context
+                    .tool_results
+                    .retain(|result| {
+                        let valid = pending.remove(&result.tool_use_id);
+                        if !valid {
+                            tracing::warn!(
+                                tool_use_id = %result.tool_use_id,
+                                "跳过历史中孤立、重复或跨轮次的 tool_result"
+                            );
+                        }
+                        valid
+                    });
+                pending.clear();
+            }
+        }
+    }
+}
+
 /// 验证并过滤 tool_use/tool_result 配对
 ///
 /// 收集所有 tool_use_id，验证 tool_result 是否匹配
@@ -676,16 +721,28 @@ fn validate_tool_pairing(
 
     // 4. 过滤并验证当前消息的 tool_results
     let mut filtered_results = Vec::new();
+    let current_tool_use_ids: HashSet<&str> = match history.last() {
+        Some(Message::Assistant(message)) => message
+            .assistant_response_message
+            .tool_uses
+            .iter()
+            .flatten()
+            .map(|call| call.tool_use_id.as_str())
+            .collect(),
+        _ => HashSet::new(),
+    };
 
     for result in tool_results {
-        if unpaired_tool_use_ids.contains(&result.tool_use_id) {
+        if unpaired_tool_use_ids.contains(&result.tool_use_id)
+            && current_tool_use_ids.contains(result.tool_use_id.as_str())
+        {
             // 配对成功
             filtered_results.push(result.clone());
             unpaired_tool_use_ids.remove(&result.tool_use_id);
         } else if all_tool_use_ids.contains(&result.tool_use_id) {
             // tool_use 存在但已经在历史中配对过了，这是重复的 tool_result
             tracing::warn!(
-                "跳过重复的 tool_result：该 tool_use 已在历史中配对，tool_use_id={}",
+                "跳过重复或跨轮次的 tool_result，tool_use_id={}",
                 result.tool_use_id
             );
         } else {
@@ -1836,6 +1893,95 @@ mod tests {
                 .count(),
             4
         );
+    }
+
+    #[test]
+    fn test_convert_request_filters_invalid_history_results() {
+        let req: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model": "claude-sonnet-4-5-20250929", "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "future", "content": "too early"}]},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "future", "name": "read", "input": {}}]},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "keep this text"},
+                    {"type": "tool_result", "tool_use_id": "future", "content": "valid"},
+                    {"type": "tool_result", "tool_use_id": "future", "content": "duplicate"},
+                    {"type": "tool_result", "tool_use_id": "missing", "content": "orphan"}
+                ]},
+                {"role": "assistant", "content": "done"},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "future", "content": "late duplicate"}]}
+            ]
+        })).unwrap();
+        let state = convert_request(&req).unwrap().conversation_state;
+        let results: Vec<_> = state
+            .history
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(message) => Some(
+                    &message
+                        .user_input_message
+                        .user_input_message_context
+                        .tool_results,
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tool_use_id, "future");
+        assert!(
+            state
+                .current_message
+                .user_input_message
+                .user_input_message_context
+                .tool_results
+                .is_empty()
+        );
+        assert!(state.history.iter().any(|message| matches!(message, Message::User(message) if message.user_input_message.content == "keep this text")));
+    }
+
+    #[test]
+    fn test_convert_request_merges_split_tool_results() {
+        let req: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model": "claude-sonnet-4-5-20250929", "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "read both"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "a", "name": "read", "input": {}},
+                    {"type": "tool_use", "id": "b", "name": "read", "input": {}}
+                ]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "a", "content": "first"}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "b", "content": "second"}]}
+            ]
+        })).unwrap();
+        let state = convert_request(&req).unwrap().conversation_state;
+        let results = &state
+            .current_message
+            .user_input_message
+            .user_input_message_context
+            .tool_results;
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].tool_use_id, "a");
+        assert_eq!(results[1].tool_use_id, "b");
+        assert!(
+            matches!(state.history.last(), Some(Message::Assistant(message)) if message.assistant_response_message.tool_uses.as_ref().unwrap().len() == 2)
+        );
+    }
+
+    #[test]
+    fn test_validate_tool_pairing_rejects_cross_turn_result() {
+        let history = vec![
+            Message::Assistant(HistoryAssistantMessage {
+                assistant_response_message: AssistantMessage::new("read")
+                    .with_tool_uses(vec![ToolUseEntry::new("old", "read")]),
+            }),
+            Message::User(HistoryUserMessage::new("skip", "claude-sonnet-4.5")),
+            Message::Assistant(HistoryAssistantMessage::new("done")),
+        ];
+        let (results, orphaned) =
+            validate_tool_pairing(&history, &[ToolResult::success("old", "late")]);
+        assert!(results.is_empty());
+        assert!(orphaned.contains("old"));
     }
 
     #[test]
