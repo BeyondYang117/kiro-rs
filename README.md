@@ -193,7 +193,7 @@ docker login -u abu116
 ./docker-push.sh 2026.10.1 latest
 ```
 
-需要启动 Docker 并安装 Buildx（Docker Desktop 已包含）。脚本会自动创建并复用 `kiro-rs-multiarch` builder，也可通过 `BUILDER_NAME` 指定已配置的多架构 builder。Docker Desktop 默认支持跨架构模拟；Linux 主机若尚未配置 QEMU/binfmt，可先执行 `docker run --privileged --rm tonistiigi/binfmt --install amd64,arm64`。跨架构模拟编译 Rust 可能耗时较长。
+需要启动 Docker 并安装 Buildx（Docker Desktop 已包含）。脚本会自动创建并复用 `kiro-rs-multiarch` builder，也可通过 `BUILDER_NAME` 指定已配置的多架构 builder。前端静态资源使用构建节点的原生架构构建，并由两个目标镜像共用，避免 esbuild 在 QEMU 跨架构模拟下崩溃。Docker Desktop 默认支持跨架构模拟；Linux 主机若尚未配置 QEMU/binfmt，可先执行 `docker run --privileged --rm tonistiigi/binfmt --install amd64,arm64`。跨架构模拟编译 Rust 可能耗时较长。
 
 ## 配置详解
 
