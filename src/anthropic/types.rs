@@ -131,7 +131,7 @@ pub struct MessagesRequest {
     pub system: Option<Vec<SystemMessage>>,
     pub tools: Option<Vec<Tool>>,
     pub tool_choice: Option<serde_json::Value>,
-    /// Preserve unknown fields for forward compatibility; reject known unsupported controls.
+    /// Preserve unknown fields for forward compatibility; normalize or reject known controls.
     #[serde(flatten)]
     pub extra_controls: std::collections::HashMap<String, serde_json::Value>,
     pub thinking: Option<Thinking>,

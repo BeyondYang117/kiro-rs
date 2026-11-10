@@ -581,10 +581,14 @@ fn validate_and_normalize_request(payload: &mut MessagesRequest) -> Result<(), S
     for name in ["temperature", "top_p", "top_k"] {
         if payload
             .extra_controls
-            .get(name)
+            .remove(name)
             .is_some_and(|v| !v.is_null())
         {
-            return Err(format!("{name} is not supported by this Kiro proxy"));
+            tracing::warn!(
+                stage = "request_normalization",
+                parameter = name,
+                "Unsupported sampling parameter ignored; using Kiro's default sampling behavior. Remove this parameter to suppress the warning."
+            );
         }
     }
     match payload.extra_controls.get("stop_sequences") {
@@ -1720,6 +1724,7 @@ pub(super) async fn count_tokens_route(
 #[cfg(test)]
 mod model_capability_tests {
     use super::model_capabilities;
+    use serde_json::json;
 
     #[test]
     fn gpt_and_kimi_controls_are_validated_before_dispatch() {
@@ -1898,6 +1903,40 @@ mod model_capability_tests {
         super::apply_thinking_defaults(&mut payload);
         assert!(payload.thinking.is_none());
         assert!(payload.output_config.is_none());
+    }
+
+    #[test]
+    fn sampling_controls_are_ignored_without_changing_other_controls() {
+        for name in ["temperature", "top_p", "top_k"] {
+            for value in [
+                serde_json::Value::Null,
+                json!(0),
+                json!(1),
+                json!(0.7),
+                json!(-1),
+                json!("future-value"),
+                json!({"unknown":true}),
+                json!([]),
+            ] {
+                let mut request = json!({"model":"claude-opus-4-5-20251101", "max_tokens":4096,
+                    "messages":[{"role":"user", "content":"hi"}],
+                    "thinking":{"type":"enabled", "budget_tokens":2048},
+                    "output_config":{"effort":"high"}, "future_control":true});
+                request[name] = value;
+                let mut payload: super::MessagesRequest = serde_json::from_value(request).unwrap();
+                // Outer and inner handlers both normalize the same request.
+                for _ in 0..2 {
+                    super::validate_and_normalize_request(&mut payload).unwrap();
+                    assert!(!payload.extra_controls.contains_key(name));
+                    assert_eq!(payload.extra_controls["future_control"], true);
+                    assert_eq!(payload.max_tokens, 4096);
+                    let thinking = payload.thinking.as_ref().unwrap();
+                    assert_eq!(thinking.thinking_type, "enabled");
+                    assert_eq!(thinking.budget_tokens, 2048);
+                    assert_eq!(payload.output_config.as_ref().unwrap().effort, "high");
+                }
+            }
+        }
     }
 
     #[test]

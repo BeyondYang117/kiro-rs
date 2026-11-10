@@ -583,6 +583,8 @@ claude --model claude-haiku-5-5 --effort high
 
 Claude 默认旧协议模式的 `max_tokens` 仅用于本地响应/压缩处理；启用 `nativeThinking` 后会映射到 `additionalModelRequestFields.max_tokens`，新鲜账号 schema 明确不支持时省略。GPT / Kimi 的实测规则见下文。Kiro 文档所列 Claude 模型通常要求最小 1024；Sonnet 5.5、Sonnet 4.6、Opus 4.6 / 4.7 的上限为 64000，Opus 4.8 / 5 的上限为 128000。达到上游长度限制时会返回 `max_tokens` stop reason。模型列表与模型详情的输出上限共用本地默认表；账号目录可能报告不同值。`tool_choice`、temperature、top_p、stop_sequences 和 JSON schema 输出也尚未映射到已确认的 Kiro 原生字段。
 
+`temperature`、`top_p`、`top_k` 会被忽略，使用 Kiro 默认采样行为；非 `null` 值会在调用日志中记录 WARN（仅记录参数名，不记录参数值），不再因此拒绝请求。省略或 `null` 不产生警告。此规则同时适用于 `/v1/messages` 和 `/cc/v1/messages` 的流式、非流式及压缩请求。
+
 `stop_sequences` 可省略、设为 `null` 或空数组 `[]`，均表示不设置自定义停止序列；非空数组仍返回 `400 invalid_request_error`，需要客户端移除此参数。此规则同时适用于 `/v1/messages` 和 `/cc/v1/messages` 的流式及非流式请求。
 
 原生 Claude 请求示例：

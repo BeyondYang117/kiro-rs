@@ -1155,6 +1155,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sampling_controls_are_ignored_and_logged_once_across_message_routes() {
+        for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+            for streaming in [false, true] {
+                for compact in [false, true] {
+                    for controls in [
+                        json!({}),
+                        json!({"temperature":null,"top_p":null,"top_k":null}),
+                        json!({"temperature":0,"top_p":0.9,"top_k":"private-value-sentinel"}),
+                    ] {
+                        let mut upstream = mock(frame(
+                            "assistantResponseEvent",
+                            json!({"content":"<summary>answer</summary>"}),
+                        ))
+                        .await;
+                        let provider = std::sync::Arc::into_inner(
+                            upstream.state.kiro_provider.take().unwrap(),
+                        )
+                        .unwrap();
+                        let app = crate::anthropic::create_router_with_provider(
+                            ["test"],
+                            Some(provider),
+                            true,
+                            buffered,
+                            false,
+                        );
+                        let path = if cc {
+                            "/cc/v1/messages"
+                        } else {
+                            "/v1/messages"
+                        };
+                        let mut payload = json!({"model":"claude-opus-4-5-20251101", "max_tokens":4096,
+                            "stream":streaming, "messages":[{"role":"user", "content":"private-prompt-sentinel"}]});
+                        payload
+                            .as_object_mut()
+                            .unwrap()
+                            .extend(controls.as_object().unwrap().clone());
+                        if compact {
+                            payload["compaction"] = json!({"type":"summarize"});
+                        }
+                        let req = axum::http::Request::builder()
+                            .method("POST")
+                            .uri(path)
+                            .header("x-api-key", "test")
+                            .header("content-type", "application/json")
+                            .body(Body::from(payload.to_string()))
+                            .unwrap();
+                        let record = crate::request_log::tests::capture_request(app, req).await;
+                        assert_eq!(record["status"], "success", "{record}");
+                        assert_eq!(record["httpStatus"], 200);
+                        assert_eq!(record["attempts"], 1);
+                        assert!(record["error"].is_null());
+                        let warnings: Vec<_> = record["diagnostics"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter(|d| {
+                                d["message"]
+                                    .as_str()
+                                    .unwrap()
+                                    .contains("Unsupported sampling parameter ignored")
+                            })
+                            .collect();
+                        let expected = usize::from(!controls["temperature"].is_null());
+                        assert_eq!(warnings.len(), 3 * expected, "{record}");
+                        for name in ["temperature", "top_p", "top_k"] {
+                            assert_eq!(
+                                warnings
+                                    .iter()
+                                    .filter(|d| {
+                                        d["message"]
+                                            .as_str()
+                                            .unwrap()
+                                            .contains(&format!("parameter=\"{name}\""))
+                                    })
+                                    .count(),
+                                expected,
+                                "{record}"
+                            );
+                        }
+                        for warning in warnings {
+                            assert_eq!(warning["level"], "WARN");
+                            let message = warning["message"].as_str().unwrap();
+                            assert!(message.contains("request_normalization"));
+                            assert!(!message.contains("private-value-sentinel"));
+                            assert!(!message.contains("private-prompt-sentinel"));
+                        }
+                        let requests = upstream.requests.lock().unwrap();
+                        assert_eq!(requests.len(), 1);
+                        let wire = requests[0].to_string();
+                        for name in ["temperature", "top_p", "top_k"] {
+                            assert!(!wire.contains(&format!("\"{name}\"")), "{wire}");
+                        }
+                        assert!(!wire.contains("private-value-sentinel"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn thinking_display_fallback_is_logged_across_message_routes_and_response_modes() {
         for (cc, buffered) in [(false, false), (true, false), (true, true)] {
             for streaming in [false, true] {
