@@ -1190,9 +1190,7 @@ fn convert_assistant_message(
     msg: &super::types::Message,
     tool_name_map: &mut HashMap<String, String>,
 ) -> Result<HistoryAssistantMessage, ConversionError> {
-    let mut thinking_content = String::new();
-    let mut thinking_signature = None;
-    let mut redacted_thinking = None;
+    let mut reasoning_content = None;
     let mut text_content = String::new();
     let mut tool_uses = Vec::new();
 
@@ -1205,13 +1203,25 @@ fn convert_assistant_message(
                 if let Ok(block) = serde_json::from_value::<ContentBlock>(item.clone()) {
                     match block.block_type.as_str() {
                         "thinking" => {
-                            if let Some(thinking) = block.thinking {
-                                thinking_content.push_str(&thinking);
+                            let text = block.thinking.unwrap_or_default();
+                            if !text.is_empty() || block.signature.is_some() {
+                                // Kiro can carry one reasoning block. Keep its
+                                // text and signature together, as when merging
+                                // consecutive assistant messages below.
+                                let mut reasoning_text = serde_json::json!({"text": text});
+                                if let Some(signature) = block.signature {
+                                    reasoning_text["signature"] = signature.into();
+                                }
+                                reasoning_content = Some(serde_json::json!({
+                                    "reasoningText": reasoning_text
+                                }));
                             }
-                            thinking_signature = block.signature;
                         }
                         "redacted_thinking" => {
-                            redacted_thinking = block.data;
+                            if let Some(data) = block.data {
+                                reasoning_content =
+                                    Some(serde_json::json!({"redactedContent": data}));
+                            }
                         }
                         "text" => {
                             if let Some(text) = block.text {
@@ -1242,12 +1252,7 @@ fn convert_assistant_message(
     };
 
     let mut assistant = AssistantMessage::new(final_content);
-    if !thinking_content.is_empty() || thinking_signature.is_some() {
-        assistant = assistant.with_reasoning(thinking_content, thinking_signature);
-    }
-    if let Some(redacted) = redacted_thinking {
-        assistant.reasoning_content = Some(serde_json::json!({"redactedContent": redacted}));
-    }
+    assistant.reasoning_content = reasoning_content;
     if !tool_uses.is_empty() {
         assistant = assistant.with_tool_uses(tool_uses);
     }
@@ -2496,6 +2501,154 @@ mod tests {
                 assert_eq!(assistant["toolUses"][0]["toolUseId"], "a");
                 assert_eq!(assistant["toolUses"][1]["toolUseId"], "b");
             }
+        }
+    }
+
+    #[test]
+    fn assistant_reasoning_keeps_one_complete_block_with_its_own_signature() {
+        let first = serde_json::json!({"type":"thinking","thinking":"first thought","signature":"first-signature"});
+        let second = serde_json::json!({"type":"thinking","thinking":"second thought","signature":"second-signature"});
+        let redacted = serde_json::json!({"type":"redacted_thinking","data":"encrypted-thought"});
+        for (blocks, expected) in [
+            (
+                vec![first.clone(), second.clone()],
+                serde_json::json!({"reasoningText":{"text":"second thought","signature":"second-signature"}}),
+            ),
+            (
+                vec![first.clone(), redacted.clone()],
+                serde_json::json!({"redactedContent":"encrypted-thought"}),
+            ),
+            (
+                vec![redacted, second],
+                serde_json::json!({"reasoningText":{"text":"second thought","signature":"second-signature"}}),
+            ),
+        ] {
+            // A Kiro assistant message has one reasoning union. Match the existing
+            // merged-assistant policy: retain the last complete block, never join
+            // text authenticated by different signatures or combine union arms.
+            let req = tool_validation_request(serde_json::json!([
+                {"role":"user","content":"Inspect src/main.rs"},
+                {"role":"assistant","content":blocks},
+                {"role":"user","content":"Continue"}
+            ]));
+            let wire =
+                serde_json::to_value(convert_request(&req).unwrap().conversation_state).unwrap();
+            assert_eq!(
+                wire["history"][1]["assistantResponseMessage"]["reasoningContent"],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn programming_history_reaches_cli_without_duplicate_or_foreign_content() {
+        use crate::kiro::endpoint::{CliEndpoint, KiroEndpoint, RequestContext};
+        use crate::kiro::model::credentials::KiroCredentials;
+        use crate::kiro::model::requests::kiro::KiroRequest;
+        use crate::model::config::Config;
+
+        let session = "a0662283-7fd3-4399-a7eb-52b9a717ae88";
+        let code = "fn main() { println!(\"hello\\nworld\"); }\n// 中文 <tag> & ${value}";
+        let req: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"claude-haiku-5-5", "max_tokens":4096,
+            "metadata":{"user_id":format!("user_test_session_{session}")},
+            "system":"You are a Rust programming assistant.",
+            "tools":[{"name":"read_file","description":"Read a UTF-8 source file.",
+                "input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}],
+            "messages":[
+                {"role":"user","content":"Inspect this Rust project."},
+                {"role":"user","content":"Start with src/main.rs."},
+                {"role":"assistant","content":[
+                    {"type":"thinking","thinking":"Inspect the Rust entry point first.","signature":"thought-signature"},
+                    {"type":"text","text":"I will read the entry point."},
+                    {"type":"tool_use","id":"read-1","name":"read_file","input":{"path":"src/main.rs"}}
+                ]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"read-1","content":[{"type":"text","text":code}]}]},
+                {"role":"assistant","content":"The source prints a greeting."},
+                {"role":"user","content":"Change the greeting."},
+                {"role":"user","content":"Preserve the escaping and comments."}
+            ]
+        })).unwrap();
+        // Interleave a separate conversion with the same session metadata. The
+        // converter must use only the messages supplied in the current request.
+        let mut other = tool_validation_request(serde_json::json!([
+            {"role":"user","content":"foreign-conversation-sentinel"}
+        ]));
+        other.metadata = Some(super::super::types::Metadata {
+            user_id: Some(format!("user_test_session_{session}")),
+        });
+        convert_request(&other).unwrap();
+        for native in [false, true] {
+            let credentials = KiroCredentials::default();
+            let mut config = Config::default();
+            config
+                .endpoints
+                .insert("cli".into(), serde_json::json!({"nativeThinking":native}));
+            let ctx = RequestContext {
+                credentials: &credentials,
+                config: &config,
+                token: "test",
+                machine_id: "test",
+            };
+            let request = KiroRequest {
+                conversation_state: convert_request(&req).unwrap().conversation_state,
+                profile_arn: None,
+                additional_model_request_fields: additional_model_request_fields(&req),
+            };
+            let body = CliEndpoint::new()
+                .transform_api_body(&serde_json::to_string(&request).unwrap(), &ctx);
+            let wire: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let state = &wire["conversationState"];
+            assert_eq!(state["conversationId"], session);
+            assert!(state.get("agentContinuationId").is_none());
+            assert!(state.get("agentTaskType").is_none());
+            let history = state["history"].as_array().unwrap();
+            assert_eq!(history.len(), 6);
+            assert!(
+                history[0]["userInputMessage"]["content"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("You are a Rust programming assistant.\n")
+            );
+            assert_eq!(
+                history[2]["userInputMessage"]["content"],
+                "Inspect this Rust project.\nStart with src/main.rs."
+            );
+            let assistant = &history[3]["assistantResponseMessage"];
+            if native {
+                assert_eq!(assistant["content"], "I will read the entry point.");
+                assert_eq!(
+                    assistant["reasoningContent"],
+                    serde_json::json!({
+                        "reasoningText":{"text":"Inspect the Rust entry point first.","signature":"thought-signature"}
+                    })
+                );
+            } else {
+                assert_eq!(
+                    assistant["content"],
+                    "<thinking>Inspect the Rust entry point first.</thinking>\n\nI will read the entry point."
+                );
+                assert!(assistant.get("reasoningContent").is_none());
+            }
+            let call = &history[3]["assistantResponseMessage"]["toolUses"][0];
+            assert_eq!(call["input"], serde_json::json!({"path":"src/main.rs"}));
+            let result =
+                &history[4]["userInputMessage"]["userInputMessageContext"]["toolResults"][0];
+            assert_eq!(result["toolUseId"], call["toolUseId"]);
+            assert_eq!(result["content"][0]["text"], code);
+            assert_eq!(
+                history[5]["assistantResponseMessage"]["content"],
+                "The source prints a greeting."
+            );
+            let current = &state["currentMessage"]["userInputMessage"];
+            assert_eq!(
+                current["content"],
+                "Change the greeting.\nPreserve the escaping and comments."
+            );
+            assert_eq!(current["modelId"], "claude-haiku-5.5");
+            assert_eq!(current["origin"], "KIRO_CLI");
+            assert!(!body.contains("foreign-conversation-sentinel"));
+            assert_eq!(body.matches("Change the greeting.").count(), 1);
         }
     }
 
