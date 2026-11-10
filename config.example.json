@@ -9,6 +9,7 @@
   "defaultEndpoint": "cli",
   "kiroCliVersion": "3.1.0",
   "requestLogRetentionDays": 30,
+  "requestDebugEnabled": false,
   "ccBufferedStream": true,
   "forceStream": false,
   "extractThinking": true,

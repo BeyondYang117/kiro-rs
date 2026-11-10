@@ -1,5 +1,12 @@
 import { api } from './credentials'
 
+export interface DebugJson {
+  originalBytes: number
+  truncated: boolean
+  json: unknown | null
+  omittedReason?: string
+}
+
 export interface UpstreamResponseDiagnostics {
   outcome: string
   contentType: string | null
@@ -27,6 +34,7 @@ export interface UpstreamResponseDiagnostics {
 }
 
 export interface LogRecord {
+  requestDebug?: DebugJson
   id: string
   timestamp: number
   method: string
@@ -63,6 +71,7 @@ export interface LogRecord {
     bodyComplete?: boolean
     kiroCredits?: number | null
     responseDiagnostics?: UpstreamResponseDiagnostics
+    requestDebug?: DebugJson
   }[]
   diagnostics?: { timestamp: number; level: string; target: string; message: string }[]
 }

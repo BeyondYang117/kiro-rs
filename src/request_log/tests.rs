@@ -690,6 +690,7 @@ fn completed_calls_cannot_be_overwritten_by_late_active_snapshots_and_filter_mat
     record.status = "success".into();
     record.credential_id = Some(2);
     record.upstream_attempts = vec![Attempt {
+        request_debug: None,
         timestamp: record.timestamp,
         credential_id: 1,
         endpoint: "ide".into(),
@@ -992,6 +993,203 @@ impl crate::kiro::endpoint::KiroEndpoint for LogTestEndpoint {
         _: &crate::kiro::endpoint::RequestContext<'_>,
     ) -> String {
         body.into()
+    }
+}
+
+/// Uses the real CLI body transformation while sending only to a local mock.
+struct DebugEndpoint(String);
+impl crate::kiro::endpoint::KiroEndpoint for DebugEndpoint {
+    fn name(&self) -> &'static str {
+        "cli"
+    }
+    fn api_url(&self, _: &crate::kiro::endpoint::RequestContext<'_>) -> String {
+        self.0.clone()
+    }
+    fn mcp_url(&self, _: &crate::kiro::endpoint::RequestContext<'_>) -> String {
+        self.0.clone()
+    }
+    fn decorate_api(
+        &self,
+        r: reqwest::RequestBuilder,
+        _: &crate::kiro::endpoint::RequestContext<'_>,
+    ) -> reqwest::RequestBuilder {
+        r
+    }
+    fn decorate_mcp(
+        &self,
+        r: reqwest::RequestBuilder,
+        _: &crate::kiro::endpoint::RequestContext<'_>,
+    ) -> reqwest::RequestBuilder {
+        r
+    }
+    fn transform_api_body(
+        &self,
+        body: &str,
+        ctx: &crate::kiro::endpoint::RequestContext<'_>,
+    ) -> String {
+        crate::kiro::endpoint::CliEndpoint::new().transform_api_body(body, ctx)
+    }
+}
+
+#[tokio::test]
+async fn request_debug_is_opt_in_and_tracks_original_and_final_retry_bodies_on_both_routes() {
+    use crate::kiro::{
+        endpoint::KiroEndpoint, model::credentials::KiroCredentials, provider::KiroProvider,
+        token_manager::MultiTokenManager,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for enabled in [false, true] {
+        for (route, streaming) in [("/v1/messages", false), ("/cc/v1/messages", true)] {
+            let fixture = TestStore::new();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let received = Arc::new(Mutex::new(Vec::<Value>::new()));
+            let captured_calls = calls.clone();
+            let captured_bodies = received.clone();
+            let upstream = Router::new().route("/", post(move |Json(body): Json<Value>| {
+                let calls = captured_calls.clone();
+                let received = captured_bodies.clone();
+                async move {
+                    received.lock().push(body);
+                    if calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                        return (StatusCode::TOO_MANY_REQUESTS, "busy").into_response();
+                    }
+                    // A real HTTP 200 refusal body, including its valid event-stream CRCs.
+                    let payload = json!({"stopReason":"CONTENT_FILTERED", "stopDetails":{"refusal":{"category":"BIO","explanation":"model refused"}}}).to_string();
+                    let mut headers = Vec::new();
+                    for (key, value) in [(":message-type", "event"), (":event-type", "metadataEvent")] {
+                        headers.push(key.len() as u8);
+                        headers.extend_from_slice(key.as_bytes());
+                        headers.push(7);
+                        headers.extend_from_slice(&(value.len() as u16).to_be_bytes());
+                        headers.extend_from_slice(value.as_bytes());
+                    }
+                    use crate::kiro::parser::crc::crc32;
+                    let mut frame = Vec::new();
+                    frame.extend_from_slice(&((16 + headers.len() + payload.len()) as u32).to_be_bytes());
+                    frame.extend_from_slice(&(headers.len() as u32).to_be_bytes());
+                    frame.extend_from_slice(&crc32(&frame).to_be_bytes());
+                    frame.extend(headers);
+                    frame.extend_from_slice(payload.as_bytes());
+                    frame.extend_from_slice(&crc32(&frame).to_be_bytes());
+                    Response::builder().header("content-type", "application/vnd.amazon.eventstream").body(Body::from(frame)).unwrap()
+                }
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server =
+                tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+            let config = serde_json::from_value(json!({
+                "requestDebugEnabled":enabled,"forceStream":true,"adminApiKey":"opaque-admin-secret",
+                "concurrency":{"rateLimitCooldownSeconds":1}
+            })).unwrap();
+            let manager = MultiTokenManager::new(
+                config,
+                vec![KiroCredentials {
+                    id: Some(7),
+                    kiro_api_key: Some("opaque-upstream-secret".into()),
+                    profile_arn: Some("private-profile".into()),
+                    ..Default::default()
+                }],
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+            let endpoints: std::collections::HashMap<String, Arc<dyn KiroEndpoint>> = [(
+                "cli".into(),
+                Arc::new(DebugEndpoint(format!("http://{address}/"))) as Arc<dyn KiroEndpoint>,
+            )]
+            .into();
+            let provider =
+                KiroProvider::with_proxy(Arc::new(manager), None, endpoints, "cli".into());
+            let app = crate::anthropic::create_router_with_provider(
+                ["test-api-key"],
+                Some(provider),
+                true,
+                true,
+                true,
+            )
+            .layer(from_fn_with_state(fixture.store.clone(), middleware));
+            let payload = json!({"model":"claude-haiku-5-5","max_tokens":1024,"stream":streaming,
+                "system":"Inspect Rust code only.","thinking":{"type":"disabled"},
+                "messages":[{"role":"developer","content":"Preserve code formatting."},
+                    {"role":"user","content":"Debug src/main.rs test-api-key opaque-admin-secret opaque-upstream-secret password='private password'"}],
+                "metadata":{"user_id":"private-identity"},"clientExtension":{"accessToken":"private-client-token"}
+            });
+            // Authentication must happen before body capture, even with debugging enabled.
+            let mut unauthenticated = request(route);
+            unauthenticated.headers_mut().remove("x-api-key");
+            let response = app.clone().oneshot(unauthenticated).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let id = response.headers()["x-request-id"]
+                .to_str()
+                .unwrap()
+                .to_owned();
+            to_bytes(response.into_body(), 100_000).await.unwrap();
+            assert!(fixture.record(&id).await.request_debug.is_none());
+            assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+            let mut req = request(route);
+            *req.body_mut() = Body::from(payload.to_string());
+            let response = app.oneshot(req).await.unwrap();
+            let id = response.headers()["x-request-id"]
+                .to_str()
+                .unwrap()
+                .to_owned();
+            assert_eq!(response.status(), StatusCode::OK);
+            to_bytes(response.into_body(), 100_000).await.unwrap();
+            let record = fixture.record(&id).await;
+            assert_eq!(record.status, "error");
+            assert_eq!(record.attempts, 2);
+            let record = serde_json::to_value(record).unwrap();
+            assert_eq!(record["requestDebug"].is_object(), enabled);
+            let received = received.lock();
+            assert_eq!(received.len(), 2);
+            for (index, actual) in received.iter().enumerate() {
+                let debug = &record["upstreamAttempts"][index]["requestDebug"];
+                assert_eq!(debug.is_object(), enabled);
+                if enabled {
+                    assert_eq!(debug["truncated"], false);
+                    assert_eq!(debug["json"]["profileArn"], "[REDACTED]");
+                    assert_eq!(actual["profileArn"], "private-profile");
+                    let mut expected = actual.clone();
+                    expected["profileArn"] = json!("[REDACTED]");
+                    let text = &mut expected["conversationState"]["currentMessage"]["userInputMessage"]
+                        ["content"];
+                    *text = json!("Debug src/main.rs [REDACTED] [REDACTED] [REDACTED] [REDACTED]");
+                    assert_eq!(debug["json"], expected);
+                    assert_eq!(
+                        debug["json"]["conversationState"]["currentMessage"]["userInputMessage"]["origin"],
+                        "KIRO_CLI"
+                    );
+                    assert!(
+                        debug["json"]["conversationState"]
+                            .get("agentContinuationId")
+                            .is_none()
+                    );
+                }
+            }
+            if enabled {
+                let before = &record["requestDebug"]["json"];
+                assert_eq!(before["stream"], streaming); // Before forceStream normalization.
+                assert_eq!(before["messages"][0]["role"], "developer");
+                assert_eq!(before["metadata"]["user_id"], "[REDACTED]");
+                assert_eq!(before["clientExtension"]["accessToken"], "[REDACTED]");
+                assert!(!record.to_string().contains("private password"));
+                assert!(!record.to_string().contains("opaque-admin-secret"));
+                assert!(!record.to_string().contains("opaque-upstream-secret"));
+                assert!(!record.to_string().contains("test-api-key"));
+            }
+            let listed = fixture.store.query(LogQuery::default()).unwrap();
+            assert!(
+                listed["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|item| item.get("requestDebug").is_none())
+            );
+            server.abort();
+        }
     }
 }
 

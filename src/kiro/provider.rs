@@ -149,6 +149,52 @@ pub struct KiroProvider {
 }
 
 impl KiroProvider {
+    pub(crate) fn request_debug_enabled(&self) -> bool {
+        self.token_manager.config().request_debug_enabled
+    }
+
+    pub(crate) fn capture_client_debug(&self, body: &[u8], client_keys: &[&str]) {
+        let config = self.token_manager.config();
+        if !config.request_debug_enabled {
+            return;
+        }
+        let mut secrets = client_keys.to_vec();
+        secrets.extend(config.api_keys.iter().map(String::as_str));
+        secrets.extend(
+            [
+                config.api_key.as_deref(),
+                config.admin_api_key.as_deref(),
+                config.count_tokens_api_key.as_deref(),
+                config.proxy_password.as_deref(),
+            ]
+            .into_iter()
+            .flatten(),
+        );
+        crate::request_log::capture_client_request(body, &secrets);
+    }
+
+    fn capture_upstream_debug(&self, body: &str, credentials: &KiroCredentials, token: &str) {
+        let config = self.token_manager.config();
+        let mut secrets: Vec<_> = config.api_keys.iter().map(String::as_str).collect();
+        secrets.push(token);
+        secrets.extend(
+            [
+                credentials.access_token.as_deref(),
+                credentials.refresh_token.as_deref(),
+                credentials.kiro_api_key.as_deref(),
+                credentials.client_secret.as_deref(),
+                credentials.proxy_password.as_deref(),
+                config.api_key.as_deref(),
+                config.admin_api_key.as_deref(),
+                config.count_tokens_api_key.as_deref(),
+                config.proxy_password.as_deref(),
+            ]
+            .into_iter()
+            .flatten(),
+        );
+        crate::request_log::capture_upstream_request(body, &secrets);
+    }
+
     pub(crate) fn request_limits(&self) -> &crate::model::config::RequestLimits {
         &self.token_manager.config().request_limits
     }
@@ -309,6 +355,7 @@ impl KiroProvider {
 
             let url = endpoint.mcp_url(&rctx);
             let body = endpoint.transform_mcp_body(request_body, &rctx);
+            let debug_body = config.request_debug_enabled.then(|| body.clone());
 
             let base = self
                 .client_for(&ctx.credentials)?
@@ -319,6 +366,9 @@ impl KiroProvider {
 
             crate::kiro::retry_budget::consume()?;
             crate::request_log::attempt_started(ctx.id, endpoint.name());
+            if let Some(body) = debug_body {
+                self.capture_upstream_debug(&body, &ctx.credentials, &ctx.token);
+            }
             let response = match request
                 .timeout(Duration::from_secs(
                     self.request_limits().total_timeout_seconds,
@@ -546,6 +596,7 @@ impl KiroProvider {
             let url = endpoint.api_url(&rctx);
             let body = endpoint.transform_api_body(request_body, &rctx);
             let body = self.token_manager.model_request_body(ctx.id, body);
+            let debug_body = config.request_debug_enabled.then(|| body.clone());
 
             let base = self
                 .client_for(&ctx.credentials)?
@@ -556,6 +607,9 @@ impl KiroProvider {
 
             crate::kiro::retry_budget::consume()?;
             crate::request_log::attempt_started(ctx.id, endpoint.name());
+            if let Some(body) = debug_body {
+                self.capture_upstream_debug(&body, &ctx.credentials, &ctx.token);
+            }
             let response = match request
                 .timeout(Duration::from_secs(
                     self.request_limits().total_timeout_seconds,

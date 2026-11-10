@@ -35,6 +35,7 @@ export interface SystemSettings {
   toolOutputRecoveryAttempts: number
   countTokensTimeoutSeconds: number
   requestLogRetentionDays: number
+  requestDebugEnabled: boolean
 }
 
 export interface LatestKiroVersion {

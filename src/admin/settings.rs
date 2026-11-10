@@ -42,6 +42,7 @@ settings! {
     tool_output_recovery_attempts: u8,
     count_tokens_timeout_seconds: u64,
     request_log_retention_days: u32,
+    request_debug_enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -532,6 +533,7 @@ mod tests {
         settings["concurrency"]["maxInFlight"] = 12.into();
         settings["requestLogRetentionDays"] = 7.into();
         settings["forceStream"] = true.into();
+        settings["requestDebugEnabled"] = true.into();
         settings["loadBalancingMode"] = "priority".into();
         let (status, saved) = fixture
             .call(
@@ -546,6 +548,8 @@ mod tests {
         assert_eq!(saved["settings"]["concurrency"]["maxInFlight"], 12);
         assert_eq!(saved["running"]["forceStream"], false);
         assert_eq!(saved["settings"]["forceStream"], true);
+        assert_eq!(saved["running"]["requestDebugEnabled"], false);
+        assert_eq!(saved["settings"]["requestDebugEnabled"], true);
         assert_eq!(saved["running"]["loadBalancingMode"], "priority");
         assert_eq!(fixture.manager.get_load_balancing_mode(), "priority");
         assert_eq!(
@@ -553,6 +557,7 @@ mod tests {
             serde_json::json!([
                 "concurrency.maxInFlight",
                 "forceStream",
+                "requestDebugEnabled",
                 "requestLogRetentionDays"
             ])
         );

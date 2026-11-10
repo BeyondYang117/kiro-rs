@@ -67,6 +67,10 @@ pub fn create_router_with_provider(
         .route("/messages", post(post_messages_route))
         .route("/messages/count_tokens", post(count_tokens_route))
         .layer(middleware::from_fn_with_state(
+            state.clone(),
+            super::middleware::capture_debug_request,
+        ))
+        .layer(middleware::from_fn_with_state(
             guard.clone(),
             super::middleware::limit_request,
         ))
@@ -82,6 +86,10 @@ pub fn create_router_with_provider(
         .route("/models/{model_id}", get(get_model))
         .route("/messages", post(post_messages_cc_route))
         .route("/messages/count_tokens", post(count_tokens_route))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            super::middleware::capture_debug_request,
+        ))
         .layer(middleware::from_fn_with_state(
             guard.clone(),
             super::middleware::limit_request,

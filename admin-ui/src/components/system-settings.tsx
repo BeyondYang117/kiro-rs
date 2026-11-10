@@ -242,6 +242,12 @@ const groups: {
         max: 300,
       },
       {
+        path: 'requestDebugEnabled',
+        label: '请求 JSON 调试记录',
+        help: '默认关闭。记录脱敏后的客户端原始 JSON 和每次上游最终 JSON，在调用日志详情查看和导出；包含对话与源码，沿用日志保留期限。重启生效。',
+        type: 'switch',
+      },
+      {
         path: 'requestLogRetentionDays',
         label: '调用日志保留（天）',
         help: '重启后按新期限清理，同时最多保留 100000 条记录。',

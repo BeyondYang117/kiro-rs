@@ -162,6 +162,9 @@ async fn main() {
             std::process::exit(1);
         });
     tracing::info!(path = %log_path.display(), "调用日志持久化已启用");
+    if config.request_debug_enabled {
+        tracing::info!("请求 JSON 调试记录已启用：调用日志详情将保存脱敏后的客户端与上游请求正文");
+    }
     let kiro_provider = KiroProvider::with_proxy(
         token_manager.clone(),
         proxy_config.clone(),

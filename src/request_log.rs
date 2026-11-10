@@ -1,4 +1,6 @@
-//! Durable request metadata and bounded response previews. Request bodies are never stored.
+//! Durable request metadata, bounded previews and opt-in redacted request JSON.
+mod debug;
+pub(crate) use debug::{DebugJson, capture_client_request, capture_upstream_request};
 mod response;
 pub(crate) use response::append_preview;
 use response::{ResponsePreview, StreamResponsePreview};
@@ -78,6 +80,8 @@ pub struct Diagnostic {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attempt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_debug: Option<DebugJson>,
     timestamp: i64,
     credential_id: u64,
     endpoint: String,
@@ -107,6 +111,12 @@ pub struct Attempt {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Record {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_debug: Option<DebugJson>,
+    #[serde(skip)]
+    debug_bytes: usize,
+    #[serde(skip)]
+    debug_secrets: Vec<String>,
     id: String,
     timestamp: i64,
     method: String,
@@ -137,6 +147,9 @@ pub struct Record {
 impl Record {
     fn new(method: &str, path: &str) -> Self {
         Self {
+            request_debug: None,
+            debug_bytes: 0,
+            debug_secrets: Vec::new(),
             id: uuid::Uuid::new_v4().to_string(),
             timestamp: Utc::now().timestamp_millis(),
             method: method.into(),
@@ -218,6 +231,7 @@ pub fn attempt_started(credential_id: u64, endpoint: &str) {
         record.credential_id = Some(credential_id);
         record.attempts += 1;
         record.upstream_attempts.push(Attempt {
+            request_debug: None,
             timestamp: Utc::now().timestamp_millis(),
             credential_id,
             endpoint: endpoint.into(),
@@ -578,6 +592,7 @@ impl LogStore {
             item.as_object_mut().unwrap().remove("diagnostics");
             item.as_object_mut().unwrap().remove("upstreamAttempts");
             item.as_object_mut().unwrap().remove("response");
+            item.as_object_mut().unwrap().remove("requestDebug");
             items.push(item);
         }
         Ok(

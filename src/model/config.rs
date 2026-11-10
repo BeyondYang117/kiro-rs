@@ -277,6 +277,10 @@ pub struct Config {
     #[serde(default = "default_request_log_retention_days")]
     pub request_log_retention_days: u32,
 
+    /// Opt-in redacted client/upstream JSON capture in request log details.
+    #[serde(default)]
+    pub request_debug_enabled: bool,
+
     /// 负载均衡模式（"priority" 或 "balanced"）
     #[serde(default = "default_load_balancing_mode")]
     pub load_balancing_mode: String,
@@ -432,6 +436,7 @@ impl Default for Config {
             admin_api_key: None,
             request_log_path: None,
             request_log_retention_days: default_request_log_retention_days(),
+            request_debug_enabled: false,
             load_balancing_mode: default_load_balancing_mode(),
             concurrency: ConcurrencyConfig::default(),
             request_limits: RequestLimits::default(),

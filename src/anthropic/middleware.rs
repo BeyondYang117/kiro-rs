@@ -73,6 +73,44 @@ pub async fn auth_middleware(
     crate::common::security::private_api_response(response)
 }
 
+/// Runs after authentication and admission, before JSON extraction/normalization.
+pub(super) async fn capture_debug_request(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if request.method() != "POST"
+        || !request.uri().path().ends_with("/messages")
+        || !state
+            .kiro_provider
+            .as_ref()
+            .is_some_and(|p| p.request_debug_enabled())
+    {
+        return next.run(request).await;
+    }
+    let (parts, body) = request.into_parts();
+    match axum::body::to_bytes(body, 50 * 1024 * 1024).await {
+        Ok(bytes) => {
+            let secrets: Vec<_> = state.api_keys.iter().map(String::as_str).collect();
+            state
+                .kiro_provider
+                .as_ref()
+                .unwrap()
+                .capture_client_debug(&bytes, &secrets);
+            next.run(Request::from_parts(parts, Body::from(bytes)))
+                .await
+        }
+        Err(_) => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ErrorResponse::new(
+                "invalid_request_error",
+                "Cannot read request body within the 50 MiB limit",
+            )),
+        )
+            .into_response(),
+    }
+}
+
 /// CORS 中间件层
 ///
 /// **安全说明**：当前配置允许所有来源（Any），这是为了支持公开 API 服务。

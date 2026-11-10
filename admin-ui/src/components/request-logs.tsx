@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowLeft, RefreshCw, LogOut, Download, Moon, Sun } from 'lucide-react'
 import { toast } from 'sonner'
-import { getLogs, getLog, type LogFilters, type LogRecord, type UpstreamResponseDiagnostics } from '@/api/logs'
+import { getLogs, getLog, type DebugJson, type LogFilters, type LogRecord, type UpstreamResponseDiagnostics } from '@/api/logs'
 import { extractErrorMessage } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -15,6 +15,14 @@ const formatNumber = (n: number | null | undefined) => n == null ? '—' : n.toL
 const formatCredits = (n: number | null | undefined) => n == null ? '未上报' : n.toLocaleString('zh-CN', { maximumSignificantDigits: 10 })
 const formatTime = (n: number) => new Date(n).toLocaleString('zh-CN', { hour12: false })
 const formatDuration = (n: number | null | undefined) => n == null ? '—' : n < 1000 ? `${n} ms` : `${(n / 1000).toFixed(2)} s`
+
+function RequestDebug({ data, label }: { data: DebugJson; label: string }) {
+  return <details className="mt-3 rounded-md border p-3 text-xs">
+    <summary className="cursor-pointer">{label}（已脱敏{data.truncated ? '，已截断或省略' : ''}）</summary>
+    <p className="mt-2 text-muted-foreground">原始大小：{formatNumber(data.originalBytes)} B{data.omittedReason ? ` · 未保存正文：${data.omittedReason}` : ''}</p>
+    {data.json != null && <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify(data.json, null, 2)}</pre>}
+  </details>
+}
 
 function Status({ record }: { record: LogRecord }) {
   return <Badge variant={record.status === 'success' ? 'success' : record.status === 'error' ? 'destructive' : record.status === 'interrupted' ? 'warning' : 'secondary'}>{labels[record.status]}</Badge>
@@ -184,8 +192,9 @@ export function RequestLogs({ onBack, onLogout }: { onBack: () => void; onLogout
             ].map(([key, value]) => <div key={key}><dt className="text-muted-foreground">{key}</dt><dd className="mt-1 break-all">{value}</dd></div>)}
           </dl>
           {detail.data.response && <section><h3 className="mb-2 font-medium">返回客户端的 content{detail.data.response.truncated ? '（预览已截断）' : ''}</h3><pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border p-3 text-xs">{JSON.stringify(detail.data.response.content, null, 2)}</pre></section>}
+          {detail.data.requestDebug && <RequestDebug data={detail.data.requestDebug} label="转换前的客户端 JSON" />}
           {detail.data.error && <section><h3 className="mb-2 font-medium text-destructive">错误原因</h3><pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs">{detail.data.error}</pre></section>}
-          <section><h3 className="mb-2 font-medium">上游调用（{detail.data.attempts} 次）</h3><div className="space-y-2">{detail.data.upstreamAttempts?.length ? detail.data.upstreamAttempts.map((attempt, index) => <div key={index} className="rounded-md border p-3 text-sm"><div className="flex flex-wrap justify-between gap-2"><span>#{index + 1} · 凭据 #{attempt.credentialId} · {attempt.endpoint}</span><span className="text-muted-foreground">{formatTime(attempt.timestamp)} · {attempt.status == null ? '未取得 HTTP 响应' : `HTTP ${attempt.status}`}</span></div><AttemptProgress attempt={attempt} requestTimestamp={detail.data!.timestamp} />{attempt.upstreamRequestId && <p className="mt-2 break-all font-mono text-xs">上游请求 ID：{attempt.upstreamRequestId}</p>}{attempt.responseDiagnostics && <ResponseDiagnostics data={attempt.responseDiagnostics} />}{attempt.error && <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-destructive">{attempt.error}</pre>}</div>) : <p className="text-sm text-muted-foreground">未向上游发起请求</p>}</div></section>
+          <section><h3 className="mb-2 font-medium">上游调用（{detail.data.attempts} 次）</h3><div className="space-y-2">{detail.data.upstreamAttempts?.length ? detail.data.upstreamAttempts.map((attempt, index) => <div key={index} className="rounded-md border p-3 text-sm"><div className="flex flex-wrap justify-between gap-2"><span>#{index + 1} · 凭据 #{attempt.credentialId} · {attempt.endpoint}</span><span className="text-muted-foreground">{formatTime(attempt.timestamp)} · {attempt.status == null ? '未取得 HTTP 响应' : `HTTP ${attempt.status}`}</span></div><AttemptProgress attempt={attempt} requestTimestamp={detail.data!.timestamp} />{attempt.upstreamRequestId && <p className="mt-2 break-all font-mono text-xs">上游请求 ID：{attempt.upstreamRequestId}</p>}{attempt.requestDebug && <RequestDebug data={attempt.requestDebug} label="最终发送给上游的 JSON" />}{attempt.responseDiagnostics && <ResponseDiagnostics data={attempt.responseDiagnostics} />}{attempt.error && <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-destructive">{attempt.error}</pre>}</div>) : <p className="text-sm text-muted-foreground">未向上游发起请求</p>}</div></section>
           <section><h3 className="mb-2 font-medium">诊断记录</h3>{detail.data.diagnostics?.length ? <div className="space-y-2">{detail.data.diagnostics.map((diagnostic, index) => <div key={index} className="rounded-md border p-3"><p className="mb-2 break-all text-xs text-muted-foreground">{formatTime(diagnostic.timestamp)} · {diagnostic.level} · {diagnostic.target}</p><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{diagnostic.message}</pre></div>)}</div> : <p className="text-sm text-muted-foreground">本次调用没有警告或错误</p>}</section>
         </>}
       </DialogContent>
