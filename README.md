@@ -585,7 +585,7 @@ Claude 默认旧协议模式的 `max_tokens` 仅用于本地响应/压缩处理�
 
 `temperature`、`top_p`、`top_k` 会被忽略，使用 Kiro 默认采样行为；非 `null` 值会在调用日志中记录 WARN（仅记录参数名，不记录参数值），不再因此拒绝请求。省略或 `null` 不产生警告。此规则同时适用于 `/v1/messages` 和 `/cc/v1/messages` 的流式、非流式及压缩请求。
 
-`stop_sequences` 可省略、设为 `null` 或空数组 `[]`，均表示不设置自定义停止序列；非空数组仍返回 `400 invalid_request_error`，需要客户端移除此参数。此规则同时适用于 `/v1/messages` 和 `/cc/v1/messages` 的流式及非流式请求。
+Kiro 不支持自定义 `stop_sequences`。省略、`null`、空数组 `[]` 和非空字符串数组都会按未设置处理；非空数组会记录 WARN，并使用 Kiro 默认停止行为。其他格式仍返回 `400 invalid_request_error`。此规则同时适用于 `/v1/messages` 和 `/cc/v1/messages` 的流式、非流式及压缩请求。
 
 原生 Claude 请求示例：
 

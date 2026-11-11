@@ -593,18 +593,20 @@ fn validate_and_normalize_request(payload: &mut MessagesRequest) -> Result<(), S
     }
     match payload.extra_controls.get("stop_sequences") {
         None | Some(serde_json::Value::Null) => {}
-        Some(serde_json::Value::Array(sequences)) if sequences.is_empty() => {}
         Some(serde_json::Value::Array(sequences))
             if sequences.iter().all(serde_json::Value::is_string) =>
         {
-            return Err(
-                "Non-empty stop_sequences is not supported by this Kiro proxy; omit it or use []"
-                    .into(),
-            );
+            if !sequences.is_empty() {
+                tracing::warn!(
+                    stage = "request_normalization",
+                    parameter = "stop_sequences",
+                    "Unsupported stop sequences ignored; Kiro's default stopping behavior will be used. Remove this parameter to suppress the warning."
+                );
+            }
         }
         Some(_) => return Err("stop_sequences must be an array of strings or null".into()),
     }
-    // Clients may send [] by default; it has the same semantics as an omitted field.
+    // Kiro does not expose custom stop sequences; omit the field for every request.
     payload.extra_controls.remove("stop_sequences");
     if let Some(choice) = &payload.tool_choice {
         let kind = choice.get("type").and_then(serde_json::Value::as_str);

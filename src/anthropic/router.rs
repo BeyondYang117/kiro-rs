@@ -253,18 +253,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_sequences_defaults_pass_validation_on_both_message_routes() {
+    async fn stop_sequences_are_ignored_or_validated_on_both_message_routes() {
         use axum::body::to_bytes;
         use serde_json::{Value, json};
 
         let app = create_router_with_provider(["test-key"], None, true, true, false);
         for path in ["/v1/messages", "/cc/v1/messages"] {
             for stream in [false, true] {
-                for (stop_sequences, error) in [
+                for (stop_sequences, validation_error) in [
                     (None, None),
                     (Some(Value::Null), None),
                     (Some(json!([])), None),
-                    (Some(json!(["STOP"])), Some("Non-empty stop_sequences")),
+                    (Some(json!(["STOP"])), None),
+                    (Some(json!(["STOP", "END"])), None),
                     (Some(json!("STOP")), Some("stop_sequences must be")),
                     (Some(json!([42])), Some("stop_sequences must be")),
                 ] {
@@ -291,7 +292,7 @@ mod tests {
                     let status = response.status();
                     let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
                     let body: Value = serde_json::from_slice(&bytes).unwrap();
-                    if let Some(error) = error {
+                    if let Some(error) = validation_error {
                         assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {body}");
                         assert_eq!(body["error"]["type"], "invalid_request_error");
                         assert!(body["error"]["message"].as_str().unwrap().contains(error));
