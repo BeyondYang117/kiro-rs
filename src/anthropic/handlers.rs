@@ -1157,6 +1157,7 @@ fn flush_reasoning(
     pending: &mut String,
     signature: Option<String>,
 ) {
+    let signature = signature.filter(|signature| !signature.trim().is_empty());
     if pending.is_empty() && signature.is_none() {
         return;
     }

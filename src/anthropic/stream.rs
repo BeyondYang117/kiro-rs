@@ -687,9 +687,13 @@ impl StreamContext {
             return Vec::new();
         }
         let mut events = Vec::new();
+        let signature = reasoning
+            .signature
+            .as_deref()
+            .filter(|signature| !signature.trim().is_empty());
         // Redacted events form their own opaque block, never an empty thinking
         // block. Text/signature events end a phase when its signature arrives.
-        if reasoning.text.is_empty() && reasoning.signature.is_none() {
+        if reasoning.text.is_empty() && signature.is_none() {
             if let Some(data) = &reasoning.redacted_content {
                 events.extend(self.finish_native_thinking());
                 let index = self.state_manager.next_block_index();
@@ -727,7 +731,7 @@ impl StreamContext {
                 events.push(event);
             }
         }
-        if let Some(signature) = &reasoning.signature {
+        if let Some(signature) = signature {
             events.push(SseEvent::new(
                 "content_block_delta",
                 json!({
@@ -1519,6 +1523,27 @@ mod tests {
                 .chain(final_events.iter())
                 .any(|event| event.event == "content_block_stop")
         );
+    }
+
+    #[test]
+    fn native_reasoning_without_text_or_nonempty_signature_emits_no_empty_block() {
+        use crate::kiro::model::events::ReasoningContentEvent;
+
+        for signature in [None, Some(String::new()), Some(" \n".into())] {
+            let mut ctx =
+                StreamContext::new_with_thinking("claude-opus-5-5", 1, true, HashMap::new());
+            ctx.generate_initial_events();
+            let events = ctx.process_kiro_event(&Event::ReasoningContent(ReasoningContentEvent {
+                signature,
+                ..Default::default()
+            }));
+            assert!(events.is_empty());
+            let final_events = ctx.generate_final_events();
+            assert!(!final_events.iter().any(|event| {
+                event.data["content_block"]["type"] == "thinking"
+                    || event.data["delta"]["type"] == "signature_delta"
+            }));
+        }
     }
 
     #[test]

@@ -2583,6 +2583,25 @@ mod tests {
     }
 
     #[test]
+    fn empty_signature_does_not_replay_as_thinking_or_signature() {
+        let request = tool_validation_request(serde_json::json!([
+            {"role":"user", "content":"start"},
+            {"role":"assistant", "content":[
+                {"type":"thinking", "thinking":"no signature", "signature":"  "},
+                {"type":"thinking", "thinking":"", "signature":"orphan"}
+            ]},
+            {"role":"user", "content":"continue"}
+        ]));
+        let converted = convert_request(&request).unwrap();
+        let history = serde_json::to_value(converted.conversation_state).unwrap();
+        assert!(
+            history[1]["assistantResponseMessage"]
+                .get("reasoningContent")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn programming_history_reaches_cli_without_duplicate_or_foreign_content() {
         use crate::kiro::endpoint::{CliEndpoint, KiroEndpoint, RequestContext};
         use crate::kiro::model::credentials::KiroCredentials;
