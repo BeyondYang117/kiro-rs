@@ -779,8 +779,11 @@ fn normalize_message_input(
                         ));
                     };
                     if instruction && kind != "text" {
+                        let block_type: String = kind.chars().take(64).collect();
                         return Err(format!(
-                            "messages[{index}].content[{block_index}]: system/developer messages only support text blocks"
+                            "messages[{index}].content[{block_index}]: system/developer messages only support text blocks (role={}, type={})",
+                            json!(message.role),
+                            json!(block_type)
                         ));
                     }
                     if kind == "text"
