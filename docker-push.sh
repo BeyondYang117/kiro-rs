@@ -16,6 +16,8 @@ usage() {
 前置条件: Docker 已启动、已安装 Buildx、已登录具有仓库推送权限的账号。
 Docker Desktop 默认支持跨架构模拟；Linux 主机需预先配置 QEMU/binfmt。
 可通过 BUILDER_NAME 环境变量指定 Buildx builder，默认 kiro-rs-multiarch。
+可通过 PLATFORMS 指定目标架构，例如 ARM 机器只发布本机架构：
+  PLATFORMS=linux/arm64 ./docker-push.sh
 EOF
 }
 
@@ -30,6 +32,7 @@ fi
 
 image="abu116/kiro-rs"
 builder_name="${BUILDER_NAME:-kiro-rs-multiarch}"
+platforms="${PLATFORMS:-linux/amd64,linux/arm64}"
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 tag_args=()
 
@@ -62,10 +65,10 @@ fi
 
 docker buildx inspect "$builder_name" --bootstrap
 
-printf '开始构建并推送 linux/amd64、linux/arm64 镜像。请确保已执行 docker login -u abu116。\n'
+printf '开始构建并推送 %s 镜像。请确保已执行 docker login -u abu116。\n' "$platforms"
 docker buildx build \
     --builder "$builder_name" \
-    --platform linux/amd64,linux/arm64 \
+    --platform "$platforms" \
     --file "$project_dir/Dockerfile" \
     "${tag_args[@]}" \
     --push \

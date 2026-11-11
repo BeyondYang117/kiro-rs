@@ -172,6 +172,10 @@ curl http://127.0.0.1:8990/v1/messages \
 docker compose up -d --build
 ```
 
+本地 Compose 默认只构建当前机器架构，使用 `docker-dev` 编译配置（保留 release 优化，关闭 LTO 并启用增量编译），缩短反复修改后的构建时间。需要与发布镜像一致的编译优化时，运行 `BUILD_PROFILE=release docker compose up -d --build`。直接 `docker build` 和发布脚本仍默认使用 `release`。
+
+Docker 构建会复用 Cargo 下载、Rust 编译产物和 pnpm 下载缓存；修改源码或管理页面后无需重编所有 Rust 依赖。首次构建仍需下载和编译依赖，后续请复用同一个 Buildx builder 并保留其缓存。构建使用仓库内的 `Cargo.lock` 和 `--locked`，避免意外更新依赖。
+
 将 `config.json` 和 `credentials.json` 放在宿主机 `./config/` 目录，Compose 将整个目录挂载至 `/app/config/`。调用日志数据库和统计缓存也保存在这个目录，重建容器不会丢失。访问 `http://localhost:8990/admin` 需要在配置中设置 `adminApiKey`，配置的监听地址应为 `0.0.0.0`、端口为 `8990`。
 
 Compose 默认镜像名为 `abu116/kiro-rs:latest`，与 `docker-push.sh` 一致；可通过 `IMAGE_NAME`、`IMAGE_TAG` 覆盖。若使用已推送的镜像，在发布新版本后执行 `docker compose pull && docker compose up -d --no-build`。尚未推送的本地修改使用上面的 `--build` 命令。
@@ -191,6 +195,9 @@ docker login -u abu116
 
 # 同一次构建推送版本标签和 latest
 ./docker-push.sh 2026.10.1 latest
+
+# ARM 机器只发布 ARM 镜像，跳过 amd64 模拟编译（标签将只包含此架构）
+PLATFORMS=linux/arm64 ./docker-push.sh arm64
 ```
 
 需要启动 Docker 并安装 Buildx（Docker Desktop 已包含）。脚本会自动创建并复用 `kiro-rs-multiarch` builder，也可通过 `BUILDER_NAME` 指定已配置的多架构 builder。前端静态资源使用构建节点的原生架构构建，并由两个目标镜像共用，避免 esbuild 在 QEMU 跨架构模拟下崩溃。Docker Desktop 默认支持跨架构模拟；Linux 主机若尚未配置 QEMU/binfmt，可先执行 `docker run --privileged --rm tonistiigi/binfmt --install amd64,arm64`。跨架构模拟编译 Rust 可能耗时较长。

@@ -6,6 +6,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        BUILD_PROFILE: ${BUILD_PROFILE:-docker-dev}
     container_name: kiro-rs
     extra_hosts:
       - "host.docker.internal:host-gateway"
