@@ -2236,6 +2236,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_reasoning_phases_keep_signatures_and_redacted_blocks_across_response_modes() {
+        let mut bytes = Vec::new();
+        for event in [
+            json!({"text":" first\n"}),
+            json!({"text":"phase 🦀"}),
+            json!({"signature":"signature-a"}),
+            json!({"text":"second", "signature":"signature-b"}),
+            json!({"text":"unsigned"}),
+            json!({"redactedContent":"encrypted-phase"}),
+            json!({"text":"third"}),
+            json!({"signature":"signature-c"}),
+        ] {
+            bytes.extend(frame("reasoningContentEvent", event));
+        }
+        bytes.extend(frame("assistantResponseEvent", json!({"content":"answer"})));
+        let expected = json!([
+            {"type":"thinking", "thinking":" first\nphase 🦀", "signature":"signature-a"},
+            {"type":"thinking", "thinking":"second", "signature":"signature-b"},
+            {"type":"thinking", "thinking":"unsigned"},
+            {"type":"redacted_thinking", "data":"encrypted-phase"},
+            {"type":"thinking", "thinking":"third", "signature":"signature-c"},
+            {"type":"text", "text":"answer"}
+        ]);
+        for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+            for streaming in [false, true] {
+                let mut upstream = mock_scripted(vec![bytes.clone()]).await;
+                upstream.state.cc_buffered_stream = buffered;
+                let response = completion_response(&upstream, cc, streaming, true).await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                let content = if streaming {
+                    let text = String::from_utf8(body.to_vec()).unwrap();
+                    let mut blocks = std::collections::BTreeMap::<u64, Value>::new();
+                    let mut open = std::collections::HashSet::new();
+                    for line in text.lines().filter_map(|line| line.strip_prefix("data: ")) {
+                        let event: Value = serde_json::from_str(line).unwrap();
+                        let index = event["index"].as_u64().unwrap_or_default();
+                        match event["type"].as_str().unwrap() {
+                            "content_block_start" => {
+                                assert!(open.is_empty(), "overlapping blocks: {text}");
+                                assert!(open.insert(index));
+                                assert!(
+                                    blocks
+                                        .insert(index, event["content_block"].clone())
+                                        .is_none()
+                                );
+                            }
+                            "content_block_delta" => {
+                                assert!(open.contains(&index), "delta outside block: {text}");
+                                let field = match event["delta"]["type"].as_str().unwrap() {
+                                    "thinking_delta" => "thinking",
+                                    "signature_delta" => "signature",
+                                    "text_delta" => "text",
+                                    other => panic!("unexpected delta {other}"),
+                                };
+                                let block = blocks.get_mut(&index).unwrap();
+                                let mut value =
+                                    block[field].as_str().unwrap_or_default().to_owned();
+                                value.push_str(event["delta"][field].as_str().unwrap());
+                                block[field] = json!(value);
+                            }
+                            "content_block_stop" => assert!(open.remove(&index)),
+                            "error" => panic!("{text}"),
+                            _ => {}
+                        }
+                    }
+                    assert!(open.is_empty());
+                    json!(blocks.into_values().collect::<Vec<_>>())
+                } else {
+                    serde_json::from_slice::<Value>(&body).unwrap()["content"].clone()
+                };
+                assert_eq!(
+                    content, expected,
+                    "cc={cc}, buffered={buffered}, streaming={streaming}"
+                );
+                // Replay the actual client representation on the next turn.
+                // The Kiro history union keeps the last complete signed phase,
+                // with its original text, rather than the concatenated text.
+                let replay = request(json!({"model":"claude-opus-5-5", "max_tokens":1024,
+                    "messages":[{"role":"user", "content":"hi"},
+                        {"role":"assistant", "content":content},
+                        {"role":"user", "content":"continue"}]}));
+                let converted = super::super::converter::convert_request(&replay).unwrap();
+                let history = serde_json::to_value(converted.conversation_state).unwrap();
+                assert_eq!(
+                    history["history"][1]["assistantResponseMessage"]["reasoningContent"],
+                    json!({"reasoningText":{"text":"third", "signature":"signature-c"}})
+                );
+                assert_eq!(upstream.requests.lock().unwrap().len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn valid_thinking_tools_and_explicit_limits_are_never_replayed() {
         let cases = [
             (

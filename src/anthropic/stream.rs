@@ -687,6 +687,22 @@ impl StreamContext {
             return Vec::new();
         }
         let mut events = Vec::new();
+        // Redacted events form their own opaque block, never an empty thinking
+        // block. Text/signature events end a phase when its signature arrives.
+        if reasoning.text.is_empty() && reasoning.signature.is_none() {
+            if let Some(data) = &reasoning.redacted_content {
+                events.extend(self.finish_native_thinking());
+                let index = self.state_manager.next_block_index();
+                events.extend(self.state_manager.handle_content_block_start(
+                    index,
+                    "redacted_thinking",
+                    json!({"type":"content_block_start", "index":index,
+                        "content_block":{"type":"redacted_thinking", "data":data}}),
+                ));
+                events.extend(self.state_manager.handle_content_block_stop(index));
+            }
+            return events;
+        }
         let index = if let Some(index) = self.native_thinking_block_index {
             index
         } else {
@@ -719,8 +735,10 @@ impl StreamContext {
                     "delta":{"type":"signature_delta", "signature":signature}
                 }),
             ));
+            events.extend(self.finish_native_thinking());
         }
         if let Some(data) = &reasoning.redacted_content {
+            events.extend(self.finish_native_thinking());
             let redacted_index = self.state_manager.next_block_index();
             events.extend(self.state_manager.handle_content_block_start(
                 redacted_index,
@@ -733,23 +751,35 @@ impl StreamContext {
         events
     }
 
+    fn finish_native_thinking(&mut self) -> Vec<SseEvent> {
+        self.native_thinking_block_index
+            .take()
+            .and_then(|index| self.state_manager.handle_content_block_stop(index))
+            .into_iter()
+            .collect()
+    }
+
     /// 处理助手响应事件
     fn process_assistant_response(&mut self, content: &str) -> Vec<SseEvent> {
         if content.is_empty() {
             return Vec::new();
         }
 
+        let mut events = self.finish_native_thinking();
+
         // 估算 tokens
         self.output_tokens += estimate_tokens(content);
 
         // 如果启用了thinking，需要处理thinking块
         if self.thinking_enabled {
-            return self.process_content_with_thinking(content);
+            events.extend(self.process_content_with_thinking(content));
+            return events;
         }
 
         // 非 thinking 模式同样复用统一的 text_delta 发送逻辑，
         // 以便在 tool_use 自动关闭文本块后能够自愈重建新的文本块，避免“吞字”。
-        self.create_text_delta_events(content)
+        events.extend(self.create_text_delta_events(content));
+        events
     }
 
     /// 处理包含thinking块的内容
@@ -978,7 +1008,7 @@ impl StreamContext {
         &mut self,
         tool_use: &crate::kiro::model::events::ToolUseEvent,
     ) -> Vec<SseEvent> {
-        let mut events = Vec::new();
+        let mut events = self.finish_native_thinking();
 
         self.state_manager.set_has_tool_use(true);
 
@@ -1393,6 +1423,75 @@ mod tests {
     }
 
     #[test]
+    fn native_reasoning_closes_before_text_tools_and_redacted_blocks() {
+        use crate::kiro::model::events::{ReasoningContentEvent, ToolUseEvent};
+
+        for boundary in [
+            Event::AssistantResponse(
+                serde_json::from_value(serde_json::json!({"content":"answer"})).unwrap(),
+            ),
+            Event::ToolUse(ToolUseEvent {
+                name: "Read".into(),
+                tool_use_id: "t1".into(),
+                input: "{}".into(),
+                stop: true,
+            }),
+            Event::ReasoningContent(ReasoningContentEvent {
+                redacted_content: Some("encrypted".into()),
+                ..Default::default()
+            }),
+        ] {
+            let mut ctx =
+                StreamContext::new_with_thinking("claude-opus-5-5", 1, true, HashMap::new());
+            let mut events = ctx.generate_initial_events();
+            events.extend(ctx.process_kiro_event(&Event::ReasoningContent(
+                ReasoningContentEvent {
+                    text: "unsigned first phase".into(),
+                    ..Default::default()
+                },
+            )));
+            events.extend(ctx.process_kiro_event(&boundary));
+            events.extend(ctx.process_kiro_event(&Event::ReasoningContent(
+                ReasoningContentEvent {
+                    text: "signed second phase".into(),
+                    signature: Some("second-signature".into()),
+                    ..Default::default()
+                },
+            )));
+            events.extend(ctx.generate_final_events());
+            let thoughts: Vec<_> = events
+                .iter()
+                .filter(|event| event.data["content_block"]["type"] == "thinking")
+                .map(|event| event.data["index"].as_i64().unwrap())
+                .collect();
+            assert_eq!(
+                thoughts.len(),
+                2,
+                "redacted event must not create an empty thinking block"
+            );
+            assert_ne!(thoughts[0], thoughts[1]);
+            let stop = events
+                .iter()
+                .position(|event| {
+                    event.event == "content_block_stop" && event.data["index"] == thoughts[0]
+                })
+                .unwrap();
+            let next = events
+                .iter()
+                .position(|event| {
+                    event.event == "content_block_start" && event.data["index"] != thoughts[0]
+                })
+                .unwrap();
+            assert!(stop < next);
+            let signature = events
+                .iter()
+                .find(|event| event.data["delta"]["type"] == "signature_delta")
+                .unwrap();
+            assert_eq!(signature.data["index"], thoughts[1]);
+        }
+    }
+
+    #[test]
     fn native_reasoning_events_emit_signed_thinking_blocks() {
         use crate::kiro::model::events::ReasoningContentEvent;
 
@@ -1415,8 +1514,9 @@ mod tests {
         );
         let final_events = ctx.generate_final_events();
         assert!(
-            final_events
+            events
                 .iter()
+                .chain(final_events.iter())
                 .any(|event| event.event == "content_block_stop")
         );
     }

@@ -1152,6 +1152,21 @@ fn create_sse_stream(
 
 use super::converter::get_context_window_size;
 
+fn flush_reasoning(
+    blocks: &mut Vec<serde_json::Value>,
+    pending: &mut String,
+    signature: Option<String>,
+) {
+    if pending.is_empty() && signature.is_none() {
+        return;
+    }
+    let mut block = json!({"type":"thinking", "thinking":std::mem::take(pending)});
+    if let Some(signature) = signature {
+        block["signature"] = json!(signature);
+    }
+    blocks.push(block);
+}
+
 /// 处理非流式请求
 async fn handle_non_stream_request(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
@@ -1176,9 +1191,8 @@ async fn handle_non_stream_request(
     );
 
     let mut text_content = String::new();
-    let mut reasoning_text = String::new();
-    let mut reasoning_signature: Option<String> = None;
-    let mut redacted_reasoning: Vec<String> = Vec::new();
+    let mut reasoning_blocks = Vec::new();
+    let mut pending_reasoning = String::new();
     let mut tool_uses: Vec<serde_json::Value> = Vec::new();
     let mut has_tool_use = false;
     let mut stop_reason = "end_turn".to_string();
@@ -1198,20 +1212,27 @@ async fn handle_non_stream_request(
         for event in events {
             match event {
                 Event::AssistantResponse(resp) => {
+                    flush_reasoning(&mut reasoning_blocks, &mut pending_reasoning, None);
                     text_content.push_str(&resp.content);
                 }
                 Event::ReasoningContent(reasoning) => {
                     if thinking_enabled {
-                        reasoning_text.push_str(&reasoning.text);
-                        if reasoning.signature.is_some() {
-                            reasoning_signature = reasoning.signature;
+                        pending_reasoning.push_str(&reasoning.text);
+                        if let Some(signature) = reasoning.signature {
+                            flush_reasoning(
+                                &mut reasoning_blocks,
+                                &mut pending_reasoning,
+                                Some(signature),
+                            );
                         }
                         if let Some(data) = reasoning.redacted_content {
-                            redacted_reasoning.push(data);
+                            flush_reasoning(&mut reasoning_blocks, &mut pending_reasoning, None);
+                            reasoning_blocks.push(json!({"type":"redacted_thinking", "data":data}));
                         }
                     }
                 }
                 Event::ToolUse(tool_use) => {
+                    flush_reasoning(&mut reasoning_blocks, &mut pending_reasoning, None);
                     has_tool_use = true;
 
                     // 累积工具的 JSON 输入
@@ -1283,19 +1304,8 @@ async fn handle_non_stream_request(
     }
 
     // 构建响应内容
-    let mut content: Vec<serde_json::Value> = Vec::new();
-    if !reasoning_text.is_empty() {
-        let mut block = json!({"type":"thinking", "thinking":reasoning_text});
-        if let Some(signature) = reasoning_signature {
-            block["signature"] = json!(signature);
-        }
-        content.push(block);
-    }
-    content.extend(
-        redacted_reasoning
-            .into_iter()
-            .map(|data| json!({"type":"redacted_thinking", "data":data})),
-    );
+    flush_reasoning(&mut reasoning_blocks, &mut pending_reasoning, None);
+    let mut content = reasoning_blocks;
 
     if thinking_enabled {
         // 从完整文本中提取 thinking 块

@@ -1204,21 +1204,20 @@ fn convert_assistant_message(
                     match block.block_type.as_str() {
                         "thinking" => {
                             let text = block.thinking.unwrap_or_default();
-                            if !text.is_empty() || block.signature.is_some() {
+                            if !text.is_empty()
+                                && let Some(signature) =
+                                    block.signature.filter(|s| !s.trim().is_empty())
+                            {
                                 // Kiro can carry one reasoning block. Keep its
                                 // text and signature together, as when merging
                                 // consecutive assistant messages below.
-                                let mut reasoning_text = serde_json::json!({"text": text});
-                                if let Some(signature) = block.signature {
-                                    reasoning_text["signature"] = signature.into();
-                                }
                                 reasoning_content = Some(serde_json::json!({
-                                    "reasoningText": reasoning_text
+                                    "reasoningText": {"text": text, "signature": signature}
                                 }));
                             }
                         }
                         "redacted_thinking" => {
-                            if let Some(data) = block.data {
+                            if let Some(data) = block.data.filter(|s| !s.trim().is_empty()) {
                                 reasoning_content =
                                     Some(serde_json::json!({"redactedContent": data}));
                             }
@@ -2505,6 +2504,49 @@ mod tests {
     }
 
     #[test]
+    fn unsigned_or_empty_reasoning_never_replaces_a_signed_history_block() {
+        let signed = serde_json::json!({"type":"thinking","thinking":"  signed text\n", "signature":"signature-a"});
+        let invalid = vec![
+            serde_json::json!({"type":"thinking","thinking":"unsigned"}),
+            serde_json::json!({"type":"thinking","thinking":"blank signature","signature":"  "}),
+            serde_json::json!({"type":"thinking","thinking":"","signature":"orphan-signature"}),
+            serde_json::json!({"type":"redacted_thinking","data":""}),
+        ];
+        for with_signed in [false, true] {
+            for separate_messages in [false, true] {
+                let mut blocks = invalid.clone();
+                if with_signed {
+                    blocks.insert(0, signed.clone());
+                }
+                let mut messages = vec![serde_json::json!({"role":"user","content":"inspect"})];
+                if separate_messages {
+                    for block in blocks {
+                        messages.push(serde_json::json!({"role":"assistant","content":[block]}));
+                    }
+                } else {
+                    messages.push(serde_json::json!({"role":"assistant","content":blocks}));
+                }
+                messages.push(serde_json::json!({"role":"user","content":"continue"}));
+                let req = tool_validation_request(messages.into());
+                let wire = serde_json::to_value(convert_request(&req).unwrap().conversation_state)
+                    .unwrap();
+                let assistant = &wire["history"][1]["assistantResponseMessage"];
+                if with_signed {
+                    assert_eq!(
+                        assistant["reasoningContent"],
+                        serde_json::json!({
+                            "reasoningText":{"text":"  signed text\n", "signature":"signature-a"}
+                        })
+                    );
+                } else {
+                    assert!(assistant.get("reasoningContent").is_none());
+                }
+                assert!(!assistant["content"].as_str().unwrap().contains("unsigned"));
+            }
+        }
+    }
+
+    #[test]
     fn assistant_reasoning_keeps_one_complete_block_with_its_own_signature() {
         let first = serde_json::json!({"type":"thinking","thinking":"first thought","signature":"first-signature"});
         let second = serde_json::json!({"type":"thinking","thinking":"second thought","signature":"second-signature"});
@@ -2624,10 +2666,7 @@ mod tests {
                     })
                 );
             } else {
-                assert_eq!(
-                    assistant["content"],
-                    "<thinking>Inspect the Rust entry point first.</thinking>\n\nI will read the entry point."
-                );
+                assert_eq!(assistant["content"], "I will read the entry point.");
                 assert!(assistant.get("reasoningContent").is_none());
             }
             let call = &history[3]["assistantResponseMessage"]["toolUses"][0];
@@ -3096,7 +3135,7 @@ mod tests {
         let msg1 = AnthropicMessage {
             role: "assistant".to_string(),
             content: serde_json::json!([
-                {"type": "thinking", "thinking": "Let me think about this..."},
+                {"type": "thinking", "thinking": "Let me think about this...", "signature":"first-signature"},
                 {"type": "text", "text": " "}
             ]),
         };
@@ -3104,7 +3143,7 @@ mod tests {
         let msg2 = AnthropicMessage {
             role: "assistant".to_string(),
             content: serde_json::json!([
-                {"type": "thinking", "thinking": "I should read the file."},
+                {"type": "thinking", "thinking": "I should read the file.", "signature":"second-signature"},
                 {"type": "text", "text": "Let me read that file."},
                 {"type": "tool_use", "id": "toolu_01ABC", "name": "read_file", "input": {"path": "/test.txt"}}
             ]),

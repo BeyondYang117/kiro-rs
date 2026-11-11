@@ -223,19 +223,11 @@ pub(super) fn legacy_thinking_body(body: &str) -> String {
                 if let Some(assistant) = message
                     .get_mut("assistantResponseMessage")
                     .and_then(Value::as_object_mut)
-                    && let Some(reasoning) = assistant.remove("reasoningContent")
-                    && let Some(text) = reasoning
-                        .pointer("/reasoningText/text")
-                        .and_then(Value::as_str)
                 {
-                    let content = assistant
-                        .get("content")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    assistant.insert(
-                        "content".into(),
-                        json!(format!("<thinking>{text}</thinking>\n\n{content}")),
-                    );
+                    // Legacy transport cannot replay authenticated reasoning.
+                    // Never turn it into ordinary assistant text or strip its
+                    // signature and then present it as conversation content.
+                    assistant.remove("reasoningContent");
                 }
             }
         }
@@ -323,10 +315,7 @@ mod tests {
                 .unwrap()
                 .contains("<thinking_effort>low</thinking_effort>")
         );
-        assert_eq!(
-            history[2]["assistantResponseMessage"]["content"],
-            "<thinking>thought</thinking>\n\nanswer"
-        );
+        assert_eq!(history[2]["assistantResponseMessage"]["content"], "answer");
         assert!(
             history[2]["assistantResponseMessage"]
                 .get("reasoningContent")
@@ -340,6 +329,28 @@ mod tests {
             transform(body.clone(), true)["conversationState"],
             body["conversationState"]
         );
+    }
+
+    #[test]
+    fn legacy_reasoning_is_dropped_without_changing_text_or_tools() {
+        for reasoning in [
+            json!({"reasoningText":{"text":"private thought", "signature":"sig"}}),
+            json!({"reasoningText":{"text":"unsigned private thought"}}),
+            json!({"redactedContent":"encrypted"}),
+        ] {
+            let body = json!({"conversationState":{
+                "currentMessage":{"userInputMessage":{"content":"continue", "modelId":"claude-opus-5.5"}},
+                "history":[{"assistantResponseMessage":{"content":"answer", "toolUses":[{"toolUseId":"t1", "name":"Read", "input":{}}], "reasoningContent":reasoning}}]
+            }});
+            let wire = transform(body.clone(), false);
+            let mut expected =
+                body["conversationState"]["history"][0]["assistantResponseMessage"].clone();
+            expected.as_object_mut().unwrap().remove("reasoningContent");
+            assert_eq!(
+                wire["conversationState"]["history"][0]["assistantResponseMessage"],
+                expected
+            );
+        }
     }
 
     #[test]

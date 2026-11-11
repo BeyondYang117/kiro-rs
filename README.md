@@ -568,7 +568,7 @@ Kiro 没有原生 Anthropic 压缩接口，摘要由代理额外调用当前模�
 
 ### Thinking 模式
 
-默认 `ide` 端点沿用旧版提示词标签实现 thinking，恢复升级前的请求协议；这属于提示词引导，不保证精确的推理强度或预算。用户显式传入的设置优先于模型名中的 `-thinking` 别名。普通请求不会附加原生 thinking/effort 字段，历史推理也不会以新版字段发送给旧端点。
+默认 `ide` 端点沿用旧版提示词标签实现 thinking，恢复升级前的请求协议；这属于提示词引导，不保证精确的推理强度或预算。用户显式传入的设置优先于模型名中的 `-thinking` 别名。普通请求不会附加原生 thinking/effort 字段。旧版端点无法安全回放 Anthropic 历史中的推理及签名，因此会从 assistant 历史中移除，不会把推理改写成普通正文；CLI 默认沿用同一规则。启用端点原生 thinking 后，只有带非空签名的文本推理块会进入 Kiro 历史；无签名推理不回放。响应中的多个原生推理阶段会保留各自的文本和签名边界。
 
 支持 Claude Code 的标准强度字段 `output_config.effort`，无需给模型名加 `-thinking`。强度会独立转换为 `<thinking_effort>` 提示词；仅传 effort、使用固定预算 thinking 或显式关闭 thinking 时也会保留强度，不会因为 effort 自动开启思考输出。当前支持的级别按模型校验，不支持的值返回 `400 invalid_request_error`。
 
