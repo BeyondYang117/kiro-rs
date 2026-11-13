@@ -889,6 +889,10 @@ pub(super) async fn post_messages_inner(
 
     apply_thinking_defaults(&mut payload);
 
+    if super::mixed_search::is_mixed_search(&payload) {
+        return super::mixed_search::handle(state, payload).await;
+    }
+
     // 检查是否为 WebSearch 请求
     if websearch::has_web_search_tool(&payload) {
         tracing::info!("检测到 WebSearch 工具，路由到 WebSearch 处理");
@@ -1090,14 +1094,15 @@ pub(super) fn upstream_error_response(error: Error) -> Response {
         "Invalid upstream response: {}",
         crate::request_log::redact(&format!("{error:#}"))
     );
-    (
-        status,
-        Json(ErrorResponse::new(
-            error_type,
-            format!("Upstream response failed: {error:#}"),
-        )),
-    )
-        .into_response()
+    let mut body = serde_json::to_value(ErrorResponse::new(
+        error_type,
+        format!("Upstream response failed: {error:#}"),
+    ))
+    .unwrap();
+    if let Some(reported) = error.downcast_ref::<super::upstream::UpstreamReportedUsage>() {
+        body["usage"] = reported.0.clone();
+    }
+    (status, Json(body)).into_response()
 }
 
 /// 创建 SSE 事件流；上游失败时发送 error，且不发送正常完成事件。
@@ -1169,7 +1174,7 @@ fn flush_reasoning(
 }
 
 /// 处理非流式请求
-async fn handle_non_stream_request(
+pub(super) async fn handle_non_stream_request(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
     request_body: &str,
     model: &str,
@@ -1208,7 +1213,12 @@ async fn handle_non_stream_request(
     while let Some(batch) = event_stream.next().await {
         let events = match batch {
             Ok(events) => events,
-            Err(error) => return upstream_error_response(error),
+            Err(error) => {
+                return upstream_error_response(super::upstream::with_reported_usage(
+                    error,
+                    &reported_usage,
+                ));
+            }
         };
         for event in events {
             match event {
@@ -1487,6 +1497,10 @@ pub(super) async fn post_messages_cc_inner(
     };
 
     apply_thinking_defaults(&mut payload);
+
+    if super::mixed_search::is_mixed_search(&payload) {
+        return super::mixed_search::handle(state, payload).await;
+    }
 
     // 检查是否为 WebSearch 请求
     if websearch::has_web_search_tool(&payload) {

@@ -26,6 +26,7 @@ mod compaction;
 mod converter;
 mod handlers;
 mod middleware;
+mod mixed_search;
 mod router;
 mod stream;
 pub mod types;

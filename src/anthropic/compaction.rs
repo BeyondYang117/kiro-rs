@@ -276,7 +276,7 @@ pub(super) async fn handle_request(
                             .unwrap_or_else(|| json!({
                             "error":{"type":"api_error", "message":"Compaction failed"}
                         }));
-                        SseEvent::new("error", json!({"type":"error", "error":error["error"]})).to_sse_string()
+                        SseEvent::new("error", json!({"type":"error", "error":error["error"], "usage":error["usage"]})).to_sse_string()
                     }
                 };
                 Some((Ok::<_, Infallible>(events), (future, true)))
@@ -537,20 +537,45 @@ async fn perform_compaction(
             ),
         },
     ];
-    let mut response = response_json(dispatch(state, request, cc).await).await?;
+    let mut response = match response_json(dispatch(state, request, cc).await).await {
+        Ok(response) => response,
+        Err(response) => {
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 50 * 1024 * 1024)
+                .await
+                .unwrap_or_default();
+            let mut error: Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+                json!({"error":{"type":"api_error","message":"Compaction continuation failed"}})
+            });
+            if !error["usage"].is_object() {
+                error["usage"] = json!({"input_tokens":0,"output_tokens":0});
+            }
+            prepend_compaction_usage(&mut error, iteration);
+            crate::request_log::response_usage(&error);
+            return Err(Box::new((status, Json(error)).into_response()));
+        }
+    };
     response["content"]
         .as_array_mut()
         .ok_or_else(|| upstream_error("Invalid continuation response"))?
         .insert(0, block);
-    let mut iterations = vec![iteration];
-    let mut message_iteration = response["usage"].clone();
-    message_iteration["type"] = json!("message");
-    iterations.push(message_iteration);
-    response["usage"]["iterations"] = json!(iterations);
+    prepend_compaction_usage(&mut response, iteration);
     Ok(response)
 }
 
-fn message_events(message: &Value) -> String {
+fn prepend_compaction_usage(response: &mut Value, iteration: Value) {
+    let mut iterations = vec![iteration];
+    if let Some(rounds) = response["usage"]["iterations"].as_array() {
+        iterations.extend(rounds.iter().cloned());
+    } else {
+        let mut message_iteration = response["usage"].clone();
+        message_iteration["type"] = json!("message");
+        iterations.push(message_iteration);
+    }
+    response["usage"]["iterations"] = json!(iterations);
+}
+
+pub(super) fn message_events(message: &Value) -> String {
     let mut events = Vec::new();
     let mut start = message.clone();
     start["content"] = json!([]);
@@ -593,12 +618,13 @@ fn message_events(message: &Value) -> String {
                 start_block["text"] = json!("");
                 Some(json!({"type":"text_delta", "text":block["text"]}))
             }
-            Some("tool_use") => {
+            Some("tool_use" | "server_tool_use") => {
                 start_block["input"] = json!({});
                 Some(json!({"type":"input_json_delta", "partial_json":block["input"].to_string()}))
             }
             Some("thinking") => {
                 start_block["thinking"] = json!("");
+                start_block.as_object_mut().unwrap().remove("signature");
                 Some(json!({"type":"thinking_delta", "thinking":block["thinking"]}))
             }
             _ => None,
@@ -614,6 +640,15 @@ fn message_events(message: &Value) -> String {
                 "content_block_delta",
                 json!({
                     "type":"content_block_delta", "index":index, "delta":delta,
+                }),
+            ));
+        }
+        if block["type"] == "thinking" && block["signature"].is_string() {
+            events.push(SseEvent::new(
+                "content_block_delta",
+                json!({
+                    "type":"content_block_delta", "index":index,
+                    "delta":{"type":"signature_delta", "signature":block["signature"]},
                 }),
             ));
         }
@@ -850,21 +885,21 @@ mod tests {
                     let mut requests = captured.lock().unwrap();
                     let request_id = body.get("id").cloned();
                     requests.push(body);
-                    // MCP fixtures can echo the dynamically generated JSON-RPC ID.
-                    let summary = if let Ok(mut value) = serde_json::from_slice::<Value>(&summary)
-                        && value["id"] == "$request"
-                    {
-                        value["id"] = request_id.unwrap_or(Value::Null);
-                        serde_json::to_vec(&value).unwrap()
-                    } else {
-                        summary
-                    };
                     let bytes = if let Some(responses) = responses {
                         responses[(requests.len() - 1).min(responses.len() - 1)].clone()
                     } else if requests.len() == 1 {
                         summary
                     } else {
                         frame("assistantResponseEvent", json!({"content":"continued"}))
+                    };
+                    // Scripted generation -> MCP -> generation sequences also echo IDs.
+                    let bytes = if let Ok(mut value) = serde_json::from_slice::<Value>(&bytes)
+                        && value["id"] == "$request"
+                    {
+                        value["id"] = request_id.unwrap_or(Value::Null);
+                        serde_json::to_vec(&value).unwrap()
+                    } else {
+                        bytes
                     };
                     let chunks = stream::once(async move { Ok::<_, std::io::Error>(bytes) }).chain(
                         stream::once(async move {
@@ -2507,6 +2542,10 @@ mod tests {
                 for invalid in [
                     json!([{"type":"text_editor_20250124","name":"str_replace_editor"}]),
                     json!([{"type":"web_search_20250305","name":"web_search","input_schema":{"type":"object"}}]),
+                    json!([
+                        {"name":"lookup","input_schema":{"type":"object"}},
+                        {"type":"web_search_20250305","name":"web_search","input_schema":{"type":"object"}}
+                    ]),
                     json!([{"name":"web_search","input_schema":{"type":"object","properties":{"query":{"type":"object","enum":["test"]}}}}]),
                 ] {
                     payload["tools"] = invalid;
@@ -3961,6 +4000,737 @@ mod tests {
             {"type":"image", "data":"ignored", "mimeType":"image/png"},
             {"type":"text", "text":results.to_string()}
         ]}})
+    }
+
+    fn native_search_call(id: &str) -> Vec<u8> {
+        frame(
+            "toolUseEvent",
+            json!({"toolUseId":id,"name":"kiro_native_web_search",
+            "input":"{\"query\":\"Rust 新闻🦀\"}","stop":true}),
+        )
+    }
+
+    async fn mixed_message(response: Response, streaming: bool) -> Value {
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 2_000_000).await.unwrap();
+        if !streaming {
+            return serde_json::from_slice(&bytes).unwrap();
+        }
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        let mut message = json!({});
+        let mut blocks = Vec::<Value>::new();
+        let mut stopped = false;
+        for data in text.lines().filter_map(|line| line.strip_prefix("data: ")) {
+            let event: Value = serde_json::from_str(data).unwrap();
+            match event["type"].as_str().unwrap() {
+                "message_start" => message = event["message"].clone(),
+                "content_block_start" => {
+                    assert_eq!(event["index"].as_u64().unwrap() as usize, blocks.len());
+                    blocks.push(event["content_block"].clone());
+                }
+                "content_block_delta" => {
+                    let index = event["index"].as_u64().unwrap() as usize;
+                    match event["delta"]["type"].as_str().unwrap() {
+                        "text_delta" => {
+                            let value = format!(
+                                "{}{}",
+                                blocks[index]["text"].as_str().unwrap_or_default(),
+                                event["delta"]["text"].as_str().unwrap()
+                            );
+                            blocks[index]["text"] = json!(value);
+                        }
+                        "thinking_delta" | "signature_delta" => {
+                            let field = if event["delta"]["type"] == "thinking_delta" {
+                                "thinking"
+                            } else {
+                                "signature"
+                            };
+                            blocks[index][field] = json!(format!(
+                                "{}{}",
+                                blocks[index][field].as_str().unwrap_or_default(),
+                                event["delta"][field].as_str().unwrap()
+                            ));
+                        }
+                        "input_json_delta" => {
+                            blocks[index]["input"] = serde_json::from_str(
+                                event["delta"]["partial_json"].as_str().unwrap(),
+                            )
+                            .unwrap()
+                        }
+                        _ => {}
+                    }
+                }
+                "message_delta" => {
+                    message["usage"] = event["usage"].clone();
+                    message["stop_reason"] = event["delta"]["stop_reason"].clone();
+                }
+                "message_stop" => stopped = true,
+                "error" => panic!("{event}"),
+                _ => {}
+            }
+        }
+        assert!(stopped);
+        message["content"] = json!(blocks);
+        message
+    }
+
+    fn mixed_request(streaming: bool) -> MessagesRequest {
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../../testdata/abu_api_tool_compatibility.json"
+        ))
+        .unwrap();
+        let mut value = fixtures
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == "function tools with native web search")
+            .unwrap()["request"]
+            .clone();
+        value["stream"] = json!(streaming);
+        request(value)
+    }
+
+    #[tokio::test]
+    async fn mixed_native_search_compaction_keeps_flat_usage_on_success_and_failure() {
+        for cc in [false, true] {
+            for streaming in [false, true] {
+                for fail in [false, true] {
+                    let with_usage = |mut bytes: Vec<u8>, input, output| {
+                        bytes.extend(frame(
+                            "metadataEvent",
+                            json!({"tokenUsage":{
+                                "uncachedInputTokens":input,"outputTokens":output
+                            }}),
+                        ));
+                        bytes
+                    };
+                    let upstream = mock_scripted(vec![
+                        with_usage(
+                            frame("assistantResponseEvent", json!({"content":"summary"})),
+                            100,
+                            10,
+                        ),
+                        with_usage(native_search_call("a"), 17, 23),
+                        serde_json::to_vec(&mcp_search_response(json!({"results":[]}))).unwrap(),
+                        if fail {
+                            refusal_response()
+                        } else {
+                            with_usage(
+                                frame("assistantResponseEvent", json!({"content":"answer"})),
+                                19,
+                                29,
+                            )
+                        },
+                    ])
+                    .await;
+                    let mut payload = mixed_request(streaming);
+                    payload.messages = vec![Message {
+                        role: "user".into(),
+                        content: json!("x".repeat(210_000)),
+                    }];
+                    payload.context_management = Some(json!({"edits":[{"type":"compact_20260112",
+                        "trigger":{"type":"input_tokens","value":50000}}]}));
+                    let response = handle_request(upstream.state.clone(), payload, cc).await;
+                    let message = if fail {
+                        let bytes = to_bytes(response.into_body(), 2_000_000).await.unwrap();
+                        if streaming {
+                            let text = String::from_utf8(bytes.to_vec()).unwrap();
+                            assert!(!text.contains("event: message_stop"));
+                            let data = text
+                                .lines()
+                                .find_map(|l| {
+                                    l.strip_prefix("data: ")
+                                        .filter(|data| data.contains("\"type\":\"error\""))
+                                })
+                                .unwrap();
+                            serde_json::from_str::<Value>(data).unwrap()
+                        } else {
+                            serde_json::from_slice::<Value>(&bytes).unwrap()
+                        }
+                    } else {
+                        mixed_message(response, streaming).await
+                    };
+                    let iterations = message["usage"]["iterations"].as_array().unwrap();
+                    assert_eq!(iterations.len(), if fail { 2 } else { 3 });
+                    assert_eq!(iterations[0]["type"], "compaction");
+                    assert_eq!(iterations[0]["input_tokens"], 100);
+                    assert_eq!(iterations[0]["output_tokens"], 10);
+                    assert_eq!(iterations[1]["type"], "message");
+                    assert_eq!(iterations[1]["input_tokens"], 17);
+                    assert!(
+                        iterations
+                            .iter()
+                            .all(|round| round.get("iterations").is_none())
+                    );
+                    assert_eq!(message["usage"]["input_tokens"], if fail { 17 } else { 36 });
+                    assert_eq!(
+                        message["usage"]["output_tokens"],
+                        if fail { 23 } else { 52 }
+                    );
+                    assert_eq!(
+                        message["usage"]["server_tool_use"]["web_search_requests"],
+                        1
+                    );
+                    assert_eq!(upstream.requests.lock().unwrap().len(), 4);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_native_search_stream_emits_thinking_signature_before_tool_continuation() {
+        let mut bytes = frame(
+            "reasoningContentEvent",
+            json!({"text":"search first", "signature":"sig-a"}),
+        );
+        bytes.extend(native_search_call("search-a"));
+        bytes.extend(frame(
+            "toolUseEvent",
+            json!({"toolUseId":"client-a","name":"lookup","input":"{\"mode\":\"read\",\"path\":\"test\"}","stop":true}),
+        ));
+        let upstream = mock_scripted(vec![
+            bytes,
+            serde_json::to_vec(&mcp_search_response(json!({"results":[]}))).unwrap(),
+            frame("assistantResponseEvent", json!({"content":"done"})),
+        ])
+        .await;
+        let mut payload = mixed_request(true);
+        payload.model = "claude-opus-5-5".into();
+        payload.thinking = Some(Thinking {
+            thinking_type: "enabled".into(),
+            budget_tokens: 2048,
+            display: None,
+        });
+        let response = dispatch(upstream.state.clone(), payload.clone(), true).await;
+        let bytes = to_bytes(response.into_body(), 2_000_000).await.unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        let events: Vec<Value> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .map(|data| serde_json::from_str(data).unwrap())
+            .collect();
+        let start = events
+            .iter()
+            .position(|e| e["content_block"]["type"] == "thinking")
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(events[start]["content_block"].get("signature").is_none());
+        assert_eq!(events[start + 1]["delta"]["type"], "thinking_delta");
+        assert_eq!(
+            events[start + 2]["delta"],
+            json!({"type":"signature_delta","signature":"sig-a"})
+        );
+        assert_eq!(events[start + 3]["type"], "content_block_stop");
+        let message = mixed_message(
+            ([(header::CONTENT_TYPE, "text/event-stream")], text).into_response(),
+            true,
+        )
+        .await;
+        assert_eq!(message["content"][0]["signature"], "sig-a");
+        payload.messages.push(Message {
+            role: "assistant".into(),
+            content: message["content"].clone(),
+        });
+        payload.messages.push(Message {role:"user".into(),content:json!([{"type":"tool_result","tool_use_id":"client-a","content":"client done"}])});
+        let mut replay_payload = payload.clone();
+        replay_payload
+            .tools
+            .as_mut()
+            .unwrap()
+            .retain(|tool| tool.tool_type.as_deref() != Some("web_search_20250305"));
+        let replay = serde_json::to_value(
+            super::super::converter::convert_request(&replay_payload)
+                .unwrap()
+                .conversation_state,
+        )
+        .unwrap();
+        assert!(
+            replay["history"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["assistantResponseMessage"]["reasoningContent"]
+                    == json!({"reasoningText":{"text":"search first","signature":"sig-a"}}))
+        );
+        let next = mixed_message(dispatch(upstream.state.clone(), payload, true).await, true).await;
+        assert_eq!(next["content"][0]["text"], "done");
+        assert_eq!(upstream.requests.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn mixed_native_search_executes_mcp_and_preserves_client_continuations() {
+        for cc in [false, true] {
+            for streaming in [false, true] {
+                for parallel in [false, true] {
+                    let mut first = native_search_call("search-a");
+                    let client = frame(
+                        "toolUseEvent",
+                        json!({"toolUseId":"client-a","name":"lookup",
+                        "input":"{\"mode\":\"read\",\"path\":\"test\"}","stop":true}),
+                    );
+                    if parallel {
+                        first.extend(client.clone());
+                    }
+                    let search = serde_json::to_vec(&mcp_search_response(json!({"results":[
+                        {"title":"Rust 新闻🦀","url":"https://example.com/rust","snippet":"最新消息"}
+                    ]}))).unwrap();
+                    let mut responses = vec![first, search];
+                    if !parallel {
+                        responses.push(client);
+                    }
+                    responses.push(frame("assistantResponseEvent", json!({"content":"done"})));
+                    let upstream = mock_scripted(responses).await;
+                    let mut payload = mixed_request(streaming);
+                    let message = mixed_message(
+                        dispatch(upstream.state.clone(), payload.clone(), cc).await,
+                        streaming,
+                    )
+                    .await;
+                    assert_eq!(message["stop_reason"], "tool_use");
+                    assert_eq!(
+                        message["usage"]["server_tool_use"]["web_search_requests"],
+                        1
+                    );
+                    assert_eq!(
+                        message["usage"]["iterations"].as_array().unwrap().len(),
+                        if parallel { 1 } else { 2 }
+                    );
+                    let blocks = message["content"].as_array().unwrap();
+                    let server = blocks
+                        .iter()
+                        .find(|b| b["type"] == "server_tool_use")
+                        .unwrap();
+                    assert_eq!(server["name"], "web_search");
+                    assert!(server["id"].as_str().unwrap().starts_with("srvtoolu_"));
+                    let result = blocks
+                        .iter()
+                        .find(|b| b["type"] == "web_search_tool_result")
+                        .unwrap();
+                    assert_eq!(result["tool_use_id"], server["id"]);
+                    assert_eq!(result["content"][0]["url"], "https://example.com/rust");
+                    let client = blocks.iter().find(|b| b["type"] == "tool_use").unwrap();
+                    assert_eq!(client["id"], "client-a");
+                    assert_eq!(client["name"], "lookup");
+                    assert_eq!(client["input"]["mode"], "read");
+                    assert!(!message.to_string().contains("kiro_native_web_search"));
+                    let expected = if parallel { 2 } else { 3 };
+                    {
+                        let requests = upstream.requests.lock().unwrap();
+                        assert_eq!(requests.len(), expected);
+                        let context = &requests[0]["conversationState"]["currentMessage"]["userInputMessage"]
+                            ["userInputMessageContext"];
+                        assert_eq!(context["tools"].as_array().unwrap().len(), 58);
+                        assert_eq!(
+                            context["tools"][57]["toolSpecification"]["name"],
+                            "kiro_native_web_search"
+                        );
+                        assert_eq!(requests[1]["method"], "tools/call");
+                        assert_eq!(requests[1]["params"]["arguments"]["query"], "Rust 新闻🦀");
+                        if !parallel {
+                            assert_eq!(
+                                requests[0]["conversationState"]["conversationId"],
+                                requests[2]["conversationState"]["conversationId"]
+                            );
+                            let result = &requests[2]["conversationState"]["currentMessage"]["userInputMessage"]
+                                ["userInputMessageContext"]["toolResults"][0];
+                            assert_eq!(result["toolUseId"], "search-a");
+                            assert!(result.to_string().contains("https://example.com/rust"));
+                        }
+                    }
+                    payload.messages.push(Message {
+                        role: "assistant".into(),
+                        content: message["content"].clone(),
+                    });
+                    payload.messages.push(Message { role:"user".into(), content:json!([
+                        {"type":"tool_result","tool_use_id":"client-a","content":"client complete"}
+                    ]) });
+                    let next = mixed_message(
+                        dispatch(upstream.state.clone(), payload, cc).await,
+                        streaming,
+                    )
+                    .await;
+                    assert_eq!(next["content"][0]["text"], "done");
+                    assert_eq!(next["usage"]["server_tool_use"]["web_search_requests"], 0);
+                    let requests = upstream.requests.lock().unwrap();
+                    assert_eq!(requests.len(), expected + 1);
+                    let last = requests.last().unwrap();
+                    assert!(last.to_string().contains("https://example.com/rust"));
+                    assert!(last.to_string().contains("client complete"));
+                    assert!(!last.to_string().contains("srvtoolu_\""));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_native_search_limit_errors_and_tool_name_collisions() {
+        for streaming in [false, true] {
+            // A client tool named web_search remains a client call.
+            let client = frame(
+                "toolUseEvent",
+                json!({"toolUseId":"client-search","name":"web_search",
+                "input":"{\"query\":\"client query\"}","stop":true}),
+            );
+            let upstream = mock(client).await;
+            let mut payload = mixed_request(streaming);
+            payload.tools.as_mut().unwrap()[0].name = "web_search".into();
+            payload.tools.as_mut().unwrap()[0].input_schema = serde_json::from_value(
+                json!({"type":"object","properties":{"query":{"type":"string"}}}),
+            )
+            .unwrap();
+            let message = mixed_message(
+                dispatch(upstream.state.clone(), payload, false).await,
+                streaming,
+            )
+            .await;
+            assert_eq!(message["content"][0]["type"], "tool_use");
+            assert_eq!(message["content"][0]["id"], "client-search");
+            assert_eq!(upstream.requests.lock().unwrap().len(), 1);
+
+            let search = serde_json::to_vec(&mcp_search_response(json!({"results":[]}))).unwrap();
+            let upstream = mock_scripted(vec![
+                native_search_call("a"),
+                search,
+                native_search_call("b"),
+            ])
+            .await;
+            let mut payload = mixed_request(streaming);
+            payload.tools.as_mut().unwrap()[57].max_uses = Some(1);
+            let message = mixed_message(
+                dispatch(upstream.state.clone(), payload, false).await,
+                streaming,
+            )
+            .await;
+            assert_eq!(message["stop_reason"], "pause_turn");
+            assert_eq!(
+                message["usage"]["server_tool_use"]["web_search_requests"],
+                1
+            );
+            assert!(message.to_string().contains("max_uses_exceeded"));
+            assert_eq!(upstream.requests.lock().unwrap().len(), 3);
+
+            let upstream =
+                mock_scripted(vec![native_search_call("a"), b"invalid MCP".to_vec()]).await;
+            let response = dispatch(upstream.state.clone(), mixed_request(streaming), false).await;
+            if !streaming {
+                assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            }
+            let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+            let text = String::from_utf8_lossy(&body);
+            assert!(text.contains("error"));
+            assert!(!text.contains("message_stop"));
+            assert_eq!(upstream.requests.lock().unwrap().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_native_search_later_failures_preserve_completed_usage() {
+        for cc in [false, true] {
+            for streaming in [false, true] {
+                for fail_mcp in [false, true] {
+                    let mut first = native_search_call("a");
+                    first.extend(frame("metadataEvent", json!({"tokenUsage":{
+                        "uncachedInputTokens":17,"outputTokens":23,"cacheReadInputTokens":5,"cacheWriteInputTokens":3
+                    }})));
+                    let mut responses = vec![first];
+                    if fail_mcp {
+                        responses.push(b"invalid MCP".to_vec());
+                    } else {
+                        responses.push(
+                            serde_json::to_vec(&mcp_search_response(json!({"results":[]})))
+                                .unwrap(),
+                        );
+                        responses.push(refusal_response());
+                    }
+                    let upstream = mock_scripted(responses).await;
+                    let response =
+                        dispatch(upstream.state.clone(), mixed_request(streaming), cc).await;
+                    if !streaming {
+                        assert!(!response.status().is_success());
+                    }
+                    let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                    let text = String::from_utf8_lossy(&body);
+                    let error: Value = if streaming {
+                        assert!(!text.contains("message_stop"));
+                        serde_json::from_str(
+                            text.lines().find_map(|s| s.strip_prefix("data: ")).unwrap(),
+                        )
+                        .unwrap()
+                    } else {
+                        serde_json::from_slice(&body).unwrap()
+                    };
+                    assert!(error["error"].is_object());
+                    assert_eq!(error["usage"]["input_tokens"], 17);
+                    assert_eq!(error["usage"]["output_tokens"], 23);
+                    assert_eq!(error["usage"]["cache_read_input_tokens"], 5);
+                    assert_eq!(error["usage"]["cache_creation_input_tokens"], 3);
+                    assert_eq!(error["usage"]["iterations"].as_array().unwrap().len(), 1);
+                    assert_eq!(error["usage"]["iterations"][0]["type"], "message");
+                    if !fail_mcp {
+                        assert_eq!(error["usage"]["server_tool_use"]["web_search_requests"], 1);
+                    }
+                    assert_eq!(
+                        upstream.requests.lock().unwrap().len(),
+                        if fail_mcp { 2 } else { 3 }
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_native_search_preserves_reported_usage_from_a_failed_generation() {
+        for streaming in [false, true] {
+            for after_search in [false, true] {
+                let usage = |input, output, read, write| {
+                    frame(
+                        "metadataEvent",
+                        json!({"tokenUsage":{
+                            "uncachedInputTokens":input,"outputTokens":output,
+                            "cacheReadInputTokens":read,"cacheWriteInputTokens":write
+                        }}),
+                    )
+                };
+                let mut failed = frame("assistantResponseEvent", json!({"content":"partial"}));
+                failed.extend(usage(19, 29, 7, 5));
+                failed.extend(refusal_response());
+                let responses = if after_search {
+                    let mut first = native_search_call("a");
+                    first.extend(usage(17, 23, 5, 3));
+                    vec![
+                        first,
+                        serde_json::to_vec(&mcp_search_response(json!({"results":[]}))).unwrap(),
+                        failed,
+                    ]
+                } else {
+                    vec![failed]
+                };
+                let upstream = mock_scripted(responses).await;
+                let response =
+                    dispatch(upstream.state.clone(), mixed_request(streaming), true).await;
+                if !streaming {
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                }
+                let bytes = to_bytes(response.into_body(), 2_000_000).await.unwrap();
+                let error: Value = if streaming {
+                    let text = String::from_utf8(bytes.to_vec()).unwrap();
+                    assert!(!text.contains("event: message_stop"));
+                    serde_json::from_str(
+                        text.lines().find_map(|l| l.strip_prefix("data: ")).unwrap(),
+                    )
+                    .unwrap()
+                } else {
+                    serde_json::from_slice(&bytes).unwrap()
+                };
+                assert_eq!(
+                    error["usage"]["input_tokens"],
+                    if after_search { 36 } else { 19 }
+                );
+                assert_eq!(
+                    error["usage"]["output_tokens"],
+                    if after_search { 52 } else { 29 }
+                );
+                assert_eq!(
+                    error["usage"]["cache_read_input_tokens"],
+                    if after_search { 12 } else { 7 }
+                );
+                assert_eq!(
+                    error["usage"]["cache_creation_input_tokens"],
+                    if after_search { 8 } else { 5 }
+                );
+                assert_eq!(
+                    error["usage"]["iterations"].as_array().unwrap().len(),
+                    if after_search { 2 } else { 1 }
+                );
+                if after_search {
+                    assert_eq!(error["usage"]["server_tool_use"]["web_search_requests"], 1);
+                }
+                assert_eq!(
+                    upstream.requests.lock().unwrap().len(),
+                    if after_search { 3 } else { 1 }
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_native_search_repeated_ids_and_case_variants_keep_pairs_unique() {
+        let mut first = native_search_call("call-1"); // Also present in the client history.
+        first.extend(frame(
+            "metadataEvent",
+            json!({"tokenUsage":{"uncachedInputTokens":10,"outputTokens":2}}),
+        ));
+        let mut second = frame(
+            "toolUseEvent",
+            json!({"toolUseId":"call-1","name":"KIRO_NATIVE_WEB_SEARCH",
+            "input":"{\"query\":\"second query\"}","stop":true}),
+        );
+        second.extend(frame(
+            "metadataEvent",
+            json!({"tokenUsage":{"uncachedInputTokens":20,"outputTokens":3}}),
+        ));
+        let client = frame(
+            "toolUseEvent",
+            json!({"toolUseId":"call-1","name":"lookup",
+            "input":"{\"mode\":\"read\",\"path\":\"test\"}","stop":true}),
+        );
+        let mcp = serde_json::to_vec(&mcp_search_response(json!({"results":[]}))).unwrap();
+        let upstream = mock_scripted(vec![
+            first,
+            mcp.clone(),
+            second,
+            mcp,
+            client,
+            frame(
+                "assistantResponseEvent",
+                json!({"content":"finished continuation"}),
+            ),
+        ])
+        .await;
+        let mut payload = mixed_request(true);
+        let message = mixed_message(
+            dispatch(upstream.state.clone(), payload.clone(), true).await,
+            true,
+        )
+        .await;
+        assert_eq!(
+            message["usage"]["server_tool_use"]["web_search_requests"],
+            2
+        );
+        assert_eq!(message["usage"]["iterations"].as_array().unwrap().len(), 3);
+        let blocks = message["content"].as_array().unwrap();
+        let ids: Vec<_> = blocks.iter().filter_map(|b| b["id"].as_str()).collect();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(
+            ids.iter().collect::<std::collections::HashSet<_>>().len(),
+            3
+        );
+        let client = blocks.iter().find(|b| b["type"] == "tool_use").unwrap();
+        assert_ne!(client["id"], "call-1");
+        assert!(!message.to_string().contains("KIRO_NATIVE_WEB_SEARCH"));
+        {
+            let requests = upstream.requests.lock().unwrap();
+            for index in [2, 4] {
+                let state = &requests[index]["conversationState"];
+                let current = &state["currentMessage"]["userInputMessage"]["userInputMessageContext"]
+                    ["toolResults"][0]["toolUseId"];
+                let calls: Vec<_> = state["history"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|m| m["assistantResponseMessage"]["toolUses"].as_array())
+                    .flatten()
+                    .collect();
+                assert!(calls.iter().any(|call| &call["toolUseId"] == current));
+            }
+        }
+        payload.messages.push(Message {
+            role: "assistant".into(),
+            content: message["content"].clone(),
+        });
+        payload.messages.push(Message {
+            role: "user".into(),
+            content: json!([{"type":"tool_result","tool_use_id":client["id"],"content":"done"}]),
+        });
+        let next = mixed_message(dispatch(upstream.state.clone(), payload, true).await, true).await;
+        assert_eq!(next["stop_reason"], "end_turn");
+        assert_eq!(next["content"][0]["text"], "finished continuation");
+        assert_eq!(upstream.requests.lock().unwrap().len(), 6);
+    }
+
+    #[tokio::test]
+    async fn mixed_native_search_filters_domains_aggregates_usage_and_keeps_aliases_private() {
+        for (key, domain, expected_url) in [
+            (
+                "allowed_domains",
+                "example.com",
+                "https://news.example.com/rust",
+            ),
+            ("blocked_domains", "example.com", "https://other.test/rust"),
+        ] {
+            let mut first = native_search_call("a");
+            first.extend(frame(
+                "metadataEvent",
+                json!({"stopReason":"tool_use","tokenUsage":{
+                    "uncachedInputTokens":17,"outputTokens":23,"cacheReadInputTokens":5
+                }}),
+            ));
+            let mut last = frame(
+                "assistantResponseEvent",
+                json!({"content":"answer with results"}),
+            );
+            last.extend(frame(
+                "metadataEvent",
+                json!({"stopReason":"end_turn","tokenUsage":{
+                    "uncachedInputTokens":19,"outputTokens":29,"cacheReadInputTokens":7
+                }}),
+            ));
+            let upstream =
+                mock_scripted(
+                    vec![first, serde_json::to_vec(&mcp_search_response(json!({"results":[
+                {"title":"Rust","url":"https://news.example.com/rust","snippet":"allowed"},
+                {"title":"Other","url":"https://other.test/rust","snippet":"other"},
+                {"title":"Lookalike","url":"https://notexample.com/rust","snippet":"lookalike"}
+            ]}))).unwrap(), last],
+                )
+                .await;
+            let mut payload = mixed_request(false);
+            let native = &mut payload.tools.as_mut().unwrap()[57];
+            native.options.insert(key.into(), json!([domain]));
+            native.options.insert(
+                "user_location".into(),
+                json!({"type":"approximate","city":"Shanghai"}),
+            );
+            let message =
+                mixed_message(dispatch(upstream.state.clone(), payload, true).await, false).await;
+            assert_eq!(message["usage"]["input_tokens"], 36);
+            assert_eq!(message["usage"]["output_tokens"], 52);
+            assert_eq!(message["usage"]["cache_read_input_tokens"], 12);
+            let content = message["content"].as_array().unwrap();
+            let results = &content
+                .iter()
+                .find(|b| b["type"] == "web_search_tool_result")
+                .unwrap()["content"];
+            assert!(results.to_string().contains(expected_url));
+            assert_eq!(
+                results.as_array().unwrap().len(),
+                if key == "allowed_domains" { 1 } else { 2 }
+            );
+            let requests = upstream.requests.lock().unwrap();
+            let query = requests[1]["params"]["arguments"]["query"]
+                .as_str()
+                .unwrap();
+            assert!(query.contains("site:example.com"));
+            assert!(query.contains("Shanghai"));
+            assert_eq!(message["stop_reason"], "end_turn");
+        }
+        // Selecting a client tool whose name matches the proxy's default private
+        // name must not cause an MCP call or consume a search allowance.
+        let upstream = mock(frame(
+            "toolUseEvent",
+            json!({"toolUseId":"client-private","name":"kiro_native_web_search",
+            "input":"{}","stop":true}),
+        ))
+        .await;
+        let mut payload = mixed_request(false);
+        payload.tools.as_mut().unwrap()[1].name = "kiro_native_web_search".into();
+        let message = mixed_message(
+            dispatch(upstream.state.clone(), payload, false).await,
+            false,
+        )
+        .await;
+        assert_eq!(message["content"][0]["type"], "tool_use");
+        assert_eq!(message["content"][0]["id"], "client-private");
+        assert_eq!(
+            message["usage"]["server_tool_use"]["web_search_requests"],
+            0
+        );
+        let requests = upstream.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]["conversationState"]["currentMessage"]["userInputMessage"]["userInputMessageContext"]
+                ["tools"][57]["toolSpecification"]["name"],
+            "kiro_native_web_search_"
+        );
     }
 
     #[tokio::test]

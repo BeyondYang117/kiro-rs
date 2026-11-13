@@ -560,13 +560,11 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
     if let Some(tools) = &req.tools {
         let mut names = HashMap::new();
         for (index, tool) in tools.iter().enumerate() {
-            if tool
-                .tool_type
-                .as_deref()
-                .is_some_and(|kind| kind != "custom")
-            {
+            if let Some(kind) = tool.tool_type.as_deref().filter(|kind| *kind != "custom") {
+                let hint = "client tools must omit type (or use custom) and supply input_schema; native server tools must use the server execution route";
                 return Err(ConversionError::InvalidToolFormat(format!(
-                    "tools[{index}].type is not supported as a client tool; supply an input_schema instead"
+                    "tools[{index}].type {kind:?} (name={:?}) is not supported as a client tool; {hint}",
+                    tool.name
                 )));
             }
             validate_schema_constraints(
@@ -1402,6 +1400,12 @@ fn convert_assistant_message(
                                     .push(ToolUseEntry::new(id, mapped_name).with_input(input));
                             }
                         }
+                        "server_tool_use" | "web_search_tool_result" => {
+                            // Server tools are already executed. Preserve their context on
+                            // client continuation without creating pending client tool calls.
+                            text_content.push_str(&item.to_string());
+                            text_content.push('\n');
+                        }
                         _ => {}
                     }
                 }
@@ -1941,6 +1945,7 @@ mod tests {
                 input_schema: schema,
                 tool_type: None,
                 max_uses: None,
+                options: Default::default(),
             }]),
             thinking: None,
             tool_choice: None,
@@ -2012,6 +2017,7 @@ mod tests {
                 input_schema: schema,
                 tool_type: None,
                 max_uses: None,
+                options: Default::default(),
             }]),
             thinking: None,
             tool_choice: None,

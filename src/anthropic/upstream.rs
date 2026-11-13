@@ -18,6 +18,33 @@ const MAX_EMPTY_PREFIX_BYTES: usize = 1024 * 1024;
 // Bound memory while withholding tool calls until their arguments are valid.
 const MAX_TOOL_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
+/// Exact counters can precede an error in the same network chunk. Carry only
+/// reported usage through validation errors; never bill local estimates on failure.
+#[derive(Debug)]
+pub(super) struct UpstreamReportedUsage(pub serde_json::Value);
+
+impl std::fmt::Display for UpstreamReportedUsage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Upstream reported usage before failure")
+    }
+}
+
+pub(super) fn with_reported_usage(
+    error: anyhow::Error,
+    reported: &crate::kiro::model::events::ReportedUsage,
+) -> anyhow::Error {
+    if error.downcast_ref::<UpstreamReportedUsage>().is_some() {
+        return error;
+    }
+    let mut usage = serde_json::json!({});
+    reported.apply(&mut usage);
+    if usage.as_object().is_some_and(|fields| !fields.is_empty()) {
+        error.context(UpstreamReportedUsage(usage))
+    } else {
+        error
+    }
+}
+
 /// An explicit upstream refusal is terminal; replaying the request cannot repair it.
 #[derive(Debug)]
 pub(super) struct UpstreamRefusalError(String);
@@ -242,17 +269,21 @@ pub(super) fn response_events(
                             "timeout",
                             message,
                         );
-                        anyhow::anyhow!(message)
+                        with_reported_usage(anyhow::anyhow!(message), &state.decoder.reported_usage)
                     })?;
                 if let Some(chunk) = next {
-                    let chunk = chunk.inspect_err(|error| {
-                        state.decoder.record_failure(
-                            state.credential_id,
-                            state.retries + usize::from(state.recoveries) + 1,
-                            "read_error",
-                            crate::request_log::error_chain(error),
-                        );
-                    })?;
+                    let chunk = chunk
+                        .inspect_err(|error| {
+                            state.decoder.record_failure(
+                                state.credential_id,
+                                state.retries + usize::from(state.recoveries) + 1,
+                                "read_error",
+                                crate::request_log::error_chain(error),
+                            );
+                        })
+                        .map_err(|error| {
+                            with_reported_usage(error.into(), &state.decoder.reported_usage)
+                        })?;
                     state.response_bytes = state.response_bytes.saturating_add(chunk.len());
                     if state.response_bytes > limits.max_response_bytes {
                         state.decoder.record_failure(
@@ -376,7 +407,7 @@ pub(super) fn response_events(
                     {
                         continue;
                     }
-                    return Err(error);
+                    return Err(with_reported_usage(error, &state.decoder.reported_usage));
                 }
                 // Release the credential reservation before any retry/backoff.
                 state.body.take();
@@ -520,6 +551,7 @@ pub(crate) struct UpstreamResponseDecoder {
     tool_buffer_bytes: usize,
     context_full: bool,
     diagnostics: UpstreamResponseDiagnostics,
+    reported_usage: crate::kiro::model::events::ReportedUsage,
 }
 
 impl UpstreamResponseDecoder {
@@ -605,6 +637,11 @@ impl UpstreamResponseDecoder {
     }
 
     pub fn feed(&mut self, chunk: &[u8]) -> anyhow::Result<Vec<Event>> {
+        self.decode_chunk(chunk)
+            .map_err(|error| with_reported_usage(error, &self.reported_usage))
+    }
+
+    fn decode_chunk(&mut self, chunk: &[u8]) -> anyhow::Result<Vec<Event>> {
         self.diagnostics.body_bytes += chunk.len() as u64;
         self.diagnostics.chunks += 1;
         // An early error may leave complete frames in the buffer. Only call
@@ -676,6 +713,7 @@ impl UpstreamResponseDecoder {
                     self.diagnostics.tool_input_bytes += tool.input.len() as u64
                 }
                 Event::Metadata(metadata) => {
+                    self.reported_usage.observe(metadata);
                     if let Some(reason) = metadata.stop_reason.as_deref() {
                         self.diagnostics.stop_reason = Some(diagnostic_label(reason));
                     }

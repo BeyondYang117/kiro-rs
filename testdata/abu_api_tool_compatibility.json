@@ -1250,6 +1250,455 @@
     }
   },
   {
+    "name": "function tools with native web search",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "synthetic",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "...",
+              "type": "text"
+            },
+            {
+              "id": "call-1",
+              "input": {
+                "mode": "read",
+                "optional": "text",
+                "path": "test",
+                "value": null,
+                "values": [
+                  1
+                ]
+              },
+              "name": "lookup",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "synthetic",
+              "tool_use_id": "call-1",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5-5",
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "description": "synthetic",
+          "input_schema": {
+            "$defs": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "enum": [
+                  "read",
+                  "write"
+                ]
+              },
+              "optional": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "$ref": "#/$defs/path"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "values": {
+                "items": {
+                  "enum": [
+                    1,
+                    2
+                  ]
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          "name": "lookup"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_x"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "input_schema": {
+            "type": "object"
+          },
+          "name": "lookup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "name": "web_search",
+          "type": "web_search_20250305"
+        }
+      ]
+    }
+  },
+  {
     "name": "omitted type",
     "request": {
       "max_tokens": 1024,

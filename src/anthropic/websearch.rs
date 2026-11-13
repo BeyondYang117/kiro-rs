@@ -228,7 +228,7 @@ fn parse_search_results(response: &McpResponse) -> anyhow::Result<WebSearchResul
 }
 
 /// JSON 与 SSE 使用同一条完整消息，保持工具关联和 usage 一致。
-fn create_websearch_message(
+pub(super) fn create_websearch_message(
     model: &str,
     query: &str,
     tool_use_id: &str,
@@ -398,7 +398,7 @@ pub async fn handle_websearch_request(
 }
 
 /// 调用 Kiro MCP API
-async fn call_mcp_api(
+pub(super) async fn call_mcp_api(
     provider: &crate::kiro::provider::KiroProvider,
     request: &McpRequest,
 ) -> anyhow::Result<WebSearchResults> {
@@ -445,6 +445,7 @@ mod tests {
                 description: String::new(),
                 input_schema: Default::default(),
                 max_uses: Some(8),
+                options: Default::default(),
             }]),
             tool_choice: None,
             extra_controls: Default::default(),
@@ -478,6 +479,7 @@ mod tests {
                     description: String::new(),
                     input_schema: Default::default(),
                     max_uses: Some(8),
+                    options: Default::default(),
                 },
                 Tool {
                     tool_type: None,
@@ -485,6 +487,7 @@ mod tests {
                     description: "Other tool".to_string(),
                     input_schema: Default::default(),
                     max_uses: None,
+                    options: Default::default(),
                 },
             ]),
             tool_choice: None,

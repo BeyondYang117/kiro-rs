@@ -187,6 +187,24 @@ fn compatibility_custom_web_search_stays_on_generation_route() {
 }
 
 #[test]
+fn compatibility_native_web_search_appended_after_57_functions_uses_server_route() {
+    let value = fixture("function tools with native web search");
+    assert_eq!(value["tools"].as_array().unwrap().len(), 58);
+    assert_eq!(value["tools"][57]["type"], "web_search_20250305");
+    let request: MessagesRequest = serde_json::from_value(value).unwrap();
+    assert!(!super::websearch::has_web_search_tool(&request));
+    assert!(super::mixed_search::is_mixed_search(&request));
+    let error = converter::convert_request(&request)
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("tools[57].type"));
+    assert!(error.contains("web_search_20250305"));
+    assert!(error.contains("name=\"web_search\""));
+    assert!(error.contains("server execution route"));
+}
+
+#[test]
 fn compatibility_invalid_tool_names_are_reversible_and_legal() {
     for name in ["functions.exec_command", "mcp/server/read", "read tool"] {
         assert!(
