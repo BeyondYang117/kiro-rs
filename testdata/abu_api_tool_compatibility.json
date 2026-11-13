@@ -1,0 +1,1713 @@
+[
+  {
+    "name": "lookup",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "synthetic",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "...",
+              "type": "text"
+            },
+            {
+              "id": "call-1",
+              "input": {
+                "mode": "read",
+                "optional": "text",
+                "path": "test",
+                "value": null,
+                "values": [
+                  1
+                ]
+              },
+              "name": "lookup",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "synthetic",
+              "tool_use_id": "call-1",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5-5",
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "description": "synthetic",
+          "input_schema": {
+            "$defs": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "enum": [
+                  "read",
+                  "write"
+                ]
+              },
+              "optional": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "$ref": "#/$defs/path"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "values": {
+                "items": {
+                  "enum": [
+                    1,
+                    2
+                  ]
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          "name": "lookup"
+        }
+      ]
+    }
+  },
+  {
+    "name": "bash",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "synthetic",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "...",
+              "type": "text"
+            },
+            {
+              "id": "call-1",
+              "input": {
+                "mode": "read",
+                "optional": "text",
+                "path": "test",
+                "value": null,
+                "values": [
+                  1
+                ]
+              },
+              "name": "bash",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "synthetic",
+              "tool_use_id": "call-1",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5-5",
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "description": "synthetic",
+          "input_schema": {
+            "$defs": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "enum": [
+                  "read",
+                  "write"
+                ]
+              },
+              "optional": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "$ref": "#/$defs/path"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "values": {
+                "items": {
+                  "enum": [
+                    1,
+                    2
+                  ]
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          "name": "bash"
+        }
+      ]
+    }
+  },
+  {
+    "name": "web_search",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "synthetic",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "...",
+              "type": "text"
+            },
+            {
+              "id": "call-1",
+              "input": {
+                "mode": "read",
+                "optional": "text",
+                "path": "test",
+                "value": null,
+                "values": [
+                  1
+                ]
+              },
+              "name": "web_search",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "synthetic",
+              "tool_use_id": "call-1",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5-5",
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "description": "synthetic",
+          "input_schema": {
+            "$defs": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "enum": [
+                  "read",
+                  "write"
+                ]
+              },
+              "optional": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "$ref": "#/$defs/path"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "values": {
+                "items": {
+                  "enum": [
+                    1,
+                    2
+                  ]
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          "name": "web_search"
+        }
+      ]
+    }
+  },
+  {
+    "name": "text_editor",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "synthetic",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "...",
+              "type": "text"
+            },
+            {
+              "id": "call-1",
+              "input": {
+                "mode": "read",
+                "optional": "text",
+                "path": "test",
+                "value": null,
+                "values": [
+                  1
+                ]
+              },
+              "name": "text_editor",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "synthetic",
+              "tool_use_id": "call-1",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5-5",
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "description": "synthetic",
+          "input_schema": {
+            "$defs": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "enum": [
+                  "read",
+                  "write"
+                ]
+              },
+              "optional": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "$ref": "#/$defs/path"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "values": {
+                "items": {
+                  "enum": [
+                    1,
+                    2
+                  ]
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          "name": "text_editor"
+        }
+      ]
+    }
+  },
+  {
+    "name": "str_replace_editor",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "synthetic",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "...",
+              "type": "text"
+            },
+            {
+              "id": "call-1",
+              "input": {
+                "mode": "read",
+                "optional": "text",
+                "path": "test",
+                "value": null,
+                "values": [
+                  1
+                ]
+              },
+              "name": "str_replace_editor",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "synthetic",
+              "tool_use_id": "call-1",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5-5",
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "description": "synthetic",
+          "input_schema": {
+            "$defs": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "enum": [
+                  "read",
+                  "write"
+                ]
+              },
+              "optional": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "$ref": "#/$defs/path"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "values": {
+                "items": {
+                  "enum": [
+                    1,
+                    2
+                  ]
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          "name": "str_replace_editor"
+        }
+      ]
+    }
+  },
+  {
+    "name": "computer",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "synthetic",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "...",
+              "type": "text"
+            },
+            {
+              "id": "call-1",
+              "input": {
+                "mode": "read",
+                "optional": "text",
+                "path": "test",
+                "value": null,
+                "values": [
+                  1
+                ]
+              },
+              "name": "computer",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "synthetic",
+              "tool_use_id": "call-1",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5-5",
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "description": "synthetic",
+          "input_schema": {
+            "$defs": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "enum": [
+                  "read",
+                  "write"
+                ]
+              },
+              "optional": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "$ref": "#/$defs/path"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "values": {
+                "items": {
+                  "enum": [
+                    1,
+                    2
+                  ]
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          "name": "computer"
+        }
+      ]
+    }
+  },
+  {
+    "name": "computer_search",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "synthetic",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "...",
+              "type": "text"
+            },
+            {
+              "id": "call-1",
+              "input": {
+                "mode": "read",
+                "optional": "text",
+                "path": "test",
+                "value": null,
+                "values": [
+                  1
+                ]
+              },
+              "name": "computer_search",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "synthetic",
+              "tool_use_id": "call-1",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5-5",
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "description": "synthetic",
+          "input_schema": {
+            "$defs": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "enum": [
+                  "read",
+                  "write"
+                ]
+              },
+              "optional": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "$ref": "#/$defs/path"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "values": {
+                "items": {
+                  "enum": [
+                    1,
+                    2
+                  ]
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          "name": "computer_search"
+        }
+      ]
+    }
+  },
+  {
+    "name": "functions.exec_command",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "synthetic",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "...",
+              "type": "text"
+            },
+            {
+              "id": "call-1",
+              "input": {
+                "mode": "read",
+                "optional": "text",
+                "path": "test",
+                "value": null,
+                "values": [
+                  1
+                ]
+              },
+              "name": "functions.exec_command",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "synthetic",
+              "tool_use_id": "call-1",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5-5",
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "description": "synthetic",
+          "input_schema": {
+            "$defs": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "enum": [
+                  "read",
+                  "write"
+                ]
+              },
+              "optional": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "$ref": "#/$defs/path"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "values": {
+                "items": {
+                  "enum": [
+                    1,
+                    2
+                  ]
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          "name": "functions.exec_command"
+        }
+      ]
+    }
+  },
+  {
+    "name": "mcp/server/read",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "synthetic",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "...",
+              "type": "text"
+            },
+            {
+              "id": "call-1",
+              "input": {
+                "mode": "read",
+                "optional": "text",
+                "path": "test",
+                "value": null,
+                "values": [
+                  1
+                ]
+              },
+              "name": "mcp/server/read",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "synthetic",
+              "tool_use_id": "call-1",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5-5",
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "description": "synthetic",
+          "input_schema": {
+            "$defs": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "enum": [
+                  "read",
+                  "write"
+                ]
+              },
+              "optional": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "$ref": "#/$defs/path"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "values": {
+                "items": {
+                  "enum": [
+                    1,
+                    2
+                  ]
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          "name": "mcp/server/read"
+        }
+      ]
+    }
+  },
+  {
+    "name": "read tool",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "synthetic",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "...",
+              "type": "text"
+            },
+            {
+              "id": "call-1",
+              "input": {
+                "mode": "read",
+                "optional": "text",
+                "path": "test",
+                "value": null,
+                "values": [
+                  1
+                ]
+              },
+              "name": "read tool",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "synthetic",
+              "tool_use_id": "call-1",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5-5",
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "description": "synthetic",
+          "input_schema": {
+            "$defs": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "enum": [
+                  "read",
+                  "write"
+                ]
+              },
+              "optional": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "$ref": "#/$defs/path"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "values": {
+                "items": {
+                  "enum": [
+                    1,
+                    2
+                  ]
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          "name": "read tool"
+        }
+      ]
+    }
+  },
+  {
+    "name": "shortening collision",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "synthetic",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "...",
+              "type": "text"
+            },
+            {
+              "id": "call-1",
+              "input": {
+                "mode": "read",
+                "optional": "text",
+                "path": "test",
+                "value": null,
+                "values": [
+                  1
+                ]
+              },
+              "name": "mcp__ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss__read",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "synthetic",
+              "tool_use_id": "call-1",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5-5",
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "description": "synthetic",
+          "input_schema": {
+            "$defs": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "enum": [
+                  "read",
+                  "write"
+                ]
+              },
+              "optional": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "$ref": "#/$defs/path"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "values": {
+                "items": {
+                  "enum": [
+                    1,
+                    2
+                  ]
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          "name": "mcp__ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss__read"
+        },
+        {
+          "input_schema": {
+            "$defs": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "enum": [
+                  "read",
+                  "write"
+                ]
+              },
+              "optional": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "$ref": "#/$defs/path"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "values": {
+                "items": {
+                  "enum": [
+                    1,
+                    2
+                  ]
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          "name": "mcp__sssssssssssssssssssssssssssssssssssssssssssssssss_a9ca83a8"
+        }
+      ]
+    }
+  },
+  {
+    "name": "override nested schema",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "synthetic",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "...",
+              "type": "text"
+            },
+            {
+              "id": "call-1",
+              "input": {
+                "mode": "read",
+                "optional": "text",
+                "path": "test",
+                "value": null,
+                "values": [
+                  1
+                ]
+              },
+              "name": "lookup",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "synthetic",
+              "tool_use_id": "call-1",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5-5",
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "description": "synthetic",
+          "input_schema": {
+            "$defs": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "enum": [
+                  "read",
+                  "write"
+                ],
+                "type": "object"
+              },
+              "optional": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "$ref": "#/$defs/path"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "values": {
+                "items": {
+                  "enum": [
+                    1,
+                    2
+                  ]
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          "name": "lookup"
+        }
+      ]
+    }
+  },
+  {
+    "name": "override tool name",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "synthetic",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "...",
+              "type": "text"
+            },
+            {
+              "id": "call-1",
+              "input": {
+                "mode": "read",
+                "optional": "text",
+                "path": "test",
+                "value": null,
+                "values": [
+                  1
+                ]
+              },
+              "name": "lookup",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "synthetic",
+              "tool_use_id": "call-1",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5-5",
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "description": "synthetic",
+          "input_schema": {
+            "$defs": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "enum": [
+                  "read",
+                  "write"
+                ]
+              },
+              "optional": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "$ref": "#/$defs/path"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "values": {
+                "items": {
+                  "enum": [
+                    1,
+                    2
+                  ]
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          "name": "renamed_lookup"
+        }
+      ]
+    }
+  },
+  {
+    "name": "omitted type",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "synthetic",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "...",
+              "type": "text"
+            },
+            {
+              "id": "call-1",
+              "input": {
+                "mode": "read",
+                "optional": "text",
+                "path": "test",
+                "value": null,
+                "values": [
+                  1
+                ]
+              },
+              "name": "text_editor",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "synthetic",
+              "tool_use_id": "call-1",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5-5",
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "name": "str_replace_editor",
+          "type": "text_editor_20250124"
+        }
+      ]
+    }
+  },
+  {
+    "name": "custom native type",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "synthetic",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "...",
+              "type": "text"
+            },
+            {
+              "id": "call-1",
+              "input": {
+                "mode": "read",
+                "optional": "text",
+                "path": "test",
+                "value": null,
+                "values": [
+                  1
+                ]
+              },
+              "name": "text_editor",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "synthetic",
+              "tool_use_id": "call-1",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5-5",
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "name": "str_replace_editor",
+          "type": "text_editor_20250124"
+        }
+      ]
+    }
+  },
+  {
+    "name": "messages success result",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "synthetic",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "id": "call-1",
+              "input": {
+                "query": "test"
+              },
+              "name": "lookup",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "synthetic",
+              "is_error": false,
+              "tool_use_id": "call-1",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5-5",
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "description": "synthetic",
+          "input_schema": {
+            "properties": {
+              "query": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "name": "lookup"
+        }
+      ]
+    }
+  },
+  {
+    "name": "messages error result",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "synthetic",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "id": "call-1",
+              "input": {
+                "query": "test"
+              },
+              "name": "lookup",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "synthetic",
+              "is_error": true,
+              "tool_use_id": "call-1",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-opus-5-5",
+      "system": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "description": "synthetic",
+          "input_schema": {
+            "properties": {
+              "query": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "name": "lookup"
+        }
+      ]
+    }
+  }
+]

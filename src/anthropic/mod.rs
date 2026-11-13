@@ -39,3 +39,6 @@ pub(crate) use upstream::UpstreamResponseDecoder;
 
 #[cfg(test)]
 mod live_tests;
+
+#[cfg(test)]
+mod cli_compatibility_tests;
