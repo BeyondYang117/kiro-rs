@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowLeft, RefreshCw, LogOut, Download, Moon, Sun } from 'lucide-react'
 import { toast } from 'sonner'
-import { getLogs, getLog, type DebugJson, type LogFilters, type LogRecord, type UpstreamResponseDiagnostics } from '@/api/logs'
+import { getLogs, getLog, type DebugJson, type LogFilters, type LogRecord, type UpstreamResponseDiagnostics, type UpstreamRequestDiagnostics } from '@/api/logs'
 import { extractErrorMessage } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -26,6 +26,19 @@ function RequestDebug({ data, label }: { data: DebugJson; label: string }) {
 
 function Status({ record }: { record: LogRecord }) {
   return <Badge variant={record.status === 'success' ? 'success' : record.status === 'error' ? 'destructive' : record.status === 'interrupted' ? 'warning' : 'secondary'}>{labels[record.status]}</Badge>
+}
+
+function RequestDiagnostics({ data }: { data: UpstreamRequestDiagnostics }) {
+  return <div className="mt-3 space-y-2 rounded-md bg-muted/30 p-3 text-xs">
+    <p className="font-medium">请求诊断 · {data.thinkingTransport === 'native' ? '原生参数' : '旧协议标签'}</p>
+    <p>最终请求：{formatNumber(data.bodyBytes)} B · 请求正文调试：{data.requestDebugEnabled ? '已开启' : '未开启（仅保存结构摘要）'}</p>
+    <p>历史 {formatNumber(data.historyMessages)} 条（用户 {formatNumber(data.historyUserMessages)} / 助手 {formatNumber(data.historyAssistantMessages)}），文本 {formatNumber(data.historyTextBytes)} B</p>
+    <p>推理历史 {formatNumber(data.historyReasoningMessages)} 条 · 带签名 {formatNumber(data.historySignedReasoningMessages)} · 加密推理 {formatNumber(data.historyRedactedReasoningMessages)}</p>
+    <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify({ modelControls: data.modelControls, legacyControls: data.legacyControls }, null, 2)}</pre>
+    <details><summary className="cursor-pointer">查看消息结构{data.historySummaryTruncated ? '（历史仅展示最近 12 条，统计包含全部）' : ''}</summary>
+      <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify({ currentMessage: data.currentMessage, recentHistory: data.recentHistory }, null, 2)}</pre>
+    </details>
+  </div>
 }
 
 function AttemptProgress({ attempt, requestTimestamp }: {
@@ -171,7 +184,7 @@ export function RequestLogs({ onBack, onLogout }: { onBack: () => void; onLogout
           </table></div>
           <div className="flex flex-wrap items-center justify-between gap-3 border-t px-4 py-3 text-sm"><span className="text-muted-foreground">共 {summary?.total ?? 0} 条 · 第 {page} / {totalPages} 页</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={page <= 1 || isFetching} onClick={() => setPage(page - 1)}>上一页</Button><Button size="sm" variant="outline" disabled={page >= totalPages || isFetching} onClick={() => setPage(page + 1)}>下一页</Button></div></div>
         </div>}
-      <p className="text-xs text-muted-foreground">日志保留 {data?.retentionDays ?? 30} 天，定期清理至最近 {formatNumber(data?.maxRows ?? 100000)} 条。只记录调用元数据与诊断信息，不保存对话正文和认证请求头；错误信息中的常见密钥格式会脱敏。历史调用无法补录。</p>
+      <p className="text-xs text-muted-foreground">日志保留 {data?.retentionDays ?? 30} 天，定期清理至最近 {formatNumber(data?.maxRows ?? 100000)} 条。默认记录调用元数据、请求结构与响应诊断；请求正文需开启 JSON 调试后采集，不记录认证请求头。历史调用无法补录。</p>
     </main>
     <Dialog open={selectedId !== null} onOpenChange={open => { if (!open) setSelectedId(null) }}>
       <DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto">
@@ -194,7 +207,7 @@ export function RequestLogs({ onBack, onLogout }: { onBack: () => void; onLogout
           {detail.data.response && <section><h3 className="mb-2 font-medium">返回客户端的 content{detail.data.response.truncated ? '（预览已截断）' : ''}</h3><pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border p-3 text-xs">{JSON.stringify(detail.data.response.content, null, 2)}</pre></section>}
           {detail.data.requestDebug && <RequestDebug data={detail.data.requestDebug} label="转换前的客户端 JSON" />}
           {detail.data.error && <section><h3 className="mb-2 font-medium text-destructive">错误原因</h3><pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs">{detail.data.error}</pre></section>}
-          <section><h3 className="mb-2 font-medium">上游调用（{detail.data.attempts} 次）</h3><div className="space-y-2">{detail.data.upstreamAttempts?.length ? detail.data.upstreamAttempts.map((attempt, index) => <div key={index} className="rounded-md border p-3 text-sm"><div className="flex flex-wrap justify-between gap-2"><span>#{index + 1} · 凭据 #{attempt.credentialId} · {attempt.endpoint}</span><span className="text-muted-foreground">{formatTime(attempt.timestamp)} · {attempt.status == null ? '未取得 HTTP 响应' : `HTTP ${attempt.status}`}</span></div><AttemptProgress attempt={attempt} requestTimestamp={detail.data!.timestamp} />{attempt.upstreamRequestId && <p className="mt-2 break-all font-mono text-xs">上游请求 ID：{attempt.upstreamRequestId}</p>}{attempt.requestDebug && <RequestDebug data={attempt.requestDebug} label="最终发送给上游的 JSON" />}{attempt.responseDiagnostics && <ResponseDiagnostics data={attempt.responseDiagnostics} />}{attempt.error && <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-destructive">{attempt.error}</pre>}</div>) : <p className="text-sm text-muted-foreground">未向上游发起请求</p>}</div></section>
+          <section><h3 className="mb-2 font-medium">上游调用（{detail.data.attempts} 次）</h3><div className="space-y-2">{detail.data.upstreamAttempts?.length ? detail.data.upstreamAttempts.map((attempt, index) => <div key={index} className="rounded-md border p-3 text-sm"><div className="flex flex-wrap justify-between gap-2"><span>#{index + 1} · 凭据 #{attempt.credentialId} · {attempt.endpoint}</span><span className="text-muted-foreground">{formatTime(attempt.timestamp)} · {attempt.status == null ? '未取得 HTTP 响应' : `HTTP ${attempt.status}`}</span></div><AttemptProgress attempt={attempt} requestTimestamp={detail.data!.timestamp} />{attempt.upstreamRequestId && <p className="mt-2 break-all font-mono text-xs">上游请求 ID：{attempt.upstreamRequestId}</p>}{attempt.requestDiagnostics && <RequestDiagnostics data={attempt.requestDiagnostics} />}{attempt.requestDebug && <RequestDebug data={attempt.requestDebug} label="最终发送给上游的 JSON" />}{attempt.responseDiagnostics && <ResponseDiagnostics data={attempt.responseDiagnostics} />}{attempt.error && <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-destructive">{attempt.error}</pre>}</div>) : <p className="text-sm text-muted-foreground">未向上游发起请求</p>}</div></section>
           <section><h3 className="mb-2 font-medium">诊断记录</h3>{detail.data.diagnostics?.length ? <div className="space-y-2">{detail.data.diagnostics.map((diagnostic, index) => <div key={index} className="rounded-md border p-3"><p className="mb-2 break-all text-xs text-muted-foreground">{formatTime(diagnostic.timestamp)} · {diagnostic.level} · {diagnostic.target}</p><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{diagnostic.message}</pre></div>)}</div> : <p className="text-sm text-muted-foreground">本次调用没有警告或错误</p>}</section>
         </>}
       </DialogContent>

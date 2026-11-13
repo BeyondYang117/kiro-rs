@@ -33,6 +33,24 @@ export interface UpstreamResponseDiagnostics {
   refusalExplanation?: string | null
 }
 
+export interface UpstreamRequestDiagnostics {
+  thinkingTransport: 'native' | 'legacy'
+  requestDebugEnabled: boolean
+  bodyBytes: number
+  modelControls: Record<string, string | number | null>
+  legacyControls: Record<string, string | number | null>
+  historyMessages: number
+  historyUserMessages: number
+  historyAssistantMessages: number
+  historyReasoningMessages: number
+  historySignedReasoningMessages: number
+  historyRedactedReasoningMessages: number
+  historyTextBytes: number
+  recentHistory: unknown[]
+  historySummaryTruncated: boolean
+  currentMessage: unknown
+}
+
 export interface LogRecord {
   requestDebug?: DebugJson
   id: string
@@ -72,6 +90,7 @@ export interface LogRecord {
     kiroCredits?: number | null
     responseDiagnostics?: UpstreamResponseDiagnostics
     requestDebug?: DebugJson
+    requestDiagnostics?: UpstreamRequestDiagnostics
   }[]
   diagnostics?: { timestamp: number; level: string; target: string; message: string }[]
 }

@@ -1997,6 +1997,14 @@ mod tests {
             let attempts = record["upstreamAttempts"].as_array().unwrap();
             assert_eq!(attempts.len(), 1);
             assert_eq!(attempts[0]["status"], 200);
+            let request = &attempts[0]["requestDiagnostics"];
+            assert_eq!(request["requestDebugEnabled"], false);
+            assert_eq!(request["thinkingTransport"], "legacy");
+            assert_eq!(
+                request["currentMessage"]["textBytes"],
+                "private-prompt-sentinel".len()
+            );
+            assert!(attempts[0].get("requestDebug").is_none());
             assert_eq!(attempts[0]["responseDiagnostics"]["outcome"], "refusal");
             assert_eq!(
                 attempts[0]["responseDiagnostics"]["refusalCategory"],

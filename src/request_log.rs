@@ -1,7 +1,10 @@
 //! Durable request metadata, bounded previews and opt-in redacted request JSON.
 mod debug;
 pub(crate) use debug::{DebugJson, capture_client_request, capture_upstream_request};
+mod request;
 mod response;
+use request::UpstreamRequestDiagnostics;
+pub(crate) use request::summarize_request;
 pub(crate) use response::append_preview;
 use response::{ResponsePreview, StreamResponsePreview};
 #[cfg(test)]
@@ -80,6 +83,8 @@ pub struct Diagnostic {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attempt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_diagnostics: Option<UpstreamRequestDiagnostics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     request_debug: Option<DebugJson>,
     timestamp: i64,
@@ -231,6 +236,7 @@ pub fn attempt_started(credential_id: u64, endpoint: &str) {
         record.credential_id = Some(credential_id);
         record.attempts += 1;
         record.upstream_attempts.push(Attempt {
+            request_diagnostics: None,
             request_debug: None,
             timestamp: Utc::now().timestamp_millis(),
             credential_id,
@@ -247,6 +253,14 @@ pub fn attempt_started(credential_id: u64, endpoint: &str) {
             started: Some(Instant::now()),
             response_diagnostics: None,
         });
+    });
+}
+
+pub(crate) fn attempt_request(diagnostics: Option<UpstreamRequestDiagnostics>) {
+    let _ = CURRENT.try_with(|context| {
+        if let Some(attempt) = context.lock().upstream_attempts.last_mut() {
+            attempt.request_diagnostics = diagnostics;
+        }
     });
 }
 

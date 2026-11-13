@@ -596,6 +596,14 @@ impl KiroProvider {
             let url = endpoint.api_url(&rctx);
             let body = endpoint.transform_api_body(request_body, &rctx);
             let body = self.token_manager.model_request_body(ctx.id, body);
+            let request_diagnostics = crate::request_log::summarize_request(
+                &body,
+                super::endpoint::native_thinking(&ctx.credentials, config)
+                    || model
+                        .as_deref()
+                        .is_some_and(crate::anthropic::is_non_claude),
+                config.request_debug_enabled,
+            );
             let debug_body = config.request_debug_enabled.then(|| body.clone());
 
             let base = self
@@ -607,6 +615,7 @@ impl KiroProvider {
 
             crate::kiro::retry_budget::consume()?;
             crate::request_log::attempt_started(ctx.id, endpoint.name());
+            crate::request_log::attempt_request(request_diagnostics);
             if let Some(body) = debug_body {
                 self.capture_upstream_debug(&body, &ctx.credentials, &ctx.token);
             }

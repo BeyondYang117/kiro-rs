@@ -690,6 +690,7 @@ fn completed_calls_cannot_be_overwritten_by_late_active_snapshots_and_filter_mat
     record.status = "success".into();
     record.credential_id = Some(2);
     record.upstream_attempts = vec![Attempt {
+        request_diagnostics: None,
         request_debug: None,
         timestamp: record.timestamp,
         credential_id: 1,
