@@ -79,6 +79,153 @@ fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
     serde_json::Value::Object(obj)
 }
 
+/// Kiro rejects `additionalProperties` in tool schemas. `true` is equivalent
+/// to omitting the keyword; restrictive forms must be rejected rather than
+/// silently broadening the client's schema.
+fn validate_kiro_tool_schema(
+    schema: &serde_json::Value,
+    path: &str,
+) -> Result<(), ConversionError> {
+    use serde_json::Value;
+    let Some(object) = schema.as_object() else {
+        return Ok(());
+    };
+    if object
+        .get("additionalProperties")
+        .is_some_and(|value| value != &Value::Bool(true))
+    {
+        return Err(ConversionError::InvalidToolFormat(format!(
+            "{path}.additionalProperties cannot be represented by Kiro without weakening the schema"
+        )));
+    }
+
+    for key in [
+        "properties",
+        "$defs",
+        "definitions",
+        "patternProperties",
+        "dependentSchemas",
+    ] {
+        if let Some(children) = object.get(key).and_then(Value::as_object) {
+            for (name, child) in children {
+                validate_kiro_tool_schema(child, &format!("{path}.{key}.{name}"))?;
+            }
+        }
+    }
+    if let Some(dependencies) = object.get("dependencies").and_then(Value::as_object) {
+        for (name, child) in dependencies {
+            if child.is_object() {
+                validate_kiro_tool_schema(child, &format!("{path}.dependencies.{name}"))?;
+            }
+        }
+    }
+    for key in [
+        "items",
+        "additionalItems",
+        "contains",
+        "not",
+        "if",
+        "then",
+        "else",
+        "propertyNames",
+        "unevaluatedProperties",
+        "unevaluatedItems",
+    ] {
+        match object.get(key) {
+            Some(Value::Array(children)) if key == "items" => {
+                for (index, child) in children.iter().enumerate() {
+                    validate_kiro_tool_schema(child, &format!("{path}.{key}[{index}]"))?;
+                }
+            }
+            Some(child) => validate_kiro_tool_schema(child, &format!("{path}.{key}"))?,
+            None => {}
+        }
+    }
+    for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
+        if let Some(children) = object.get(key).and_then(Value::as_array) {
+            for (index, child) in children.iter().enumerate() {
+                validate_kiro_tool_schema(child, &format!("{path}.{key}[{index}]"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Remove only no-op schema keywords. `enum`, defaults, examples and other
+/// object-valued data are deliberately outside the schema traversal.
+fn normalize_kiro_tool_schema(schema: &mut serde_json::Value) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+    if object.get("additionalProperties") == Some(&serde_json::Value::Bool(true)) {
+        object.remove("additionalProperties");
+    }
+    if object
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(Vec::is_empty)
+    {
+        object.remove("required");
+    }
+
+    for key in [
+        "properties",
+        "$defs",
+        "definitions",
+        "patternProperties",
+        "dependentSchemas",
+    ] {
+        if let Some(children) = object
+            .get_mut(key)
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for child in children.values_mut() {
+                normalize_kiro_tool_schema(child);
+            }
+        }
+    }
+    if let Some(dependencies) = object
+        .get_mut("dependencies")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for child in dependencies.values_mut().filter(|value| value.is_object()) {
+            normalize_kiro_tool_schema(child);
+        }
+    }
+    for key in [
+        "items",
+        "additionalItems",
+        "contains",
+        "not",
+        "if",
+        "then",
+        "else",
+        "propertyNames",
+        "unevaluatedProperties",
+        "unevaluatedItems",
+    ] {
+        if let Some(child) = object.get_mut(key) {
+            if let Some(children) = child.as_array_mut().filter(|_| key == "items") {
+                for child in children {
+                    normalize_kiro_tool_schema(child);
+                }
+            } else {
+                normalize_kiro_tool_schema(child);
+            }
+        }
+    }
+    for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
+        if let Some(children) = object
+            .get_mut(key)
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for child in children {
+                normalize_kiro_tool_schema(child);
+            }
+        }
+    }
+}
+
 /// 追加到 Write 工具 description 末尾的内容
 const WRITE_TOOL_DESCRIPTION_SUFFIX: &str = "- IMPORTANT: Large tool arguments can be truncated upstream. For large files, create a small skeleton first, then append or edit in chunks using the available tools. Keep each call below 50 lines and 12000 characters of generated content, whichever limit is reached first. Include all required arguments and finish the JSON object. After a failure, inspect the file and use smaller chunks; never repeat the same oversized write unchanged.";
 
@@ -384,9 +531,7 @@ fn create_placeholder_tool(name: &str) -> Tool {
             input_schema: InputSchema::from_json(serde_json::json!({
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",
-                "properties": {},
-                "required": [],
-                "additionalProperties": true
+                "properties": {}
             })),
         },
     }
@@ -558,7 +703,6 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
 
     validate_tool_blocks(messages)?;
     if let Some(tools) = &req.tools {
-        let mut names = HashMap::new();
         for (index, tool) in tools.iter().enumerate() {
             if let Some(kind) = tool.tool_type.as_deref().filter(|kind| *kind != "custom") {
                 let hint = "client tools must omit type (or use custom) and supply input_schema; native server tools must use the server execution route";
@@ -567,7 +711,14 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
                     tool.name
                 )));
             }
+        }
+        let mut names = HashMap::new();
+        for (index, tool) in tools.iter().enumerate() {
             validate_schema_constraints(
+                &serde_json::json!(tool.input_schema),
+                &format!("tools[{index}].input_schema"),
+            )?;
+            validate_kiro_tool_schema(
                 &serde_json::json!(tool.input_schema),
                 &format!("tools[{index}].input_schema"),
             )?;
@@ -1201,13 +1352,14 @@ fn convert_tools(
                 None => description,
             };
 
+            let mut schema = normalize_json_schema(serde_json::json!(t.input_schema));
+            normalize_kiro_tool_schema(&mut schema);
+
             Tool {
                 tool_specification: ToolSpecification {
                     name: map_tool_name(&t.name, tool_name_map),
                     description,
-                    input_schema: InputSchema::from_json(normalize_json_schema(serde_json::json!(
-                        t.input_schema
-                    ))),
+                    input_schema: InputSchema::from_json(schema),
                 },
             }
         })
@@ -2420,6 +2572,14 @@ mod tests {
         let wire = serde_json::to_value(state).unwrap();
         let context = &wire["currentMessage"]["userInputMessage"]["userInputMessageContext"];
         assert_eq!(context["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            context["tools"][0]["toolSpecification"]["inputSchema"]["json"],
+            serde_json::json!({
+                "$schema":"http://json-schema.org/draft-07/schema#",
+                "type":"object",
+                "properties":{}
+            })
+        );
         assert_eq!(context["toolResults"].as_array().unwrap().len(), 2);
         let calls = wire["history"][0]["assistantResponseMessage"]["toolUses"]
             .as_array()

@@ -32,7 +32,13 @@ fn fixture(name: &str) -> Value {
 
 // Exercise production methods; no HTTP calls, refreshes, credential files or real keys.
 fn wire(request: &Value, native: bool) -> (Value, std::collections::HashMap<String, String>) {
-    let request: MessagesRequest = serde_json::from_value(request.clone()).unwrap();
+    let mut request = request.clone();
+    for tool in request["tools"].as_array_mut().into_iter().flatten() {
+        if let Some(schema) = tool.get_mut("input_schema") {
+            drop_unsupported_additional_properties(schema);
+        }
+    }
+    let request: MessagesRequest = serde_json::from_value(request).unwrap();
     let converted = converter::convert_request(&request).unwrap();
     let mut body = json!({"conversationState": converted.conversation_state});
     if let Some(fields) = converter::additional_model_request_fields(&request) {
@@ -145,7 +151,7 @@ fn compatibility_fixed_function_tools_and_nested_schemas_survive_both_cli_modes(
             assert_eq!(definitions[0]["name"], name);
             assert_eq!(
                 definitions[0]["inputSchema"]["json"],
-                request["tools"][0]["input_schema"]
+                normalized_tool_schema(&request["tools"][0]["input_schema"])
             );
             let uses = calls(&body);
             assert_eq!(uses.len(), 1);
@@ -260,7 +266,7 @@ fn compatibility_omitted_type_preserves_schema_and_unsupported_native_is_rejecte
         assert_eq!(definitions[0]["name"], "text_editor");
         assert_eq!(
             definitions[0]["inputSchema"]["json"],
-            request["tools"][0]["input_schema"]
+            normalized_tool_schema(&request["tools"][0]["input_schema"])
         );
     }
     let mut request = request;
@@ -273,6 +279,171 @@ fn compatibility_omitted_type_preserves_schema_and_unsupported_native_is_rejecte
             .to_string()
             .contains("tools[0].type")
     );
+}
+
+fn normalized_tool_schema(schema: &Value) -> Value {
+    let mut schema = schema.clone();
+    drop_unsupported_additional_properties(&mut schema);
+    let request: MessagesRequest = serde_json::from_value(json!({
+        "model":"claude-sonnet-5.5", "max_tokens":16,
+        "messages":[{"role":"user","content":"test"}],
+        "tools":[{"name":"test","description":"test","input_schema":schema}]
+    }))
+    .unwrap();
+    let converted = converter::convert_request(&request).unwrap();
+    serde_json::to_value(
+        converted
+            .conversation_state
+            .current_message
+            .user_input_message
+            .user_input_message_context
+            .tools[0]
+            .tool_specification
+            .input_schema
+            .json
+            .clone(),
+    )
+    .unwrap()
+}
+
+fn drop_unsupported_additional_properties(schema: &mut Value) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+    object.remove("additionalProperties");
+    for key in [
+        "properties",
+        "$defs",
+        "definitions",
+        "patternProperties",
+        "dependentSchemas",
+    ] {
+        if let Some(children) = object.get_mut(key).and_then(Value::as_object_mut) {
+            for child in children.values_mut() {
+                drop_unsupported_additional_properties(child);
+            }
+        }
+    }
+    if let Some(dependencies) = object
+        .get_mut("dependencies")
+        .and_then(Value::as_object_mut)
+    {
+        for child in dependencies.values_mut().filter(|value| value.is_object()) {
+            drop_unsupported_additional_properties(child);
+        }
+    }
+    for key in [
+        "items",
+        "additionalItems",
+        "contains",
+        "not",
+        "if",
+        "then",
+        "else",
+        "propertyNames",
+        "unevaluatedProperties",
+        "unevaluatedItems",
+    ] {
+        if let Some(child) = object.get_mut(key) {
+            if let Some(children) = child.as_array_mut().filter(|_| key == "items") {
+                for child in children {
+                    drop_unsupported_additional_properties(child);
+                }
+            } else {
+                drop_unsupported_additional_properties(child);
+            }
+        }
+    }
+    for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
+        if let Some(children) = object.get_mut(key).and_then(Value::as_array_mut) {
+            for child in children {
+                drop_unsupported_additional_properties(child);
+            }
+        }
+    }
+}
+
+#[test]
+fn kiro_tool_schema_removes_unsupported_keywords_recursively() {
+    let schema = json!({
+        "type":"object",
+        "properties": {
+            "nested": {"type":"object", "required":[], "additionalProperties":true,
+                "properties":{"value":{"type":"string", "required":["kept"], "additionalProperties":true}}},
+            "items": {"type":"array", "items":[{"type":"object", "required":[], "additionalProperties":true}]},
+            "union": {"oneOf":[{"type":"string", "additionalProperties":true}, {"type":"null", "required":[]}]},
+            "dependency": {"type":"object", "dependencies":{"other":{"type":"object", "additionalProperties":true}}},
+            "example": {"enum":[{"additionalProperties":false,"required":[]}]}
+        },
+        "required":["nested"], "additionalProperties":true
+    });
+    let normalized = normalized_tool_schema(&schema);
+    assert_eq!(normalized["required"], json!(["nested"]));
+    assert!(normalized.get("additionalProperties").is_none());
+    assert!(normalized["properties"]["nested"].get("required").is_none());
+    assert!(
+        normalized["properties"]["nested"]
+            .get("additionalProperties")
+            .is_none()
+    );
+    assert_eq!(
+        normalized["properties"]["nested"]["properties"]["value"]["required"],
+        json!(["kept"])
+    );
+    assert!(
+        normalized["properties"]["nested"]["properties"]["value"]
+            .get("additionalProperties")
+            .is_none()
+    );
+    assert!(
+        normalized["properties"]["items"]["items"][0]
+            .get("additionalProperties")
+            .is_none()
+    );
+    assert!(
+        normalized["properties"]["union"]["oneOf"][0]
+            .get("additionalProperties")
+            .is_none()
+    );
+    assert!(
+        normalized["properties"]["union"]["oneOf"][1]
+            .get("required")
+            .is_none()
+    );
+    assert!(
+        normalized["properties"]["dependency"]["dependencies"]["other"]
+            .get("additionalProperties")
+            .is_none()
+    );
+    assert_eq!(
+        normalized["properties"]["example"]["enum"][0]["additionalProperties"],
+        false
+    );
+    assert_eq!(
+        normalized["properties"]["example"]["enum"][0]["required"],
+        json!([])
+    );
+}
+
+#[test]
+fn kiro_tool_schema_rejects_restrictions_it_cannot_preserve() {
+    for schema in [
+        json!({"type":"object", "additionalProperties":false}),
+        json!({"type":"object", "properties":{"nested":{"type":"object", "additionalProperties":{"type":"string"}}}}),
+        json!({"type":"object", "properties":{"items":{"type":"array", "items":[{"additionalProperties":false}]}}}),
+        json!({"type":"object", "properties":{"dependency":{"dependencies":{"other":{"additionalProperties":false}}}}}),
+    ] {
+        let request: MessagesRequest = serde_json::from_value(json!({
+            "model":"claude-sonnet-5.5", "max_tokens":16,
+            "messages":[{"role":"user","content":"test"}],
+            "tools":[{"name":"test","description":"test","input_schema":schema}]
+        }))
+        .unwrap();
+        let error = converter::convert_request(&request)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("additionalProperties"), "{error}");
+    }
 }
 
 #[test]
