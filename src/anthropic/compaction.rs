@@ -2467,6 +2467,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn custom_web_search_continuations_use_generation_and_invalid_tools_stay_local() {
+        for cc in [false, true] {
+            for streaming in [false, true] {
+                let upstream = mock(frame(
+                    "assistantResponseEvent",
+                    json!({"content":"continued"}),
+                ))
+                .await;
+                let mut payload = json!({"model":"claude-opus-5-5","max_tokens":1024,"stream":streaming,
+                    "tools":[{"name":"web_search","input_schema":{"type":"object","properties":{"query":{"type":"string"}}}}],
+                    "messages":[{"role":"user","content":"synthetic"},
+                        {"role":"assistant","content":[{"type":"tool_use","id":"a","name":"web_search","input":{"query":"test"}}]},
+                        {"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"result","is_error":true}]}]});
+                let response = dispatch(upstream.state.clone(), request(payload.clone()), cc).await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+                assert!(String::from_utf8_lossy(&bytes).contains("continued"));
+                {
+                    let requests = upstream.requests.lock().unwrap();
+                    assert_eq!(requests.len(), 1);
+                    let context = &requests[0]["conversationState"]["currentMessage"]["userInputMessage"]
+                        ["userInputMessageContext"];
+                    assert_eq!(
+                        context["tools"][0]["toolSpecification"]["name"],
+                        "web_search"
+                    );
+                    assert_eq!(context["toolResults"][0]["status"], "error");
+                    assert!(context["toolResults"][0].get("isError").is_none());
+                }
+                for invalid in [
+                    json!([{"type":"text_editor_20250124","name":"str_replace_editor"}]),
+                    json!([{"type":"web_search_20250305","name":"web_search","input_schema":{"type":"object"}}]),
+                    json!([{"name":"web_search","input_schema":{"type":"object","properties":{"query":{"type":"object","enum":["test"]}}}}]),
+                ] {
+                    payload["tools"] = invalid;
+                    let response =
+                        dispatch(upstream.state.clone(), request(payload.clone()), cc).await;
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                    let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+                    let error: Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(error["error"]["type"], "invalid_request_error");
+                    assert_eq!(upstream.requests.lock().unwrap().len(), 1);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn normal_calls_keep_legacy_wire_format_for_both_message_handlers() {
         for cc in [false, true] {
             for stream in [false, true] {

@@ -449,6 +449,88 @@ fn validate_tool_blocks(messages: &[super::types::Message]) -> Result<(), Conver
     Ok(())
 }
 
+// Reject contradictions rather than guessing which constraint the caller meant.
+// Traverse schema positions only; enum/default/example objects are data.
+fn validate_schema_constraints(
+    schema: &serde_json::Value,
+    path: &str,
+) -> Result<(), ConversionError> {
+    use serde_json::Value;
+    let Some(object) = schema.as_object() else {
+        return Ok(());
+    };
+    let matches_type = |value: &Value| {
+        let matches = |kind: &str| match kind {
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "string" => value.is_string(),
+            "boolean" => value.is_boolean(),
+            "null" => value.is_null(),
+            "number" => value.is_number(),
+            "integer" => {
+                value.as_i64().is_some()
+                    || value.as_u64().is_some()
+                    || value.as_f64().is_some_and(|n| n.fract() == 0.0)
+            }
+            _ => true,
+        };
+        match object.get("type") {
+            Some(Value::String(kind)) => matches(kind),
+            Some(Value::Array(kinds)) => kinds.iter().any(|k| k.as_str().is_some_and(matches)),
+            _ => true,
+        }
+    };
+    if object
+        .get("enum")
+        .and_then(Value::as_array)
+        .is_some_and(|values| !values.iter().any(matches_type))
+        || object
+            .get("const")
+            .is_some_and(|value| !matches_type(value))
+    {
+        return Err(ConversionError::InvalidToolFormat(format!(
+            "{path}: type contradicts enum/const"
+        )));
+    }
+    for key in [
+        "properties",
+        "$defs",
+        "definitions",
+        "patternProperties",
+        "dependentSchemas",
+    ] {
+        if let Some(children) = object.get(key).and_then(Value::as_object) {
+            for (name, child) in children {
+                validate_schema_constraints(child, &format!("{path}.{key}.{name}"))?;
+            }
+        }
+    }
+    for key in [
+        "items",
+        "additionalProperties",
+        "contains",
+        "not",
+        "if",
+        "then",
+        "else",
+        "propertyNames",
+        "unevaluatedProperties",
+        "unevaluatedItems",
+    ] {
+        if let Some(child) = object.get(key) {
+            validate_schema_constraints(child, &format!("{path}.{key}"))?;
+        }
+    }
+    for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
+        if let Some(children) = object.get(key).and_then(Value::as_array) {
+            for (index, child) in children.iter().enumerate() {
+                validate_schema_constraints(child, &format!("{path}.{key}[{index}]"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 将 Anthropic 请求转换为 Kiro 请求
 pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, ConversionError> {
     // 1. 映射模型
@@ -478,6 +560,19 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
     if let Some(tools) = &req.tools {
         let mut names = HashMap::new();
         for (index, tool) in tools.iter().enumerate() {
+            if tool
+                .tool_type
+                .as_deref()
+                .is_some_and(|kind| kind != "custom")
+            {
+                return Err(ConversionError::InvalidToolFormat(format!(
+                    "tools[{index}].type is not supported as a client tool; supply an input_schema instead"
+                )));
+            }
+            validate_schema_constraints(
+                &serde_json::json!(tool.input_schema),
+                &format!("tools[{index}].input_schema"),
+            )?;
             let mut definition = serde_json::to_value(tool).expect("tool definition is JSON");
             definition["name"] = serde_json::json!(tool.name.to_lowercase());
             let conflict = names
@@ -517,6 +612,31 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
 
     // 6. 转换工具定义（超长名称自动缩短并记录映射）
     let mut tool_name_map = HashMap::new();
+    // Reserve every existing legal name before allocating aliases, including
+    // history-only tools, so a shortened/sanitized alias cannot steal one.
+    let mut reserve = |name: &str| {
+        if valid_tool_name(name)
+            && !tool_name_map
+                .keys()
+                .any(|key: &String| key.eq_ignore_ascii_case(name))
+        {
+            tool_name_map.insert(name.to_owned(), name.to_owned());
+        }
+    };
+    for tool in req.tools.iter().flatten() {
+        reserve(&tool.name);
+    }
+    for message in messages {
+        if let Some(blocks) = message.content.as_array() {
+            for block in blocks {
+                if block["type"] == "tool_use" {
+                    if let Some(name) = block["name"].as_str() {
+                        reserve(name);
+                    }
+                }
+            }
+        }
+    }
     let mut tools = convert_tools(&req.tools, &mut tool_name_map);
 
     // 7. 构建历史消息（需要先构建，以便收集历史中使用的工具）
@@ -584,6 +704,7 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
         .with_current_message(current_message)
         .with_history(history);
 
+    tool_name_map.retain(|alias, original| alias != original);
     if !tool_name_map.is_empty() {
         tracing::info!("工具名称映射: {} 个超长名称已缩短", tool_name_map.len());
     }
@@ -992,14 +1113,60 @@ fn shorten_tool_name(name: &str) -> String {
     format!("{}_{}", prefix, hash_suffix)
 }
 
-/// 如果名称超长则缩短，并记录映射（short → original）
+fn valid_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= TOOL_NAME_MAX_LEN
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+}
+
+/// One reversible allocation shared by definitions and history. Identity entries
+/// reserve names during conversion and are removed before returning the map.
 fn map_tool_name(name: &str, tool_name_map: &mut HashMap<String, String>) -> String {
-    if name.len() <= TOOL_NAME_MAX_LEN {
-        return name.to_string();
+    if let Some((alias, _)) = tool_name_map
+        .iter()
+        .find(|(_, original)| original.eq_ignore_ascii_case(name))
+    {
+        return alias.clone();
     }
-    let short = shorten_tool_name(name);
-    tool_name_map.insert(short.clone(), name.to_string());
-    short
+    let clean: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut alias = if clean.len() > TOOL_NAME_MAX_LEN {
+        shorten_tool_name(&clean)
+    } else {
+        clean
+    };
+    if alias.is_empty() {
+        alias = "tool".into();
+    }
+    let base = alias.clone();
+    let mut attempt = 0u64;
+    while tool_name_map
+        .keys()
+        .any(|key| key.eq_ignore_ascii_case(&alias))
+    {
+        let digest = format!("{:x}", Sha256::digest(name.as_bytes()));
+        let suffix = format!("_{}_{attempt}", &digest[..8]);
+        alias = format!(
+            "{}{}",
+            &base[..base.len().min(TOOL_NAME_MAX_LEN - suffix.len())],
+            suffix
+        );
+        attempt += 1;
+    }
+    if alias != name {
+        tool_name_map.insert(alias.clone(), name.to_owned());
+    }
+    alias
 }
 
 /// 转换工具定义

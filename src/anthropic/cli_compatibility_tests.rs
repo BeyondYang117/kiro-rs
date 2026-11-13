@@ -1,5 +1,4 @@
-//! Offline characterization of abu-api 84dde51f7 -> converter -> CLI -> account shaping.
-//! Gap tests assert current output, not a promise that the upstream accepts it.
+//! Offline regressions: abu-api -> converter -> CLI -> account shaping.
 
 use super::{converter, types::MessagesRequest};
 use crate::kiro::endpoint::{CliEndpoint, KiroEndpoint, RequestContext};
@@ -98,6 +97,32 @@ fn calls(body: &Value) -> Vec<&Value> {
         .collect()
 }
 
+fn assert_response_name(
+    mapping: &std::collections::HashMap<String, String>,
+    alias: &str,
+    original: &str,
+) {
+    use super::stream::StreamContext;
+    use crate::kiro::model::events::ToolUseEvent;
+    let mut stream = StreamContext::new_with_thinking("claude-opus-5-5", 1, false, mapping.clone());
+    stream.generate_initial_events();
+    let events =
+        stream.process_kiro_event(&crate::kiro::model::events::Event::ToolUse(ToolUseEvent {
+            name: alias.into(),
+            tool_use_id: "synthetic-response".into(),
+            input: "{}".into(),
+            stop: true,
+        }));
+    let start = events
+        .iter()
+        .find(|event| {
+            event.event == "content_block_start"
+                && event.data["content_block"]["type"] == "tool_use"
+        })
+        .unwrap();
+    assert_eq!(start.data["content_block"]["name"], original);
+}
+
 #[test]
 fn compatibility_fixed_function_tools_and_nested_schemas_survive_both_cli_modes() {
     let names = [
@@ -112,24 +137,11 @@ fn compatibility_fixed_function_tools_and_nested_schemas_survive_both_cli_modes(
     for name in names {
         let request = fixture(name);
         for native in [false, true] {
-            let mut dispatched_request = request.clone();
-            if name == "web_search" {
-                // A single tool named web_search is intercepted before conversion.
-                dispatched_request["tools"]
-                    .as_array_mut()
-                    .unwrap()
-                    .push(fixture("lookup")["tools"][0].clone());
-            }
-            let decoded: MessagesRequest =
-                serde_json::from_value(dispatched_request.clone()).unwrap();
+            let decoded: MessagesRequest = serde_json::from_value(request.clone()).unwrap();
             assert!(!super::websearch::has_web_search_tool(&decoded));
-            let (body, mapping) = wire(&dispatched_request, native);
+            let (body, mapping) = wire(&request, native);
             let definitions = tools(&body);
-            assert_eq!(
-                definitions.len(),
-                if name == "web_search" { 2 } else { 1 },
-                "{name}, native={native}"
-            );
+            assert_eq!(definitions.len(), 1, "{name}, native={native}");
             assert_eq!(definitions[0]["name"], name);
             assert_eq!(
                 definitions[0]["inputSchema"]["json"],
@@ -150,13 +162,13 @@ fn compatibility_fixed_function_tools_and_nested_schemas_survive_both_cli_modes(
 }
 
 #[test]
-fn compatibility_gap_single_custom_web_search_is_dispatched_to_mcp_by_name() {
+fn compatibility_custom_web_search_stays_on_generation_route() {
     let request: MessagesRequest = serde_json::from_value(fixture("web_search")).unwrap();
     let tool = &request.tools.as_ref().unwrap()[0];
     assert!(tool.tool_type.is_none());
     assert!(!tool.input_schema.is_empty());
     // Both /v1/messages and /cc/v1/messages use this predicate before convert_request.
-    assert!(super::websearch::has_web_search_tool(&request));
+    assert!(!super::websearch::has_web_search_tool(&request));
     // The current user contains tool results, not a textual MCP search query.
     assert!(super::websearch::extract_search_query(&request).is_none());
     let mut mixed = fixture("web_search");
@@ -166,33 +178,16 @@ fn compatibility_gap_single_custom_web_search_is_dispatched_to_mcp_by_name() {
         .push(fixture("lookup")["tools"][0].clone());
     let request: MessagesRequest = serde_json::from_value(mixed).unwrap();
     assert!(!super::websearch::has_web_search_tool(&request));
+    let mut typed = fixture("web_search");
+    typed["tools"][0]["type"] = "web_search_20250305".into();
+    let request: MessagesRequest = serde_json::from_value(typed).unwrap();
+    // An explicit native type must not silently discard a client schema either.
+    assert!(!super::websearch::has_web_search_tool(&request));
+    assert!(converter::convert_request(&request).is_err());
 }
 
 #[test]
-fn compatibility_gap_channel_overrides_can_rebreak_fixed_schema_or_tool_identity() {
-    for native in [false, true] {
-        let (body, _) = wire(&fixture("override nested schema"), native);
-        assert_eq!(
-            tools(&body)[0]["inputSchema"]["json"]["properties"]["mode"],
-            json!({"type":"object","enum":["read","write"]})
-        );
-        assert_eq!(calls(&body)[0]["input"]["mode"], "read");
-
-        let (body, _) = wire(&fixture("override tool name"), native);
-        let definitions = tools(&body);
-        assert_eq!(definitions.len(), 2);
-        assert_eq!(definitions[0]["name"], "renamed_lookup");
-        assert_eq!(definitions[1]["name"], "lookup");
-        assert_eq!(
-            definitions[1]["inputSchema"]["json"]["properties"],
-            json!({})
-        );
-        assert_eq!(calls(&body)[0]["name"], "lookup");
-    }
-}
-
-#[test]
-fn compatibility_gap_invalid_tool_name_characters_reach_final_cli_body() {
+fn compatibility_invalid_tool_names_are_reversible_and_legal() {
     for name in ["functions.exec_command", "mcp/server/read", "read tool"] {
         assert!(
             !name
@@ -201,15 +196,22 @@ fn compatibility_gap_invalid_tool_name_characters_reach_final_cli_body() {
         );
         for native in [false, true] {
             let (body, mapping) = wire(&fixture(name), native);
-            assert_eq!(tools(&body)[0]["name"], name);
-            assert_eq!(calls(&body)[0]["name"], name);
-            assert!(mapping.is_empty());
+            let alias = tools(&body)[0]["name"].as_str().unwrap();
+            assert_ne!(alias, name);
+            assert!(
+                alias
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+            );
+            assert_eq!(calls(&body)[0]["name"], alias);
+            assert_eq!(mapping.get(alias).map(String::as_str), Some(name));
+            assert_response_name(&mapping, alias, name);
         }
     }
 }
 
 #[test]
-fn compatibility_gap_shortening_collision_duplicates_definitions_and_ambiguous_reverse_map() {
+fn compatibility_shortening_collision_keeps_names_and_reverse_map_distinct() {
     let request = fixture("shortening collision");
     let long = request["tools"][0]["name"].as_str().unwrap();
     let alias = request["tools"][1]["name"].as_str().unwrap();
@@ -219,39 +221,44 @@ fn compatibility_gap_shortening_collision_duplicates_definitions_and_ambiguous_r
         let (body, mapping) = wire(&request, native);
         let definitions = tools(&body);
         assert_eq!(definitions.len(), 2);
-        assert_eq!(definitions[0]["name"], alias);
+        let shortened = definitions[0]["name"].as_str().unwrap();
+        assert_ne!(shortened, alias);
         assert_eq!(definitions[1]["name"], alias);
-        assert_eq!(calls(&body)[0]["name"], alias);
-        // A response choosing the client's real short-name tool would also be
-        // restored to the long name by the same response mapping.
-        assert_eq!(mapping.get(alias).map(String::as_str), Some(long));
+        assert_eq!(calls(&body)[0]["name"], shortened);
+        assert_eq!(mapping.get(shortened).map(String::as_str), Some(long));
+        assert!(!mapping.contains_key(alias));
+        assert_response_name(&mapping, shortened, long);
+        assert_response_name(&mapping, alias, alias);
     }
 }
 
 #[test]
-fn compatibility_gap_legacy_and_explicit_native_tools_lose_schema_and_get_placeholders() {
-    for name in ["omitted type", "custom native type"] {
-        let request = fixture(name);
-        assert!(request["tools"][0].get("input_schema").is_none());
-        for native in [false, true] {
-            let (body, _) = wire(&request, native);
-            let definitions = tools(&body);
-            assert_eq!(definitions.len(), 2);
-            assert_eq!(definitions[0]["name"], "str_replace_editor");
-            assert_eq!(definitions[1]["name"], "text_editor");
-            for definition in definitions {
-                let schema = &definition["inputSchema"]["json"];
-                assert_eq!(schema["properties"], json!({}));
-                assert_eq!(schema["required"], json!([]));
-                assert_eq!(schema["additionalProperties"], true);
-            }
-            assert_eq!(calls(&body)[0]["name"], "text_editor");
-        }
+fn compatibility_omitted_type_preserves_schema_and_unsupported_native_is_rejected() {
+    let request = fixture("omitted type");
+    for native in [false, true] {
+        let (body, _) = wire(&request, native);
+        let definitions = tools(&body);
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0]["name"], "text_editor");
+        assert_eq!(
+            definitions[0]["inputSchema"]["json"],
+            request["tools"][0]["input_schema"]
+        );
     }
+    let mut request = request;
+    request["tools"] = json!([{"name":"str_replace_editor","type":"text_editor_20250124"}]);
+    let request: MessagesRequest = serde_json::from_value(request).unwrap();
+    assert!(
+        converter::convert_request(&request)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("tools[0].type")
+    );
 }
 
 #[test]
-fn compatibility_gap_error_result_has_extra_is_error_wire_field() {
+fn compatibility_error_result_uses_status_without_extra_wire_field() {
     for (name, failed) in [
         ("messages success result", false),
         ("messages error result", true),
@@ -261,11 +268,7 @@ fn compatibility_gap_error_result_has_extra_is_error_wire_field() {
             let result = &context(&body)["toolResults"][0];
             assert_eq!(result["toolUseId"], calls(&body)[0]["toolUseId"]);
             assert_eq!(result["status"], if failed { "error" } else { "success" });
-            if failed {
-                assert_eq!(result["isError"], true);
-            } else {
-                assert!(result.get("isError").is_none());
-            }
+            assert!(result.get("isError").is_none());
             let mut keys: Vec<_> = result
                 .as_object()
                 .unwrap()
@@ -273,28 +276,83 @@ fn compatibility_gap_error_result_has_extra_is_error_wire_field() {
                 .map(String::as_str)
                 .collect();
             keys.sort_unstable();
-            let expected = if failed {
-                vec!["content", "isError", "status", "toolUseId"]
-            } else {
-                vec!["content", "status", "toolUseId"]
-            };
+            let expected = vec!["content", "status", "toolUseId"];
             assert_eq!(keys, expected);
         }
     }
 }
 
 #[test]
-fn compatibility_gap_already_corrupted_nested_schema_is_not_repaired() {
+fn compatibility_already_corrupted_nested_schema_fails_before_upstream() {
     let mut request = fixture("lookup");
     // Reproduce pre-84dde51f7 gateway corruption without reimplementing its sanitizer.
     let broken = json!({"type":"object", "enum":["read", "write"]});
     request["tools"][0]["input_schema"]["properties"]["mode"] = broken.clone();
-    for native in [false, true] {
-        let (body, _) = wire(&request, native);
-        assert_eq!(
-            tools(&body)[0]["inputSchema"]["json"]["properties"]["mode"],
-            broken
-        );
-        assert!(calls(&body)[0]["input"]["mode"].is_string());
+    let request: MessagesRequest = serde_json::from_value(request).unwrap();
+    let error = converter::convert_request(&request)
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("tools[0].input_schema.properties.mode"));
+    assert!(error.contains("type contradicts enum/const"));
+}
+
+#[test]
+fn compatibility_name_collisions_include_history_only_and_case_insensitive_names() {
+    for reverse in [false, true] {
+        let mut request = fixture("functions.exec_command");
+        let mut legal = fixture("lookup")["tools"][0].clone();
+        legal["name"] = "FUNCTIONS_EXEC_COMMAND".into();
+        request["tools"].as_array_mut().unwrap().push(legal);
+        let mut third = fixture("lookup")["tools"][0].clone();
+        third["name"] = "functions/exec_command".into();
+        request["tools"].as_array_mut().unwrap().push(third);
+        if reverse {
+            request["tools"].as_array_mut().unwrap().reverse();
+        }
+        for native in [false, true] {
+            let (body, mapping) = wire(&request, native);
+            let names: Vec<_> = tools(&body)
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap().to_ascii_lowercase())
+                .collect();
+            let unique: std::collections::HashSet<_> = names.iter().collect();
+            assert_eq!(unique.len(), 3);
+            let alias = calls(&body)[0]["name"].as_str().unwrap();
+            assert_response_name(&mapping, alias, "functions.exec_command");
+            assert_response_name(&mapping, "FUNCTIONS_EXEC_COMMAND", "FUNCTIONS_EXEC_COMMAND");
+        }
     }
+    let mut request = fixture("functions.exec_command");
+    request["tools"] = json!([]);
+    let (body, mapping) = wire(&request, false);
+    assert_eq!(tools(&body)[0]["name"], calls(&body)[0]["name"]);
+    assert_response_name(
+        &mapping,
+        calls(&body)[0]["name"].as_str().unwrap(),
+        "functions.exec_command",
+    );
+}
+
+#[test]
+fn compatibility_schema_validation_keeps_data_and_valid_unions() {
+    let mut request = fixture("lookup");
+    request["tools"][0]["input_schema"] = json!({"type":"object","properties":{
+        "value":{"type":["string","null"],"enum":[null,"read"]},
+        "data":{"type":"object","enum":[{"type":"object","enum":["this is data"]}]},
+        "number":{"type":"integer","enum":[1.0]},
+        "mixed":{"type":"string","enum":[1,"read"]}
+    }});
+    for native in [false, true] {
+        wire(&request, native);
+    }
+    request["tools"][0]["input_schema"]["properties"]["secret"] =
+        json!({"type":"object","const":"do not log"});
+    let request: MessagesRequest = serde_json::from_value(request).unwrap();
+    let error = converter::convert_request(&request)
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("properties.secret"));
+    assert!(!error.contains("do not log"));
 }

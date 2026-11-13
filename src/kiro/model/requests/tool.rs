@@ -68,13 +68,9 @@ pub struct ToolResult {
     /// 执行状态（"success" 或 "error"）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
-    /// 是否为错误
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// Local compatibility flag; the upstream protocol expresses this via status.
+    #[serde(default, skip_serializing)]
     pub is_error: bool,
-}
-
-fn is_false(b: &bool) -> bool {
-    !*b
 }
 
 impl ToolResult {
@@ -160,6 +156,10 @@ mod tests {
 
         assert!(result.is_error);
         assert_eq!(result.status, Some("error".to_string()));
+        let wire = serde_json::to_value(&result).unwrap();
+        assert_eq!(wire["status"], "error");
+        assert_eq!(wire["content"][0]["text"], "File not found");
+        assert!(wire.get("isError").is_none());
     }
 
     #[test]

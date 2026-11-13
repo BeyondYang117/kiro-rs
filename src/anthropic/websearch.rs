@@ -103,10 +103,15 @@ pub struct WebSearchResult {
 
 /// 检查请求是否为纯 WebSearch 请求
 ///
-/// 条件：tools 有且只有一个，且 name 为 web_search
+/// Only an explicitly typed native search tool can use the server MCP route.
 pub fn has_web_search_tool(req: &MessagesRequest) -> bool {
     req.tools.as_ref().is_some_and(|tools| {
-        tools.len() == 1 && tools.first().is_some_and(|t| t.name == "web_search")
+        tools.len() == 1
+            && tools.first().is_some_and(|t| {
+                t.name == "web_search"
+                    && t.tool_type.as_deref() == Some("web_search_20250305")
+                    && t.input_schema.is_empty()
+            })
     })
 }
 
