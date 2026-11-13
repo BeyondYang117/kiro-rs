@@ -49,6 +49,16 @@ export interface UpstreamRequestDiagnostics {
   recentHistory: unknown[]
   historySummaryTruncated: boolean
   currentMessage: unknown
+  toolDiagnostics?: {
+    toolUses: number
+    toolResults: number
+    historyMessagesWithTools: number
+    recentToolHistory: unknown[]
+    historyTruncated: boolean
+    issueCount: number
+    issues: { path: string; reason: string }[]
+    issuesTruncated: boolean
+  }
 }
 
 export interface LogRecord {

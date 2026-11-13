@@ -38,6 +38,11 @@ function RequestDiagnostics({ data }: { data: UpstreamRequestDiagnostics }) {
     <details><summary className="cursor-pointer">查看消息结构{data.historySummaryTruncated ? '（历史仅展示最近 12 条，统计包含全部）' : ''}</summary>
       <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify({ currentMessage: data.currentMessage, recentHistory: data.recentHistory }, null, 2)}</pre>
     </details>
+    {data.toolDiagnostics && <details open={data.toolDiagnostics.issueCount > 0}>
+      <summary className="cursor-pointer">工具结构 · 调用 {formatNumber(data.toolDiagnostics.toolUses)} / 结果 {formatNumber(data.toolDiagnostics.toolResults)} · 异常 {formatNumber(data.toolDiagnostics.issueCount)}</summary>
+      <p className="mt-2 text-muted-foreground">检查全部历史及当前消息；下方最多展示最近 12 条含工具的历史消息及前 24 个异常位置。</p>
+      <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify(data.toolDiagnostics, null, 2)}</pre>
+    </details>}
   </div>
 }
 
