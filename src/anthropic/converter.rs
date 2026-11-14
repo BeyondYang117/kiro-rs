@@ -79,9 +79,9 @@ fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
     serde_json::Value::Object(obj)
 }
 
-/// Kiro rejects `additionalProperties` in tool schemas. `true` is equivalent
-/// to omitting the keyword; restrictive forms must be rejected rather than
-/// silently broadening the client's schema.
+/// Kiro rejects `additionalProperties` in tool schemas. Boolean values are
+/// omitted for compatibility; schema-valued restrictions cannot be preserved
+/// and must be rejected rather than silently dropping their value constraints.
 fn validate_kiro_tool_schema(
     schema: &serde_json::Value,
     path: &str,
@@ -92,7 +92,7 @@ fn validate_kiro_tool_schema(
     };
     if object
         .get("additionalProperties")
-        .is_some_and(|value| value != &Value::Bool(true))
+        .is_some_and(Value::is_object)
     {
         return Err(ConversionError::InvalidToolFormat(format!(
             "{path}.additionalProperties cannot be represented by Kiro without weakening the schema"
@@ -157,7 +157,10 @@ fn normalize_kiro_tool_schema(schema: &mut serde_json::Value) {
     let Some(object) = schema.as_object_mut() else {
         return;
     };
-    if object.get("additionalProperties") == Some(&serde_json::Value::Bool(true)) {
+    if object
+        .get("additionalProperties")
+        .is_some_and(serde_json::Value::is_boolean)
+    {
         object.remove("additionalProperties");
     }
     if object

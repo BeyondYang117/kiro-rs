@@ -428,10 +428,7 @@ fn kiro_tool_schema_removes_unsupported_keywords_recursively() {
 #[test]
 fn kiro_tool_schema_rejects_restrictions_it_cannot_preserve() {
     for schema in [
-        json!({"type":"object", "additionalProperties":false}),
         json!({"type":"object", "properties":{"nested":{"type":"object", "additionalProperties":{"type":"string"}}}}),
-        json!({"type":"object", "properties":{"items":{"type":"array", "items":[{"additionalProperties":false}]}}}),
-        json!({"type":"object", "properties":{"dependency":{"dependencies":{"other":{"additionalProperties":false}}}}}),
     ] {
         let request: MessagesRequest = serde_json::from_value(json!({
             "model":"claude-sonnet-5.5", "max_tokens":16,
@@ -444,6 +441,45 @@ fn kiro_tool_schema_rejects_restrictions_it_cannot_preserve() {
             .to_string();
         assert!(error.contains("additionalProperties"), "{error}");
     }
+}
+
+#[test]
+fn kiro_tool_schema_omits_boolean_additional_properties_at_every_depth() {
+    let schema = json!({
+        "type":"object",
+        "additionalProperties":false,
+        "properties": {
+            "nested":{"type":"object", "additionalProperties":false},
+            "items":{"type":"array", "items":{"type":"object", "additionalProperties":true}}
+        }
+    });
+    let request: MessagesRequest = serde_json::from_value(json!({
+        "model":"claude-sonnet-5.5", "max_tokens":16,
+        "messages":[{"role":"user","content":"test"}],
+        "tools":[{"name":"test","description":"test","input_schema":schema}]
+    }))
+    .unwrap();
+    let converted = converter::convert_request(&request).unwrap();
+    let normalized = &converted
+        .conversation_state
+        .current_message
+        .user_input_message
+        .user_input_message_context
+        .tools[0]
+        .tool_specification
+        .input_schema
+        .json;
+    assert!(normalized.get("additionalProperties").is_none());
+    assert!(
+        normalized["properties"]["nested"]
+            .get("additionalProperties")
+            .is_none()
+    );
+    assert!(
+        normalized["properties"]["items"]["items"]
+            .get("additionalProperties")
+            .is_none()
+    );
 }
 
 #[test]
