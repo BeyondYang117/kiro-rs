@@ -3349,6 +3349,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn undeclared_tool_arguments_never_reach_the_client() {
+        for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+            for streaming in [false, true] {
+                let req = request(json!({
+                    "model":"claude-sonnet-5", "max_tokens":1024, "stream":streaming,
+                    "messages":[{"role":"user","content":"read"}],
+                    "tools":[{"name":"read_file","input_schema":{
+                        "type":"object", "additionalProperties":false,
+                        "required":["path"], "properties":{"path":{"type":"string"}}
+                    }}]
+                }));
+                let converted = convert_request(&req).unwrap();
+                let upstream_name = &converted
+                    .conversation_state
+                    .current_message
+                    .user_input_message
+                    .user_input_message_context
+                    .tools[0]
+                    .tool_specification
+                    .name;
+                let mut upstream = mock(frame(
+                    "toolUseEvent",
+                    json!({
+                        "name":upstream_name, "toolUseId":"unexpected-argument",
+                        "input":"{\"path\":\"file.txt\",\"extra\":true}", "stop":true
+                    }),
+                ))
+                .await;
+                upstream.state.cc_buffered_stream = buffered;
+                let response = dispatch(upstream.state.clone(), req, cc).await;
+                assert_tool_call_failure(response, streaming).await;
+                assert_eq!(upstream.requests.lock().unwrap().len(), 1);
+                assert_eq!(upstream.manager.snapshot().entries[0].success_count, 0);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn truncated_tool_limit_fails_even_if_upstream_keeps_the_body_open() {
         let mut bytes = frame(
             "toolUseEvent",
