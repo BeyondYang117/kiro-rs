@@ -492,9 +492,15 @@ fn tool_recovery_request(request_body: &str, recovery: u8) -> Option<String> {
     serde_json::to_string(&request).ok()
 }
 
-/// Use the actual upstream names (including shortened MCP names) and normalized
-/// schemas. Only check top-level required fields, not the full JSON Schema.
-fn required_tool_fields(request_body: &str) -> HashMap<String, Vec<String>> {
+#[derive(Default)]
+struct ToolInputConstraints {
+    required: Vec<String>,
+    schema: serde_json::Value,
+}
+
+/// Use upstream tool names and schemas. Keep the schema because Kiro cannot
+/// enforce `additionalProperties: false` itself.
+fn required_tool_fields(request_body: &str) -> HashMap<String, ToolInputConstraints> {
     let Ok(request) =
         serde_json::from_str::<crate::kiro::model::requests::kiro::KiroRequest>(request_body)
     else {
@@ -509,18 +515,115 @@ fn required_tool_fields(request_body: &str) -> HashMap<String, Vec<String>> {
         .into_iter()
         .map(|tool| {
             let spec = tool.tool_specification;
-            let required = spec
-                .input_schema
-                .json
+            let schema = spec.input_schema.json;
+            let required = schema
                 .get("required")
                 .and_then(|v| v.as_array())
                 .into_iter()
                 .flatten()
                 .filter_map(|v| v.as_str().map(str::to_owned))
                 .collect();
-            (spec.name.to_ascii_lowercase(), required)
+            (
+                spec.name.to_ascii_lowercase(),
+                ToolInputConstraints { required, schema },
+            )
         })
         .collect()
+}
+
+fn additional_property_violation(
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+    path: &str,
+) -> Option<String> {
+    let schema = schema.as_object()?;
+    if let Some(object) = value.as_object() {
+        let properties = schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object);
+        let patterns = schema
+            .get("patternProperties")
+            .and_then(serde_json::Value::as_object);
+        if schema.get("additionalProperties") == Some(&serde_json::Value::Bool(false)) {
+            if let Some(key) = object.keys().find(|key| {
+                !properties.is_some_and(|properties| properties.contains_key(*key))
+                    && !patterns.is_some_and(|patterns| {
+                        patterns.keys().any(|pattern| {
+                            regex::Regex::new(pattern).is_ok_and(|regex| regex.is_match(key))
+                        })
+                    })
+            }) {
+                return Some(if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                });
+            }
+        }
+        if let Some(properties) = properties {
+            for (key, child_schema) in properties {
+                if let Some(child_value) = object.get(key) {
+                    let child_path = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    if let Some(violation) =
+                        additional_property_violation(child_schema, child_value, &child_path)
+                    {
+                        return Some(violation);
+                    }
+                }
+            }
+        }
+        if let Some(patterns) = patterns {
+            for (pattern, child_schema) in patterns {
+                let Ok(regex) = regex::Regex::new(pattern) else {
+                    continue;
+                };
+                for (key, child_value) in object.iter().filter(|(key, _)| regex.is_match(key)) {
+                    let child_path = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    if let Some(violation) =
+                        additional_property_violation(child_schema, child_value, &child_path)
+                    {
+                        return Some(violation);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(array) = value.as_array() {
+        match schema.get("items") {
+            Some(serde_json::Value::Array(schemas)) => {
+                for (index, (child_schema, child_value)) in schemas.iter().zip(array).enumerate() {
+                    if let Some(violation) = additional_property_violation(
+                        child_schema,
+                        child_value,
+                        &format!("{path}[{index}]"),
+                    ) {
+                        return Some(violation);
+                    }
+                }
+            }
+            Some(child_schema) => {
+                for (index, child_value) in array.iter().enumerate() {
+                    if let Some(violation) = additional_property_violation(
+                        child_schema,
+                        child_value,
+                        &format!("{path}[{index}]"),
+                    ) {
+                        return Some(violation);
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    None
 }
 
 fn has_meaningful_text(text: &str, thinking_enabled: bool) -> bool {
@@ -546,7 +649,7 @@ pub(crate) struct UpstreamResponseDecoder {
     frames: EventStreamDecoder,
     decoding_stopped_early: bool,
     pending_tools: HashMap<String, PendingTool>,
-    required_fields: HashMap<String, Vec<String>>,
+    required_fields: HashMap<String, ToolInputConstraints>,
     tool_events: Vec<Event>,
     tool_buffer_bytes: usize,
     context_full: bool,
@@ -575,7 +678,7 @@ impl UpstreamResponseDecoder {
     fn for_response(
         response: &UpstreamResponse,
         policy: ResponsePolicy,
-        required_fields: HashMap<String, Vec<String>>,
+        required_fields: HashMap<String, ToolInputConstraints>,
     ) -> Self {
         Self {
             required_fields,
@@ -817,21 +920,35 @@ impl UpstreamResponseDecoder {
                                 },
                             )?
                         };
-                        let Some(input) = input.as_object() else {
+                        let Some(input_object) = input.as_object() else {
                             return Err(ToolCallError::Invalid(
                                 "Upstream tool input must be a JSON object".into(),
                             )
                             .into());
                         };
-                        if let Some(required) =
+                        if let Some(constraints) =
                             self.required_fields.get(&pending.name.to_ascii_lowercase())
-                            && required.iter().any(|key| !input.contains_key(key))
                         {
-                            return Err(ToolCallError::Invalid(format!(
-                                "Upstream tool {} is missing required arguments",
-                                pending.name
-                            ))
-                            .into());
+                            if constraints
+                                .required
+                                .iter()
+                                .any(|key| !input_object.contains_key(key))
+                            {
+                                return Err(ToolCallError::Invalid(format!(
+                                    "Upstream tool {} is missing required arguments",
+                                    pending.name
+                                ))
+                                .into());
+                            }
+                            if let Some(path) =
+                                additional_property_violation(&constraints.schema, &input, "")
+                            {
+                                return Err(ToolCallError::Invalid(format!(
+                                    "Upstream tool {} returned an undeclared argument at {path}",
+                                    pending.name
+                                ))
+                                .into());
+                            }
                         }
                         self.pending_tools.remove(&tool.tool_use_id);
                     }
@@ -909,5 +1026,44 @@ fn diagnostic_fields(
             fields.push(path.clone());
             diagnostic_fields(value, &path, depth + 1, fields);
         }
+    }
+}
+
+#[cfg(test)]
+mod tool_schema_tests {
+    use super::*;
+
+    #[test]
+    fn additional_properties_false_is_checked_recursively() {
+        let schema = serde_json::json!({
+            "type":"object",
+            "additionalProperties":false,
+            "properties":{
+                "nested":{"type":"object", "additionalProperties":false,
+                    "properties":{"ok":{"type":"string"}}},
+                "items":{"type":"array", "items":{"type":"object",
+                    "additionalProperties":false, "properties":{"id":{"type":"string"}}}}
+            }
+        });
+        assert_eq!(
+            additional_property_violation(&schema, &serde_json::json!({"extra":1}), ""),
+            Some("extra".into())
+        );
+        assert_eq!(
+            additional_property_violation(&schema, &serde_json::json!({"nested":{"extra":1}}), ""),
+            Some("nested.extra".into())
+        );
+        assert_eq!(
+            additional_property_violation(&schema, &serde_json::json!({"items":[{"extra":1}]}), ""),
+            Some("items[0].extra".into())
+        );
+        assert_eq!(
+            additional_property_violation(
+                &schema,
+                &serde_json::json!({"nested":{"ok":"yes"},"items":[{"id":"1"}]}),
+                ""
+            ),
+            None
+        );
     }
 }

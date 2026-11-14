@@ -596,6 +596,7 @@ impl KiroProvider {
             let url = endpoint.api_url(&rctx);
             let body = endpoint.transform_api_body(request_body, &rctx);
             let body = self.token_manager.model_request_body(ctx.id, body);
+            let body = normalize_kiro_tool_schemas(&body);
             let request_diagnostics = crate::request_log::summarize_request(
                 &body,
                 super::endpoint::native_thinking(&ctx.credentials, config)
@@ -887,11 +888,52 @@ impl KiroProvider {
     }
 }
 
+/// Remove boolean `additionalProperties` keywords that Kiro rejects. The
+/// original request body remains available to response validation.
+fn normalize_kiro_tool_schemas(body: &str) -> String {
+    let Ok(mut request) = serde_json::from_str::<serde_json::Value>(body) else {
+        return body.to_owned();
+    };
+    if let Some(tools) = request
+        .pointer_mut(
+            "/conversationState/currentMessage/userInputMessage/userInputMessageContext/tools",
+        )
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for tool in tools {
+            if let Some(schema) = tool.pointer_mut("/toolSpecification/inputSchema/json") {
+                crate::anthropic::strip_kiro_boolean_additional_properties(schema);
+            }
+        }
+    }
+    serde_json::to_string(&request).unwrap_or_else(|_| body.to_owned())
+}
+
 #[cfg(test)]
 mod response_tests {
     use super::*;
     use crate::model::config::Config;
     use futures::{StreamExt, stream};
+
+    #[test]
+    fn upstream_tool_schemas_omit_boolean_additional_properties() {
+        let body = r#"{"conversationState":{"currentMessage":{"userInputMessage":{"userInputMessageContext":{"tools":[{"toolSpecification":{"inputSchema":{"json":{"type":"object","additionalProperties":false,"properties":{"nested":{"type":"object","additionalProperties":false},"items":{"type":"array","items":{"additionalProperties":true}}}}}}}]}}}}}"#;
+        let normalized: serde_json::Value =
+            serde_json::from_str(&normalize_kiro_tool_schemas(body)).unwrap();
+        let schema = &normalized["conversationState"]["currentMessage"]["userInputMessage"]["userInputMessageContext"]
+            ["tools"][0]["toolSpecification"]["inputSchema"]["json"];
+        assert!(schema.get("additionalProperties").is_none());
+        assert!(
+            schema["properties"]["nested"]
+                .get("additionalProperties")
+                .is_none()
+        );
+        assert!(
+            schema["properties"]["items"]["items"]
+                .get("additionalProperties")
+                .is_none()
+        );
+    }
 
     async fn response(pending: bool) -> (Arc<MultiTokenManager>, UpstreamResponse) {
         response_with_limit(pending, 64).await

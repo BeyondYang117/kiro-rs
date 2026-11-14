@@ -444,7 +444,7 @@ fn kiro_tool_schema_rejects_restrictions_it_cannot_preserve() {
 }
 
 #[test]
-fn kiro_tool_schema_omits_boolean_additional_properties_at_every_depth() {
+fn internal_tool_schema_retains_false_and_omits_true_additional_properties() {
     let schema = json!({
         "type":"object",
         "additionalProperties":false,
@@ -469,11 +469,10 @@ fn kiro_tool_schema_omits_boolean_additional_properties_at_every_depth() {
         .tool_specification
         .input_schema
         .json;
-    assert!(normalized.get("additionalProperties").is_none());
-    assert!(
-        normalized["properties"]["nested"]
-            .get("additionalProperties")
-            .is_none()
+    assert_eq!(normalized["additionalProperties"], false);
+    assert_eq!(
+        normalized["properties"]["nested"]["additionalProperties"],
+        false
     );
     assert!(
         normalized["properties"]["items"]["items"]
