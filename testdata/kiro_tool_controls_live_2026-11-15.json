@@ -1,0 +1,1131 @@
+{
+  "date": "2026-11-15",
+  "endpoint": "cli",
+  "region": "us-east-1",
+  "model": "claude-haiku-5.5",
+  "methodology": [
+    "Explicitly imported account only; one request per case, no tools executed, no retries.",
+    "Candidate fields and complete descriptions inserted after endpoint and account model shaping. Literal reqwest body checked before execution; SHA-256 recorded.",
+    "Direct real Kiro HTTP requests bypass handler normalization, provider validation and response schema validation.",
+    "Model parameter schema retrieved from authenticated KiroControlPlaneBearerService.ListAvailableModels with origin KIRO_CLI; only tested model schema included."
+  ],
+  "findings": [
+    "10000, 12000 and 20000 character descriptions accepted with completed tool calls using the marker at the very end.",
+    "additionalModelRequestFields rejects temperature, top_p, top_k, stop_sequences, tool_choice and toolChoice with HTTP 400 unknown-property validation errors.",
+    "Candidate root/context fields return 200 even for invalid types/choices and an unknown sentinel field. HTTP acceptance alone is not evidence of control support.",
+    "Stop sequences did not truncate the marker; forced any/tool choices yielded text without tools; root none still yielded a completed tool call.",
+    "Two tools were returned with disable_parallel_tool_use=true; event records here do not establish their scheduling or interleaving.",
+    "No statistical sampling test was performed; the temperature/top_p/top_k results do not establish a behavioral effect or prove they have none."
+  ],
+  "limits": "One account/model, CLI endpoint, us-east-1, on this date. No claim about all Kiro models, other endpoints, undocumented placements or future behavior. 200 is not a support guarantee; descriptions longer than 20000 characters were not tested.",
+  "modelParameterSchema": {
+    "type": "object",
+    "properties": {
+      "thinking": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "adaptive",
+              "disabled"
+            ]
+          },
+          "display": {
+            "type": "string",
+            "enum": [
+              "summarized",
+              "omitted"
+            ]
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "output_config": {
+        "type": "object",
+        "properties": {
+          "effort": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "default": "medium"
+          }
+        }
+      },
+      "max_tokens": {
+        "type": "integer",
+        "minimum": 1024,
+        "maximum": 64000
+      }
+    },
+    "additionalProperties": false
+  },
+  "results": [
+    {
+      "assistantText": "BEFORE_STOP_MARKER_AFTER",
+      "bodySha256": "770a734ec344e32d0fedacf6b46e2660ff6a8c2239fe074efeb47d8d976b0260",
+      "case": "baseline-text",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 2056,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {},
+      "patchPointer": "",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "33b8a5ac-6fd1-4b47-a415-417b0bfb1c21",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "",
+      "bodySha256": "36709b0a83232e91de3c3761f01ceab21dbca4b7b6633ffa1f01808672435340",
+      "case": "description-10000",
+      "descriptionChars": 10000,
+      "descriptionSha256": "b3e29d021b7a4952e2050e61307bdeb5c799f673a72a21bac4dbd9dd12b2b444",
+      "descriptionTail": "dddddddddddd END OF TOOL DESCRIPTION: value must be DESC_TAIL_OK.",
+      "durationMs": 4015,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {},
+      "patchPointer": "",
+      "prompt": "Call probe_echo once. Set value to the exact marker specified at the END of its description. Do not explain.",
+      "region": "us-east-1",
+      "requestId": "2dce9f39-1221-439f-ad33-53e3d8cd422d",
+      "toolCalls": {
+        "toolu_bdrk_01FXn7breWsQrji68one1uxD": {
+          "complete": true,
+          "input": {
+            "value": "DESC_TAIL_OK"
+          },
+          "name": "probe_echo",
+          "rawInput": "{\"value\": \"DESC_TAIL_OK\"}"
+        }
+      },
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "",
+      "bodySha256": "88cda34c03806dd1443e533c8d849ef5eeef51594286bfc789a86172321903a5",
+      "case": "description-12000",
+      "descriptionChars": 12000,
+      "descriptionSha256": "885c4ee9e744a399cf9896bf9355c3009fb293721acfb24c01d224128af1a0f2",
+      "descriptionTail": "dddddddddddd END OF TOOL DESCRIPTION: value must be DESC_TAIL_OK.",
+      "durationMs": 3826,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {},
+      "patchPointer": "",
+      "prompt": "Call probe_echo once. Set value to the exact marker specified at the END of its description. Do not explain.",
+      "region": "us-east-1",
+      "requestId": "6c5b48d6-ed12-40f9-8247-ca2c7b64c285",
+      "toolCalls": {
+        "toolu_bdrk_01Dzwvw5kRe1nB4GWZtghaNS": {
+          "complete": true,
+          "input": {
+            "value": "DESC_TAIL_OK"
+          },
+          "name": "probe_echo",
+          "rawInput": "{\"value\": \"DESC_TAIL_OK\"}"
+        }
+      },
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "",
+      "bodySha256": "2fbd7780b4bac96f10aae4a0d6b16c8089db3267be118ca31c8166b9e00854bc",
+      "case": "description-20000",
+      "descriptionChars": 20000,
+      "descriptionSha256": "9e6a4fb2484e2fa6c9c43f8af8a85e47c39a8fdca50051ef44652db35ec8c494",
+      "descriptionTail": "dddddddddddd END OF TOOL DESCRIPTION: value must be DESC_TAIL_OK.",
+      "durationMs": 5254,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {},
+      "patchPointer": "",
+      "prompt": "Call probe_echo once. Set value to the exact marker specified at the END of its description. Do not explain.",
+      "region": "us-east-1",
+      "requestId": "b91b3d81-86ad-4ce5-b4e1-2572a481ee30",
+      "toolCalls": {
+        "toolu_bdrk_01NdtsY7rDvtUWziV4Mg1r96": {
+          "complete": true,
+          "input": {
+            "value": "DESC_TAIL_OK"
+          },
+          "name": "probe_echo",
+          "rawInput": "{\"value\": \"DESC_TAIL_OK\"}"
+        }
+      },
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "",
+      "bodySha256": "b4b47a846c6efc1e0c6eadaaf65d66f99d2b609836ee649163bc814b330cfc05",
+      "case": "native-temperature",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 458,
+      "endpoint": "cli",
+      "errors": [
+        {
+          "__type": "com.amazon.kiro.runtimeservice#ValidationException",
+          "message": "Invalid additionalModelRequestFields: property 'temperature' is not defined in the schema and the schema does not allow additional properties",
+          "reason": "REQUEST_BODY_INVALID"
+        }
+      ],
+      "events": [],
+      "httpStatus": 400,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "temperature": 0
+      },
+      "patchPointer": "/additionalModelRequestFields",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "f098bedd-2ac8-4633-ac45-504bca60f480",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "",
+      "bodySha256": "9440c56ed50d867183e7e98736d1baede7f81d62064128f875a1c02bd3c2d780",
+      "case": "native-top_p",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 382,
+      "endpoint": "cli",
+      "errors": [
+        {
+          "__type": "com.amazon.kiro.runtimeservice#ValidationException",
+          "message": "Invalid additionalModelRequestFields: property 'top_p' is not defined in the schema and the schema does not allow additional properties",
+          "reason": "REQUEST_BODY_INVALID"
+        }
+      ],
+      "events": [],
+      "httpStatus": 400,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "top_p": 0.5
+      },
+      "patchPointer": "/additionalModelRequestFields",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "8463986d-a374-419e-822c-7b6adfaf0a35",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "",
+      "bodySha256": "9a1a26ae0eb69370904e22847c3fb41e7b236893110bcda0c2686f9846cd7d61",
+      "case": "native-top_k",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 405,
+      "endpoint": "cli",
+      "errors": [
+        {
+          "__type": "com.amazon.kiro.runtimeservice#ValidationException",
+          "message": "Invalid additionalModelRequestFields: property 'top_k' is not defined in the schema and the schema does not allow additional properties",
+          "reason": "REQUEST_BODY_INVALID"
+        }
+      ],
+      "events": [],
+      "httpStatus": 400,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "top_k": 1
+      },
+      "patchPointer": "/additionalModelRequestFields",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "79be7984-eac5-4a06-ace2-5c9348b0b938",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "",
+      "bodySha256": "99dedcd0fe627fb6f8673342488a23641484a83ac193b86457d3536f75cb7fb8",
+      "case": "native-stop_sequences",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 406,
+      "endpoint": "cli",
+      "errors": [
+        {
+          "__type": "com.amazon.kiro.runtimeservice#ValidationException",
+          "message": "Invalid additionalModelRequestFields: property 'stop_sequences' is not defined in the schema and the schema does not allow additional properties",
+          "reason": "REQUEST_BODY_INVALID"
+        }
+      ],
+      "events": [],
+      "httpStatus": 400,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "stop_sequences": [
+          "_STOP_MARKER_"
+        ]
+      },
+      "patchPointer": "/additionalModelRequestFields",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "c626961b-5e73-4df2-ba8e-eaf147475432",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "",
+      "bodySha256": "78da4a3d1bc052106952ac1630cc212d9c43cda9031c3f0a50b0aa74d02c9c68",
+      "case": "native-tool_choice",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 415,
+      "endpoint": "cli",
+      "errors": [
+        {
+          "__type": "com.amazon.kiro.runtimeservice#ValidationException",
+          "message": "Invalid additionalModelRequestFields: property 'tool_choice' is not defined in the schema and the schema does not allow additional properties",
+          "reason": "REQUEST_BODY_INVALID"
+        }
+      ],
+      "events": [],
+      "httpStatus": 400,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "tool_choice": {
+          "type": "any"
+        }
+      },
+      "patchPointer": "/additionalModelRequestFields",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "75e49049-7ce8-4c8a-a481-45c00cba2150",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "BEFORE_STOP_MARKER_AFTER",
+      "bodySha256": "b700f2a428524bd6ed47df0963ea1645e3e816f4b06d5b87d8aae867dfb6eb2d",
+      "case": "root-temperature",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1591,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "temperature": 0
+      },
+      "patchPointer": "",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "7e75fa34-7f52-461e-9456-42fd6d225ce0",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "BEFORE_STOP_MARKER_AFTER",
+      "bodySha256": "26fc67e4f25dfcb58e897ff7a483e7d9b7681145301820d56a62fd8e0c17505c",
+      "case": "root-temperature-invalid",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1562,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "temperature": "NOT_A_NUMBER"
+      },
+      "patchPointer": "",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "c43f13a2-2b14-4870-8d77-45de3c24f803",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "BEFORE_STOP_MARKER_AFTER",
+      "bodySha256": "551c45cede0f54ad7e53700616dcdbeeb03d64dada85e045ce9470fbf3bec8f8",
+      "case": "root-top_p",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1535,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "top_p": 0.5
+      },
+      "patchPointer": "",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "f9472bbb-a5fa-4146-b65b-336f673ce814",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "BEFORE_STOP_MARKER_AFTER",
+      "bodySha256": "41ed1f4c1bc421c5d1cfa284ae422429501fe9816717ad5b5f06e8d159a17634",
+      "case": "root-top_k",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1559,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "top_k": 1
+      },
+      "patchPointer": "",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "266f086a-7af0-4a20-8362-2d37845c4205",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "BEFORE_STOP_MARKER_AFTER",
+      "bodySha256": "f8cd4efdff5deab773c5c294e9c248f67d7c2fd356b85774fc902ae50829176e",
+      "case": "root-stop_sequences",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1521,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "stop_sequences": [
+          "_STOP_MARKER_"
+        ]
+      },
+      "patchPointer": "",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "131042d7-3058-4113-aa91-f81be0770b2a",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "BEFORE_STOP_MARKER_AFTER",
+      "bodySha256": "79f919cfd5672ba85603ea6f05845116d560ed5184a3677fc3e7b44fb6ebdc4f",
+      "case": "root-tool_choice-any",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1521,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "tool_choice": {
+          "type": "any"
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "abeb4d52-e93d-4d3c-8895-0ad9ec76b4b6",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "BEFORE_STOP_MARKER_AFTER",
+      "bodySha256": "feef56076321c0632f4b95e7701fe05e647c5c668135f0b839fade751e1e138e",
+      "case": "root-tool_choice-tool",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1456,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "tool_choice": {
+          "name": "probe_echo",
+          "type": "tool"
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "bcbcbe60-7229-4de5-8490-c20c3e309981",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "BEFORE_STOP_MARKER_AFTER",
+      "bodySha256": "b7732048d215c65d04501e18b77062dc158c40762e25ced32eaa0462131ea024",
+      "case": "root-tool_choice-invalid",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1431,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "tool_choice": {
+          "type": "NOT_A_CHOICE"
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "e7a6a712-ce31-4bf9-93b0-6d253829df74",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "BEFORE_STOP_MARKER_AFTER",
+      "bodySha256": "3158cbacbacdc5598942e54754b5debb60bca3a0ec6f6da8139129fe4b99dbf2",
+      "case": "root-unknown-control",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1383,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "kiro_probe_unknown_field": {
+          "sentinel": true
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "fe3d8017-65c7-434c-855c-50a2deec4b0c",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "BEFORE_STOP_MARKER_AFTER",
+      "bodySha256": "d22fcaffde027666eaef1e811328b4a0aade957969819a178229e5f7637289ad",
+      "case": "context-toolChoice-any",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1413,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "toolChoice": {
+          "any": {}
+        }
+      },
+      "patchPointer": "/conversationState/currentMessage/userInputMessage/userInputMessageContext",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "04626a3b-2304-41f6-879a-30a9d58d3b92",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "BEFORE_STOP_MARKER_AFTER",
+      "bodySha256": "2300a552eea30996537fb6d17305ff65958de01db812773d078746a8355e1174",
+      "case": "context-toolChoice-invalid",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1463,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "toolChoice": {
+          "NOT_A_CHOICE": {}
+        }
+      },
+      "patchPointer": "/conversationState/currentMessage/userInputMessage/userInputMessageContext",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "a9ea42b0-d193-4fa2-a097-eb1f92d72991",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "BEFORE_STOP_MARKER_AFTER",
+      "bodySha256": "d271e24334ea72688fc0d6a5fce485e21807e2ab95f254dab8c845e03b64c880",
+      "case": "context-inferenceConfig",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1552,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "inferenceConfig": {
+          "stopSequences": [
+            "_STOP_MARKER_"
+          ],
+          "temperature": 0,
+          "topP": 0.5
+        }
+      },
+      "patchPointer": "/conversationState/currentMessage/userInputMessage/userInputMessageContext",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "34576d34-d736-4763-982a-148d4e68814c",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "",
+      "bodySha256": "55a09051a9bb2751c93321a8dd32eb52ac47c37092e71d12c7ff89cd0e6fd419",
+      "case": "native-toolChoice",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 972,
+      "endpoint": "cli",
+      "errors": [
+        {
+          "__type": "com.amazon.kiro.runtimeservice#ValidationException",
+          "message": "Invalid additionalModelRequestFields: property 'toolChoice' is not defined in the schema and the schema does not allow additional properties",
+          "reason": "REQUEST_BODY_INVALID"
+        }
+      ],
+      "events": [],
+      "httpStatus": 400,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "toolChoice": {
+          "any": {}
+        }
+      },
+      "patchPointer": "/additionalModelRequestFields",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "e17d30ec-3d28-4f9f-8048-e42bbbdf7d49",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "BEFORE_STOP_MARKER_AFTER",
+      "bodySha256": "ed87abefa768a3fb59618fc85fccc7e2379b8d9b7c863b1b05d35aa6d461f1d9",
+      "case": "root-toolChoice-any",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1540,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "toolChoice": {
+          "any": {}
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "5c8e4c7c-81e2-4841-8a34-299eb17e958b",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "BEFORE_STOP_MARKER_AFTER",
+      "bodySha256": "12d77d83f020b1d4b19fd07038dda5f92200f5511912d5ad6b5b280d79199891",
+      "case": "root-toolConfig-any",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1497,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "toolConfig": {
+          "toolChoice": {
+            "any": {}
+          }
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "05df06c9-c838-4527-a703-cb0c694020ac",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "BEFORE_STOP_MARKER_AFTER",
+      "bodySha256": "9d9631022ca62932b82af4fe3ec4fb430d1ded250d65aec5bd493651e9babb9b",
+      "case": "context-toolConfig-any",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1650,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "toolConfig": {
+          "toolChoice": {
+            "any": {}
+          }
+        }
+      },
+      "patchPointer": "/conversationState/currentMessage/userInputMessage/userInputMessageContext",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "cf0301e1-df29-46a2-a07a-02742b98138a",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "BEFORE_STOP_MARKER_AFTER",
+      "bodySha256": "d38e866e77d576245f1364deb41ca9feb97ad783f48cee45b97e6301c0a88f85",
+      "case": "root-inferenceConfig",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1484,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "inferenceConfig": {
+          "stopSequences": [
+            "_STOP_MARKER_"
+          ],
+          "temperature": 0,
+          "topP": 0.5
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Do not call any tools. Reply with exactly BEFORE_STOP_MARKER_AFTER.",
+      "region": "us-east-1",
+      "requestId": "a82cbfa8-0d6f-4497-ab63-551b51cd71a0",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "",
+      "bodySha256": "c0b1126b7c47aeb32bab89a2495ed681ba297cb5ef0771db0301eb3580c3d8a1",
+      "case": "root-tool_choice-none",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1667,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "tool_choice": {
+          "type": "none"
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Call probe_echo exactly once with value FORCE_TOOL_OK. Do not answer in text.",
+      "region": "us-east-1",
+      "requestId": "d3afe11b-741b-46e1-aefd-2d2735f458a1",
+      "toolCalls": {
+        "toolu_bdrk_01NrN2XWBdP3g2GYcDARzghC": {
+          "complete": true,
+          "input": {
+            "value": "FORCE_TOOL_OK"
+          },
+          "name": "probe_echo",
+          "rawInput": "{\"value\": \"FORCE_TOOL_OK\"}"
+        }
+      },
+      "wireUnchanged": true
+    },
+    {
+      "assistantText": "",
+      "bodySha256": "66015a5eccfafabb0032bbd13f3c06d1548186d3485ea4265660bba7986289ad",
+      "case": "root-no-parallel",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1650,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "patch": {
+        "tool_choice": {
+          "disable_parallel_tool_use": true,
+          "type": "auto"
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Call probe_echo twice with values FIRST and SECOND in parallel. Do not explain.",
+      "region": "us-east-1",
+      "requestId": "933fe767-35de-4aa7-ada8-da86f7d46a68",
+      "toolCalls": {
+        "toolu_bdrk_017dCDzokGX8QyZeDnztCSfc": {
+          "complete": true,
+          "input": {
+            "value": "FIRST"
+          },
+          "name": "probe_echo",
+          "rawInput": "{\"value\": \"FIRST\"}"
+        },
+        "toolu_bdrk_01MiJMhXXJpAeoZE4UyWRr7o": {
+          "complete": true,
+          "input": {
+            "value": "SECOND"
+          },
+          "name": "probe_echo",
+          "rawInput": "{\"value\": \"SECOND\"}"
+        }
+      },
+      "wireUnchanged": true
+    }
+  ]
+}

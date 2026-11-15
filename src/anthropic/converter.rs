@@ -17,245 +17,6 @@ use crate::kiro::model::requests::tool::{
 
 use super::types::{ContentBlock, MessagesRequest};
 
-/// 规范化 JSON Schema，修复 MCP 工具定义中常见的类型问题
-///
-/// Claude Code / MCP 工具定义偶尔会出现 `required: null`、`properties: null` 等，
-/// 导致上游返回 400 "Improperly formed request"。
-fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
-    let serde_json::Value::Object(mut obj) = schema else {
-        return serde_json::json!({
-            "type": "object",
-            "properties": {},
-            "required": [],
-            "additionalProperties": true
-        });
-    };
-
-    // type（必须是字符串）
-    if !obj
-        .get("type")
-        .and_then(|v| v.as_str())
-        .is_some_and(|s| !s.is_empty())
-    {
-        obj.insert(
-            "type".to_string(),
-            serde_json::Value::String("object".to_string()),
-        );
-    }
-
-    // properties（必须是 object）
-    match obj.get("properties") {
-        Some(serde_json::Value::Object(_)) => {}
-        _ => {
-            obj.insert(
-                "properties".to_string(),
-                serde_json::Value::Object(serde_json::Map::new()),
-            );
-        }
-    }
-
-    // required（必须是 string 数组）
-    let required = match obj.remove("required") {
-        Some(serde_json::Value::Array(arr)) => serde_json::Value::Array(
-            arr.into_iter()
-                .filter_map(|v| v.as_str().map(|s| serde_json::Value::String(s.to_string())))
-                .collect(),
-        ),
-        _ => serde_json::Value::Array(Vec::new()),
-    };
-    obj.insert("required".to_string(), required);
-
-    // additionalProperties（允许 bool 或 object，其他按 true 处理）
-    match obj.get("additionalProperties") {
-        Some(serde_json::Value::Bool(_)) | Some(serde_json::Value::Object(_)) => {}
-        _ => {
-            obj.insert(
-                "additionalProperties".to_string(),
-                serde_json::Value::Bool(true),
-            );
-        }
-    }
-
-    serde_json::Value::Object(obj)
-}
-
-/// Remove only no-op schema keywords. `enum`, defaults, examples and other
-/// object-valued data are deliberately outside the schema traversal.
-fn normalize_kiro_tool_schema(schema: &mut serde_json::Value) {
-    let Some(object) = schema.as_object_mut() else {
-        return;
-    };
-    if object
-        .get("required")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(Vec::is_empty)
-    {
-        object.remove("required");
-    }
-
-    for key in [
-        "properties",
-        "$defs",
-        "definitions",
-        "patternProperties",
-        "dependentSchemas",
-    ] {
-        if let Some(children) = object
-            .get_mut(key)
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            for child in children.values_mut() {
-                normalize_kiro_tool_schema(child);
-            }
-        }
-    }
-    if let Some(dependencies) = object
-        .get_mut("dependencies")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        for child in dependencies.values_mut().filter(|value| value.is_object()) {
-            normalize_kiro_tool_schema(child);
-        }
-    }
-    for key in [
-        "items",
-        "additionalProperties",
-        "additionalItems",
-        "contains",
-        "not",
-        "if",
-        "then",
-        "else",
-        "propertyNames",
-        "unevaluatedProperties",
-        "unevaluatedItems",
-    ] {
-        if let Some(child) = object.get_mut(key) {
-            if let Some(children) = child.as_array_mut().filter(|_| key == "items") {
-                for child in children {
-                    normalize_kiro_tool_schema(child);
-                }
-            } else {
-                normalize_kiro_tool_schema(child);
-            }
-        }
-    }
-    for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
-        if let Some(children) = object
-            .get_mut(key)
-            .and_then(serde_json::Value::as_array_mut)
-        {
-            for child in children {
-                normalize_kiro_tool_schema(child);
-            }
-        }
-    }
-}
-
-/// Keep the original schema for local response checks; adapt only the wire copy.
-/// Kiro forbids composition keywords at the root, but accepts nested schemas.
-pub(crate) fn normalize_kiro_wire_tool_schema(schema: &mut serde_json::Value) {
-    if !["oneOf", "allOf", "anyOf"]
-        .iter()
-        .any(|key| schema.get(key).is_some())
-    {
-        return;
-    }
-
-    let mut original = std::mem::take(schema);
-    let mut wrapper = serde_json::json!({
-        "type": "object",
-        "$ref": "#/$defs/kiro_tool_input"
-    });
-    // Keep the dialect and base URI at the document root. Leaving $id in the
-    // relocated schema would create a second resource with the same URI.
-    for key in ["$schema", "$id"] {
-        if let Some(value) = original.as_object_mut().and_then(|obj| obj.remove(key)) {
-            wrapper[key] = value;
-        }
-    }
-    rebase_tool_schema_refs(&mut original);
-    wrapper["$defs"] = serde_json::json!({"kiro_tool_input": original});
-    *schema = wrapper;
-}
-
-/// Rewrite document-local JSON pointers after moving the input schema. Only
-/// schema positions are visited: examples, enum values and defaults are data.
-fn rebase_tool_schema_refs(schema: &mut serde_json::Value) {
-    use serde_json::Value;
-    let Some(object) = schema.as_object_mut() else {
-        return;
-    };
-    // A nested $id starts its own resource; its fragments are independent of
-    // the input schema's position in the containing document.
-    if object.contains_key("$id") {
-        return;
-    }
-    for key in ["$ref", "$dynamicRef", "$recursiveRef"] {
-        if let Some(Value::String(reference)) = object.get_mut(key) {
-            if reference == "#" || reference.starts_with("#/") {
-                *reference = format!("#/$defs/kiro_tool_input{}", &reference[1..]);
-            }
-        }
-    }
-    for key in [
-        "properties",
-        "$defs",
-        "definitions",
-        "patternProperties",
-        "dependentSchemas",
-    ] {
-        if let Some(children) = object.get_mut(key).and_then(Value::as_object_mut) {
-            for child in children.values_mut() {
-                rebase_tool_schema_refs(child);
-            }
-        }
-    }
-    if let Some(children) = object
-        .get_mut("dependencies")
-        .and_then(Value::as_object_mut)
-    {
-        for child in children.values_mut().filter(|child| child.is_object()) {
-            rebase_tool_schema_refs(child);
-        }
-    }
-    for key in [
-        "items",
-        "additionalItems",
-        "additionalProperties",
-        "contains",
-        "not",
-        "if",
-        "then",
-        "else",
-        "propertyNames",
-        "unevaluatedProperties",
-        "unevaluatedItems",
-        "allOf",
-        "anyOf",
-        "oneOf",
-        "prefixItems",
-    ] {
-        if let Some(child) = object.get_mut(key) {
-            if let Some(children) = child.as_array_mut() {
-                for child in children {
-                    rebase_tool_schema_refs(child);
-                }
-            } else {
-                rebase_tool_schema_refs(child);
-            }
-        }
-    }
-}
-
-/// 追加到 Write 工具 description 末尾的内容
-const WRITE_TOOL_DESCRIPTION_SUFFIX: &str = "- IMPORTANT: Large tool arguments can be truncated upstream. For large files, create a small skeleton first, then append or edit in chunks using the available tools. Keep each call below 50 lines and 12000 characters of generated content, whichever limit is reached first. Include all required arguments and finish the JSON object. After a failure, inspect the file and use smaller chunks; never repeat the same oversized write unchanged.";
-
-/// 追加到 Edit 工具 description 末尾的内容
-const EDIT_TOOL_DESCRIPTION_SUFFIX: &str = "- IMPORTANT: Split large replacements or patches into separate calls below 50 lines and 12000 characters of generated content each. Use precise anchors and include all required arguments. Inspect the result after a failure before retrying with smaller chunks. Remove any temporary placeholders when finished.";
-
-const SHELL_TOOL_DESCRIPTION_SUFFIX: &str = "- IMPORTANT: Do not put an entire large file in a shell command, heredoc, script, or encoded payload. Split generated content into small complete calls below 50 lines and 12000 characters each. Prefer the available file editing tools for large files. After a truncation failure, inspect the current state and reduce the chunk size.";
-
 /// 追加到系统提示词的分块写入策略
 const SYSTEM_CHUNKED_POLICY: &str = "\
 Tool output safety: upstream generation can truncate large tool arguments even when a high max_tokens was requested. \
@@ -263,24 +24,6 @@ Keep file writes, edits, patches, and generated shell scripts in small complete 
 For large files, create a skeleton then fill it in incrementally using the available tools; do not move an oversized payload into a shell heredoc or encoded command. \
 Always include required arguments and close the JSON object. If a tool fails or output is truncated, inspect the current state, reduce the chunk size, and do not repeat the same failed call unchanged. \
 Finish all chunks and verify the final file.";
-
-fn chunked_tool_suffix(name: &str) -> &'static str {
-    // MCP names use server prefixes; do not rely on one client's capitalization.
-    match name
-        .rsplit("__")
-        .next()
-        .unwrap_or(name)
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "write" | "write_file" | "create_file" => WRITE_TOOL_DESCRIPTION_SUFFIX,
-        "edit" | "edit_file" | "multiedit" | "apply_patch" => EDIT_TOOL_DESCRIPTION_SUFFIX,
-        "bash" | "shell" | "exec" | "exec_command" | "execute_command" | "run_command" => {
-            SHELL_TOOL_DESCRIPTION_SUFFIX
-        }
-        _ => "",
-    }
-}
 
 /// 模型映射：将 Anthropic 模型名映射到 Kiro 模型 ID
 /// 严格对照版本号
@@ -616,88 +359,6 @@ fn validate_tool_blocks(messages: &[super::types::Message]) -> Result<(), Conver
     Ok(())
 }
 
-// Reject contradictions rather than guessing which constraint the caller meant.
-// Traverse schema positions only; enum/default/example objects are data.
-fn validate_schema_constraints(
-    schema: &serde_json::Value,
-    path: &str,
-) -> Result<(), ConversionError> {
-    use serde_json::Value;
-    let Some(object) = schema.as_object() else {
-        return Ok(());
-    };
-    let matches_type = |value: &Value| {
-        let matches = |kind: &str| match kind {
-            "object" => value.is_object(),
-            "array" => value.is_array(),
-            "string" => value.is_string(),
-            "boolean" => value.is_boolean(),
-            "null" => value.is_null(),
-            "number" => value.is_number(),
-            "integer" => {
-                value.as_i64().is_some()
-                    || value.as_u64().is_some()
-                    || value.as_f64().is_some_and(|n| n.fract() == 0.0)
-            }
-            _ => true,
-        };
-        match object.get("type") {
-            Some(Value::String(kind)) => matches(kind),
-            Some(Value::Array(kinds)) => kinds.iter().any(|k| k.as_str().is_some_and(matches)),
-            _ => true,
-        }
-    };
-    if object
-        .get("enum")
-        .and_then(Value::as_array)
-        .is_some_and(|values| !values.iter().any(matches_type))
-        || object
-            .get("const")
-            .is_some_and(|value| !matches_type(value))
-    {
-        return Err(ConversionError::InvalidToolFormat(format!(
-            "{path}: type contradicts enum/const"
-        )));
-    }
-    for key in [
-        "properties",
-        "$defs",
-        "definitions",
-        "patternProperties",
-        "dependentSchemas",
-    ] {
-        if let Some(children) = object.get(key).and_then(Value::as_object) {
-            for (name, child) in children {
-                validate_schema_constraints(child, &format!("{path}.{key}.{name}"))?;
-            }
-        }
-    }
-    for key in [
-        "items",
-        "additionalProperties",
-        "contains",
-        "not",
-        "if",
-        "then",
-        "else",
-        "propertyNames",
-        "unevaluatedProperties",
-        "unevaluatedItems",
-    ] {
-        if let Some(child) = object.get(key) {
-            validate_schema_constraints(child, &format!("{path}.{key}"))?;
-        }
-    }
-    for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
-        if let Some(children) = object.get(key).and_then(Value::as_array) {
-            for (index, child) in children.iter().enumerate() {
-                validate_schema_constraints(child, &format!("{path}.{key}[{index}]"))?;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// 将 Anthropic 请求转换为 Kiro 请求
 pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, ConversionError> {
     // 1. 映射模型
@@ -736,10 +397,6 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
         }
         let mut names = HashMap::new();
         for (index, tool) in tools.iter().enumerate() {
-            validate_schema_constraints(
-                &serde_json::json!(tool.input_schema),
-                &format!("tools[{index}].input_schema"),
-            )?;
             let mut definition = serde_json::to_value(tool).expect("tool definition is JSON");
             definition["name"] = serde_json::json!(tool.name.to_lowercase());
             let conflict = names
@@ -1350,33 +1007,12 @@ fn convert_tools(
         .iter()
         .filter(|tool| names.insert(tool.name.to_lowercase()))
         .map(|t| {
-            let mut description = t.description.clone();
-
-            let suffix = chunked_tool_suffix(&t.name);
-            // Reserve space for the policy so long descriptions cannot erase it.
-            let description_limit =
-                10000 - suffix.chars().count() - usize::from(!suffix.is_empty());
-            if let Some((idx, _)) = description.char_indices().nth(description_limit) {
-                description.truncate(idx);
-            }
-            if !suffix.is_empty() {
-                description.push('\n');
-                description.push_str(suffix);
-            }
-
-            // 限制描述长度为 10000 字符（安全截断 UTF-8，单次遍历）
-            let description = match description.char_indices().nth(10000) {
-                Some((idx, _)) => description[..idx].to_string(),
-                None => description,
-            };
-
-            let mut schema = normalize_json_schema(serde_json::json!(t.input_schema));
-            normalize_kiro_tool_schema(&mut schema);
+            let schema = serde_json::json!(t.input_schema);
 
             Tool {
                 tool_specification: ToolSpecification {
                     name: map_tool_name(&t.name, tool_name_map),
-                    description,
+                    description: t.description.clone(),
                     input_schema: InputSchema::from_json(schema),
                 },
             }
@@ -1894,7 +1530,7 @@ mod tests {
     }
 
     #[test]
-    fn chunked_policy_survives_long_descriptions_and_missing_system() {
+    fn tool_descriptions_are_preserved_and_chunked_policy_stays_in_system() {
         for name in [
             "Write",
             "write_file",
@@ -1909,10 +1545,11 @@ mod tests {
                 serde_json::json!(""),
                 serde_json::json!("Original instructions"),
             ] {
+                let original_description = format!("{} END_MARKER", "长".repeat(20000));
                 let req: MessagesRequest = serde_json::from_value(serde_json::json!({
                     "model":"claude-sonnet-5", "max_tokens":1024,
                     "messages":[{"role":"user","content":"hi"}], "system":system,
-                    "tools":[{"name":name,"description":"长".repeat(11000),
+                    "tools":[{"name":name,"description":original_description,
                         "input_schema":{"type":"object","properties":{}}}]
                 }))
                 .unwrap();
@@ -1925,8 +1562,7 @@ mod tests {
                     .tools[0]
                     .tool_specification
                     .description;
-                assert!(description.chars().count() <= 10000);
-                assert!(description.ends_with(chunked_tool_suffix(name)));
+                assert_eq!(description, &original_description);
                 let history = serde_json::to_string(&state.history).unwrap();
                 assert!(history.contains(SYSTEM_CHUNKED_POLICY));
                 if !system.is_null() && system != "" {

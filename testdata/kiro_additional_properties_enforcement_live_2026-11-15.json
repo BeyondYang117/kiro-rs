@@ -1,0 +1,510 @@
+{
+  "testedAt": "2026-11-15",
+  "scope": "One imported account; cli; us-east-1; claude-haiku-5.5. Six direct upstream requests, no retries, no tools executed.",
+  "method": "Three paired prompts. Each pair uses identical prompt and schema except additionalProperties (true control vs false or string-schema restriction). Exact built HTTP body schema equality asserted before sending the same Request. Production provider adaptation and local response validation bypassed.",
+  "conclusion": "Completed violating calls were returned for nested additionalProperties:false and schema-valued additionalProperties. Strict enforcement is not guaranteed in this tested configuration. The root false case omitted the extra property; one compliant result cannot establish server-side enforcement.",
+  "cases": [
+    {
+      "additionalPropertyViolations": [],
+      "assistantText": "",
+      "bodySha256": "20d30ce523b846e8bc90b056ebd19a7fb3356c5ed35a7fe44f557be45b57e492",
+      "case": "root-extra-control",
+      "contentType": "application/vnd.amazon.eventstream",
+      "durationMs": 3691,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "exactRequestedInput": true,
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "outcome": "compliant_tool_input",
+      "prompt": "This is a harmless protocol echo experiment; no real tool is executed. Call kiro_schema_probe exactly once with this exact JSON object: {\"unexpected\":\"EXTRA_KEY\",\"value\":\"KIRO_SCHEMA_OK\"}. Preserve every key and JSON value type, including the number if present. The fixture intentionally tests a mismatch with the advertised schema. Do not repair, omit, stringify, or rename any value. Do not explain; emit the actual tool call, not a code block.",
+      "region": "us-east-1",
+      "requestId": "9283a17b-1c80-4806-988d-037df396d9ee",
+      "requestedInput": {
+        "unexpected": "EXTRA_KEY",
+        "value": "KIRO_SCHEMA_OK"
+      },
+      "schema": {
+        "additionalProperties": true,
+        "properties": {
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "type": "object"
+      },
+      "schemaUnchanged": true,
+      "toolCalls": {
+        "toolu_bdrk_01Jb8wMtHSSKoSNSH5EZtdYJ": {
+          "complete": true,
+          "input": {
+            "unexpected": "EXTRA_KEY",
+            "value": "KIRO_SCHEMA_OK"
+          },
+          "name": "kiro_schema_probe",
+          "rawInput": "{\"unexpected\": \"EXTRA_KEY\", \"value\": \"KIRO_SCHEMA_OK\"}"
+        }
+      }
+    },
+    {
+      "additionalPropertyViolations": [],
+      "assistantText": "",
+      "bodySha256": "ee81d85ed3c7d95d1ffb3c8191379d4d2183312e0805aff9d847521c9b2c7809",
+      "case": "root-extra-restricted",
+      "contentType": "application/vnd.amazon.eventstream",
+      "durationMs": 4594,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "exactRequestedInput": false,
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "outcome": "compliant_tool_input",
+      "prompt": "This is a harmless protocol echo experiment; no real tool is executed. Call kiro_schema_probe exactly once with this exact JSON object: {\"unexpected\":\"EXTRA_KEY\",\"value\":\"KIRO_SCHEMA_OK\"}. Preserve every key and JSON value type, including the number if present. The fixture intentionally tests a mismatch with the advertised schema. Do not repair, omit, stringify, or rename any value. Do not explain; emit the actual tool call, not a code block.",
+      "region": "us-east-1",
+      "requestId": "de764ac8-3a1f-4949-bcb1-abd5a7d9381d",
+      "requestedInput": {
+        "unexpected": "EXTRA_KEY",
+        "value": "KIRO_SCHEMA_OK"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "type": "object"
+      },
+      "schemaUnchanged": true,
+      "toolCalls": {
+        "toolu_bdrk_01ECgzRnTszRARRNDMhTPHTh": {
+          "complete": true,
+          "input": {
+            "value": "KIRO_SCHEMA_OK"
+          },
+          "name": "kiro_schema_probe",
+          "rawInput": "{\"value\": \"KIRO_SCHEMA_OK\"}"
+        }
+      }
+    },
+    {
+      "additionalPropertyViolations": [],
+      "assistantText": "",
+      "bodySha256": "908c5530c3f5a72af06f838d3f0a6992143031d5a1d3cdbd81f35bd9d054c7f1",
+      "case": "nested-extra-control",
+      "contentType": "application/vnd.amazon.eventstream",
+      "durationMs": 3134,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "exactRequestedInput": true,
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "outcome": "compliant_tool_input",
+      "prompt": "This is a harmless protocol echo experiment; no real tool is executed. Call kiro_schema_probe exactly once with this exact JSON object: {\"capabilities\":{\"read\":\"KIRO_SCHEMA_OK\",\"unexpected\":\"EXTRA_KEY\"}}. Preserve every key and JSON value type, including the number if present. The fixture intentionally tests a mismatch with the advertised schema. Do not repair, omit, stringify, or rename any value. Do not explain; emit the actual tool call, not a code block.",
+      "region": "us-east-1",
+      "requestId": "b9dfe173-2d70-452b-bbe6-7566b532108c",
+      "requestedInput": {
+        "capabilities": {
+          "read": "KIRO_SCHEMA_OK",
+          "unexpected": "EXTRA_KEY"
+        }
+      },
+      "schema": {
+        "properties": {
+          "capabilities": {
+            "additionalProperties": true,
+            "properties": {
+              "read": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "read"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "type": "object"
+      },
+      "schemaUnchanged": true,
+      "toolCalls": {
+        "toolu_bdrk_01QvLUmP3BJ5qjw2XxUwkaQA": {
+          "complete": true,
+          "input": {
+            "capabilities": {
+              "read": "KIRO_SCHEMA_OK",
+              "unexpected": "EXTRA_KEY"
+            }
+          },
+          "name": "kiro_schema_probe",
+          "rawInput": "{\"capabilities\": {\"read\":\"KIRO_SCHEMA_OK\",\"unexpected\":\"EXTRA_KEY\"}}"
+        }
+      }
+    },
+    {
+      "additionalPropertyViolations": [
+        "/capabilities/unexpected"
+      ],
+      "assistantText": "",
+      "bodySha256": "bff90b64c7787c68511d6eb233259dba17d67443e7e64cd95e1b76b880874f2f",
+      "case": "nested-extra-restricted",
+      "contentType": "application/vnd.amazon.eventstream",
+      "durationMs": 4576,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "exactRequestedInput": true,
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "outcome": "schema_violation_returned",
+      "prompt": "This is a harmless protocol echo experiment; no real tool is executed. Call kiro_schema_probe exactly once with this exact JSON object: {\"capabilities\":{\"read\":\"KIRO_SCHEMA_OK\",\"unexpected\":\"EXTRA_KEY\"}}. Preserve every key and JSON value type, including the number if present. The fixture intentionally tests a mismatch with the advertised schema. Do not repair, omit, stringify, or rename any value. Do not explain; emit the actual tool call, not a code block.",
+      "region": "us-east-1",
+      "requestId": "11f69f3d-1b1f-4773-ba8f-0c34d50ac4e1",
+      "requestedInput": {
+        "capabilities": {
+          "read": "KIRO_SCHEMA_OK",
+          "unexpected": "EXTRA_KEY"
+        }
+      },
+      "schema": {
+        "properties": {
+          "capabilities": {
+            "additionalProperties": false,
+            "properties": {
+              "read": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "read"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "type": "object"
+      },
+      "schemaUnchanged": true,
+      "toolCalls": {
+        "toolu_bdrk_01NSXX4VJCcZNygbgjPDCpoo": {
+          "complete": true,
+          "input": {
+            "capabilities": {
+              "read": "KIRO_SCHEMA_OK",
+              "unexpected": "EXTRA_KEY"
+            }
+          },
+          "name": "kiro_schema_probe",
+          "rawInput": "{\"capabilities\": {\"read\":\"KIRO_SCHEMA_OK\",\"unexpected\":\"EXTRA_KEY\"}}"
+        }
+      }
+    },
+    {
+      "additionalPropertyViolations": [],
+      "assistantText": "",
+      "bodySha256": "9a8ecbea31fefb0a3ea3128846a1732120a04621a95ba5a01f40be95e1b827ba",
+      "case": "dictionary-type-control",
+      "contentType": "application/vnd.amazon.eventstream",
+      "durationMs": 1280,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "exactRequestedInput": true,
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "outcome": "compliant_tool_input",
+      "prompt": "This is a harmless protocol echo experiment; no real tool is executed. Call kiro_schema_probe exactly once with this exact JSON object: {\"capabilities\":{\"read\":123}}. Preserve every key and JSON value type, including the number if present. The fixture intentionally tests a mismatch with the advertised schema. Do not repair, omit, stringify, or rename any value. Do not explain; emit the actual tool call, not a code block.",
+      "region": "us-east-1",
+      "requestId": "eb5520cc-cc0c-41b3-96e4-460b403ac698",
+      "requestedInput": {
+        "capabilities": {
+          "read": 123
+        }
+      },
+      "schema": {
+        "properties": {
+          "capabilities": {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "type": "object"
+      },
+      "schemaUnchanged": true,
+      "toolCalls": {
+        "toolu_bdrk_01GNBr9j9MZrBMBPFbQBzhsB": {
+          "complete": true,
+          "input": {
+            "capabilities": {
+              "read": 123
+            }
+          },
+          "name": "kiro_schema_probe",
+          "rawInput": "{\"capabilities\": {\"read\":123}}"
+        }
+      }
+    },
+    {
+      "additionalPropertyViolations": [
+        "/capabilities/read"
+      ],
+      "assistantText": "",
+      "bodySha256": "f400d01528ffa3340458a69d85a5585955fea82829574806fe723107f6f50218",
+      "case": "dictionary-type-restricted",
+      "contentType": "application/vnd.amazon.eventstream",
+      "durationMs": 3472,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "reasoningContentEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "exactRequestedInput": true,
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "outcome": "schema_violation_returned",
+      "prompt": "This is a harmless protocol echo experiment; no real tool is executed. Call kiro_schema_probe exactly once with this exact JSON object: {\"capabilities\":{\"read\":123}}. Preserve every key and JSON value type, including the number if present. The fixture intentionally tests a mismatch with the advertised schema. Do not repair, omit, stringify, or rename any value. Do not explain; emit the actual tool call, not a code block.",
+      "region": "us-east-1",
+      "requestId": "c806a86d-6de1-4b6c-98ff-a6069e06e7b2",
+      "requestedInput": {
+        "capabilities": {
+          "read": 123
+        }
+      },
+      "schema": {
+        "properties": {
+          "capabilities": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "type": "object"
+      },
+      "schemaUnchanged": true,
+      "toolCalls": {
+        "toolu_bdrk_01855cLxsAiPwZPMDGQKVMgX": {
+          "complete": true,
+          "input": {
+            "capabilities": {
+              "read": 123
+            }
+          },
+          "name": "kiro_schema_probe",
+          "rawInput": "{\"capabilities\": {\"read\":123}}"
+        }
+      }
+    }
+  ]
+}

@@ -145,7 +145,7 @@ fn compatibility_fixed_function_tools_and_nested_schemas_survive_both_cli_modes(
             assert_eq!(definitions[0]["name"], name);
             assert_eq!(
                 definitions[0]["inputSchema"]["json"],
-                normalized_tool_schema(&request["tools"][0]["input_schema"])
+                request["tools"][0]["input_schema"]
             );
             let uses = calls(&body);
             assert_eq!(uses.len(), 1);
@@ -260,7 +260,7 @@ fn compatibility_omitted_type_preserves_schema_and_unsupported_native_is_rejecte
         assert_eq!(definitions[0]["name"], "text_editor");
         assert_eq!(
             definitions[0]["inputSchema"]["json"],
-            normalized_tool_schema(&request["tools"][0]["input_schema"])
+            request["tools"][0]["input_schema"]
         );
     }
     let mut request = request;
@@ -275,86 +275,6 @@ fn compatibility_omitted_type_preserves_schema_and_unsupported_native_is_rejecte
     );
 }
 
-fn normalized_tool_schema(schema: &Value) -> Value {
-    let request: MessagesRequest = serde_json::from_value(json!({
-        "model":"claude-sonnet-5.5", "max_tokens":16,
-        "messages":[{"role":"user","content":"test"}],
-        "tools":[{"name":"test","description":"test","input_schema":schema}]
-    }))
-    .unwrap();
-    let converted = converter::convert_request(&request).unwrap();
-    serde_json::to_value(
-        converted
-            .conversation_state
-            .current_message
-            .user_input_message
-            .user_input_message_context
-            .tools[0]
-            .tool_specification
-            .input_schema
-            .json
-            .clone(),
-    )
-    .unwrap()
-}
-
-#[test]
-fn kiro_tool_schema_removes_empty_required_and_preserves_additional_properties() {
-    let schema = json!({
-        "type":"object",
-        "properties": {
-            "nested": {"type":"object", "required":[], "additionalProperties":true,
-                "properties":{"value":{"type":"string", "required":["kept"], "additionalProperties":true}}},
-            "items": {"type":"array", "items":[{"type":"object", "required":[], "additionalProperties":true}]},
-            "union": {"oneOf":[{"type":"string", "additionalProperties":true}, {"type":"null", "required":[]}]},
-            "dependency": {"type":"object", "dependencies":{"other":{"type":"object", "additionalProperties":true}}},
-            "example": {"enum":[{"additionalProperties":false,"required":[]}]}
-        },
-        "required":["nested"], "additionalProperties":true
-    });
-    let normalized = normalized_tool_schema(&schema);
-    assert_eq!(normalized["required"], json!(["nested"]));
-    assert_eq!(normalized["additionalProperties"], true);
-    assert!(normalized["properties"]["nested"].get("required").is_none());
-    assert_eq!(
-        normalized["properties"]["nested"]["additionalProperties"],
-        true
-    );
-    assert_eq!(
-        normalized["properties"]["nested"]["properties"]["value"]["required"],
-        json!(["kept"])
-    );
-    assert_eq!(
-        normalized["properties"]["nested"]["properties"]["value"]["additionalProperties"],
-        true
-    );
-    assert_eq!(
-        normalized["properties"]["items"]["items"][0]["additionalProperties"],
-        true
-    );
-    assert_eq!(
-        normalized["properties"]["union"]["oneOf"][0]["additionalProperties"],
-        true
-    );
-    assert!(
-        normalized["properties"]["union"]["oneOf"][1]
-            .get("required")
-            .is_none()
-    );
-    assert_eq!(
-        normalized["properties"]["dependency"]["dependencies"]["other"]["additionalProperties"],
-        true
-    );
-    assert_eq!(
-        normalized["properties"]["example"]["enum"][0]["additionalProperties"],
-        false
-    );
-    assert_eq!(
-        normalized["properties"]["example"]["enum"][0]["required"],
-        json!([])
-    );
-}
-
 #[test]
 fn kiro_tool_schema_preserves_dictionary_value_constraints_on_the_wire() {
     let schema = json!({"type":"object", "additionalProperties":false,
@@ -364,11 +284,13 @@ fn kiro_tool_schema_preserves_dictionary_value_constraints_on_the_wire() {
     }}}});
     let mut request = fixture("lookup");
     request["tools"][0]["input_schema"] = schema.clone();
+    let description = format!("{} END_MARKER", "长".repeat(20000));
+    request["tools"][0]["description"] = json!(description);
     for native in [false, true] {
         let (body, _) = wire(&request, native);
-        let mut actual = tools(&body)[0]["inputSchema"]["json"].clone();
-        converter::normalize_kiro_wire_tool_schema(&mut actual);
+        let actual = tools(&body)[0]["inputSchema"]["json"].clone();
         assert_eq!(actual, schema);
+        assert_eq!(tools(&body)[0]["description"], description);
     }
 }
 
@@ -435,18 +357,15 @@ fn compatibility_error_result_uses_status_without_extra_wire_field() {
 }
 
 #[test]
-fn compatibility_already_corrupted_nested_schema_fails_before_upstream() {
+fn compatibility_schema_constraints_are_forwarded_without_local_rejection() {
     let mut request = fixture("lookup");
-    // Reproduce pre-84dde51f7 gateway corruption without reimplementing its sanitizer.
-    let broken = json!({"type":"object", "enum":["read", "write"]});
-    request["tools"][0]["input_schema"]["properties"]["mode"] = broken.clone();
-    let request: MessagesRequest = serde_json::from_value(request).unwrap();
-    let error = converter::convert_request(&request)
-        .err()
-        .unwrap()
-        .to_string();
-    assert!(error.contains("tools[0].input_schema.properties.mode"));
-    assert!(error.contains("type contradicts enum/const"));
+    let schema = json!({"properties":{"mode":{"type":"object","enum":["read","write"]}},
+        "required":null,"additionalProperties":{"type":"string"}});
+    request["tools"][0]["input_schema"] = schema.clone();
+    for native in [false, true] {
+        let (body, _) = wire(&request, native);
+        assert_eq!(tools(&body)[0]["inputSchema"]["json"], schema);
+    }
 }
 
 #[test]
@@ -500,11 +419,9 @@ fn compatibility_schema_validation_keeps_data_and_valid_unions() {
     }
     request["tools"][0]["input_schema"]["properties"]["secret"] =
         json!({"type":"object","const":"do not log"});
-    let request: MessagesRequest = serde_json::from_value(request).unwrap();
-    let error = converter::convert_request(&request)
-        .err()
-        .unwrap()
-        .to_string();
-    assert!(error.contains("properties.secret"));
-    assert!(!error.contains("do not log"));
+    let schema = request["tools"][0]["input_schema"].clone();
+    for native in [false, true] {
+        let (body, _) = wire(&request, native);
+        assert_eq!(tools(&body)[0]["inputSchema"]["json"], schema);
+    }
 }

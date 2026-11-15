@@ -578,6 +578,10 @@ fn model_input_limit(model: &str) -> i32 {
 
 /// 两个入口以及压缩后续请求共享相同的校验规则。
 fn validate_and_normalize_request(payload: &mut MessagesRequest) -> Result<(), String> {
+    // Live CLI/Haiku 5.5 probes (2026-11-15): additionalModelRequestFields
+    // rejects these controls; root/context candidates accept even invalid fields
+    // without applying stop/tool-choice semantics. No verified transport mapping
+    // exists here. See docs/LIVE_TESTING.md; this is not a claim about all models.
     for name in ["temperature", "top_p", "top_k"] {
         if payload
             .extra_controls
@@ -587,7 +591,7 @@ fn validate_and_normalize_request(payload: &mut MessagesRequest) -> Result<(), S
             tracing::warn!(
                 stage = "request_normalization",
                 parameter = name,
-                "Unsupported sampling parameter ignored; using Kiro's default sampling behavior. Remove this parameter to suppress the warning."
+                "Unsupported sampling parameter ignored; the proxy has no verified Kiro mapping for this parameter. Remove this parameter to suppress the warning."
             );
         }
     }
@@ -600,13 +604,13 @@ fn validate_and_normalize_request(payload: &mut MessagesRequest) -> Result<(), S
                 tracing::warn!(
                     stage = "request_normalization",
                     parameter = "stop_sequences",
-                    "Unsupported stop sequences ignored; Kiro's default stopping behavior will be used. Remove this parameter to suppress the warning."
+                    "Unsupported stop sequences ignored; the proxy has no verified Kiro mapping for this parameter. Remove this parameter to suppress the warning."
                 );
             }
         }
         Some(_) => return Err("stop_sequences must be an array of strings or null".into()),
     }
-    // Kiro does not expose custom stop sequences; omit the field for every request.
+    // Omit unmapped controls rather than send a field that only appears accepted.
     payload.extra_controls.remove("stop_sequences");
     if let Some(choice) = &payload.tool_choice {
         let kind = choice.get("type").and_then(serde_json::Value::as_str);
@@ -614,13 +618,16 @@ fn validate_and_normalize_request(payload: &mut MessagesRequest) -> Result<(), S
             .get("disable_parallel_tool_use")
             .is_some_and(|value| value != false)
         {
-            return Err("tool_choice.disable_parallel_tool_use is not supported".into());
+            return Err(
+                "tool_choice.disable_parallel_tool_use has no verified Kiro mapping in this proxy"
+                    .into(),
+            );
         }
         match kind {
             Some("auto") => {}
             Some("none") => payload.tools = None,
             Some("any" | "tool") => {
-                return Err("Forced tool_choice is not supported; use auto or none".into());
+                return Err("Forced tool_choice has no verified Kiro mapping in this proxy; use auto or none".into());
             }
             _ => return Err("tool_choice.type must be auto or none".into()),
         }

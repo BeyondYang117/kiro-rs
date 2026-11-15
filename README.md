@@ -545,15 +545,15 @@ RUST_LOG=debug ./target/release/kiro-rs
 
 ### 大文件写入与截断处理
 
-携带工具的请求会附加分块提示，即使没有 `system`；常见的 Write/Edit、`write_file`、`apply_patch`、Bash/`exec_command` 及对应 MCP 名称会在工具描述中收到额外提醒。建议每次生成少于 50 行、12000 字符，先建骨架再逐步填充。整次响应还会收到 `min(max_tokens, 4096)` 的软预算提示，包含思考和所有工具参数，避免多个小调用合计仍超长。这些是保守的提示策略，不是 Kiro 的实际输出上限或强制文件大小限制。
+工具描述原样传递，不截断、不追加提醒。2026-11-15 在 CLI / us-east-1 / `claude-haiku-5.5` 实测 10000、12000、20000 字符描述均被接受，模型成功读取末尾标记；这不是上游长度上限的承诺。携带工具的请求仍会在系统提示中附加分块提示，即使没有 `system`；建议每次生成少于 50 行、12000 字符，先建骨架再逐步填充。整次响应还会收到 `min(max_tokens, 4096)` 的软预算提示，包含思考和所有工具参数，避免多个小调用合计仍超长。这些是保守的提示策略，不是 Kiro 的实际输出上限或强制文件大小限制。
 
-普通对话的 JSON、实时 SSE、`/cc/v1` 缓冲 SSE 共用工具校验：暂存工具事件，直到收到结束标记、参数是合法 JSON 对象且包含工具 schema 顶层 `required` 字段后再交给客户端；没有必填字段的工具仍允许空参数。并行交错的工具事件保留原顺序，所有尚未完成的调用通过校验后一起释放。工具暂存的事件 payload 合计最多 4 MiB；工具片段之间的文本一同暂存，其他文本仍实时返回，工具生成期间每 25 秒发送 ping 保活。
+普通对话的 JSON、实时 SSE、`/cc/v1` 缓冲 SSE 共用工具校验：暂存工具事件，直到收到结束标记、参数是完整合法 JSON 对象后再交给客户端。代理不按工具 schema 校验 `required`、`additionalProperties`、类型或其他约束，完整参数按上游原值返回。并行交错的工具事件保留原顺序，所有尚未完成的调用通过校验后一起释放。工具暂存的事件 payload 合计最多 4 MiB；工具片段之间的文本一同暂存，其他文本仍实时返回，工具生成期间每 25 秒发送 ping 保活。
 
-工具 schema 的 `additionalProperties`（`true`、`false` 和 schema 对象）保留并传递给上游，不因其使用 schema 对象而拒绝合法请求。2026-11-15 在 CLI / us-east-1 / `claude-haiku-5.5` 上完成原始请求验证：根层和嵌套层的四组对照，以及纯字典定义共 9 次请求全部返回 200 并完成工具调用。此结果证明这些定义被该上游接受，不代表上游严格强制所有约束；详见 [真实联调记录](docs/LIVE_TESTING.md#additionalproperties-原样上游验证)。
+工具 `input_schema` 对象原样传递给上游：不补写或替换 `type/properties/required/additionalProperties`，不删除空 `required`，不包装根层 `oneOf/allOf/anyOf` 或重写 `$ref`，不因 schema 约束冲突提前拒绝请求。schema 语义和参数约束交由上游及调用方处理。工具 schema 的 `additionalProperties`（`true`、`false` 和 schema 对象）保留并传递给上游，不因其使用 schema 对象而拒绝合法请求。2026-11-15 在 CLI / us-east-1 / `claude-haiku-5.5` 上完成原始请求验证：根层和嵌套层的四组对照，以及纯字典定义共 9 次请求全部返回 200 并完成工具调用。此结果证明这些定义被该上游接受，不代表上游严格强制所有约束；详见 [真实联调记录](docs/LIVE_TESTING.md#additionalproperties-原样上游验证)。
 
 当前工具接口只支持普通的 `name`、`description` 和 `input_schema` 定义；不支持 Anthropic 的 `defer_loading`，也不支持 Tool Search Tool（包括 regex / BM25 搜索工具及其延迟工具引用展开流程）。这些扩展字段不会透传到 Kiro，上游也不会据此按需发现或加载工具。未来要适配，Kiro 上游需提供可声明但延迟加载工具的原生字段、服务端搜索/发现入口，以及将搜索结果中的工具引用展开为可调用 schema 的协议；生成响应还需能表达搜索和展开阶段，并让后续工具调用、结果及调用 ID 在对话历史中保持关联。若要进一步支持 Programmatic Tool Calling，上游还需支持代码执行工具、`allowed_callers` / `caller` 关系，以及代码运行期间的暂停续传和子工具结果回传能力。具备这些上游能力后，代理才可实现 Anthropic 工具定义、响应事件和历史记录之间的完整转换。
 
-未向响应处理层释放任何事件时，工具参数截断可以自动缩块恢复：丢弃失败片段，在原始请求的当前用户消息中追加恢复指令，要求只生成一个完整的小调用（首次最多 20 行、4000 字符，第二次 10 行、2000 字符），保留原历史、工具 schema 和工具结果。配置 `"toolOutputRecoveryAttempts": 1` 默认恢复一次，允许 0～2，0 为关闭，修改后重启生效。恢复会额外调用模型并消耗额度，失败尝试保留在调用日志中。恢复只适用于已声明的工具、合法响应帧中的参数截断；已释放事件（包括实时正文或完整工具）、上下文已满、网络断流、损坏帧、缺少必填字段及非截断语法错误不会自动重放。即使使用缓冲或 JSON 模式，也沿用同样保守的边界。
+未向响应处理层释放任何事件时，工具参数截断可以自动缩块恢复：丢弃失败片段，在原始请求的当前用户消息中追加恢复指令，要求只生成一个完整的小调用（首次最多 20 行、4000 字符，第二次 10 行、2000 字符），保留原历史、工具 schema 和工具结果。配置 `"toolOutputRecoveryAttempts": 1` 默认恢复一次，允许 0～2，0 为关闭，修改后重启生效。恢复会额外调用模型并消耗额度，失败尝试保留在调用日志中。恢复只适用于已声明的工具、合法响应帧中的参数截断；已释放事件（包括实时正文或完整工具）、上下文已满、网络断流、损坏帧及非截断语法错误不会自动重放。即使使用缓冲或 JSON 模式，也沿用同样保守的边界。
 
 超过恢复次数或不符合恢复条件时，返回带缩小分块建议的错误：JSON 为 `400 invalid_request_error`；已经开始的 SSE 为 `error` 事件，不伪造正常完成，也不发出失败工具的残缺参数。新增识别 Kiro `metadataEvent.stopReason=max_tokens`，与长度异常一起触发截断处理；普通文本达到长度限制时保留 `max_tokens` stop reason。这些措施通过缩小生成任务提高成功率，不能提高上游的硬上限，也不能保证模型遵守提示或客户端停止重试。
 
@@ -592,7 +592,7 @@ claude --model claude-haiku-5-5 --effort high
 
 上下文窗口使用项目内维护的模型映射：已确认的 1M 模型会在 `GET /v1/models` 的 `max_input_tokens` 和 `GET /v1/models/{model_id}` 中声明 1,000,000。新版 Kiro `metadataEvent.tokenUsage` 上报用量时，优先返回 `uncachedInputTokens`、`outputTokens` 和缓存读写数；缓存字段分别映射为 `cache_read_input_tokens` / `cache_creation_input_tokens`。重复 metadata 视为快照更新，不累加；缺失或无效的计数保留已有有效值。没有上报的输入数仍按 `contextUsageEvent` 百分比换算，没有该事件则回退本地估算；输出数未上报时使用本地估算。JSON、实时 SSE、`/cc` 缓冲 SSE 和摘要均使用此规则，摘要的缓存用量保留在 `usage.iterations` 中。上游拒绝 1M 请求时，代理无法扩展 Kiro 账号或模型本身的限制。
 
-Claude 默认旧协议模式的 `max_tokens` 仅用于本地响应/压缩处理；启用 `nativeThinking` 后会映射到 `additionalModelRequestFields.max_tokens`，新鲜账号 schema 明确不支持时省略。GPT / Kimi 的实测规则见下文。Kiro 文档所列 Claude 模型通常要求最小 1024；Sonnet 5.5、Sonnet 4.6、Opus 4.6 / 4.7 的上限为 64000，Opus 4.8 / 5 的上限为 128000。达到上游长度限制时会返回 `max_tokens` stop reason。模型列表与模型详情的输出上限共用本地默认表；账号目录可能报告不同值。`tool_choice`、temperature、top_p、stop_sequences 和 JSON schema 输出也尚未映射到已确认的 Kiro 原生字段。
+Claude 默认旧协议模式的 `max_tokens` 仅用于本地响应/压缩处理；启用 `nativeThinking` 后会映射到 `additionalModelRequestFields.max_tokens`，新鲜账号 schema 明确不支持时省略。GPT / Kimi 的实测规则见下文。Kiro 文档所列 Claude 模型通常要求最小 1024；Sonnet 5.5、Sonnet 4.6、Opus 4.6 / 4.7 的上限为 64000，Opus 4.8 / 5 的上限为 128000。达到上游长度限制时会返回 `max_tokens` stop reason。模型列表与模型详情的输出上限共用本地默认表；账号目录可能报告不同值。temperature、top_p、top_k 和 stop_sequences 尚无已验证的 Kiro 映射，代理省略这些参数并记录警告。`tool_choice:auto` 沿用默认选择，`none` 由代理移除工具定义实现；`any` / 指定工具和 `disable_parallel_tool_use:true` 因缺少可实现其约束的映射而明确报错。2026-11-15 在 CLI / us-east-1 / `claude-haiku-5.5` 的原始请求实测：上述采样字段及工具选择字段放入 `additionalModelRequestFields` 会被上游以 400 拒绝；根层/上下文候选位置虽返回 200，但停止序列和强制工具选择未生效，无效字段同样被接受。未开展采样统计实验，不能据此断言所有模型都不支持这些参数。详见 [工具描述与生成控制实测](docs/LIVE_TESTING.md#工具描述与生成控制实测)。JSON schema 输出也尚未映射到已确认的 Kiro 原生字段。
 
 `temperature`、`top_p`、`top_k` 会被忽略，使用 Kiro 默认采样行为；非 `null` 值会在调用日志中记录 WARN（仅记录参数名，不记录参数值），不再因此拒绝请求。省略或 `null` 不产生警告。此规则同时适用于 `/v1/messages` 和 `/cc/v1/messages` 的流式、非流式及压缩请求。
 

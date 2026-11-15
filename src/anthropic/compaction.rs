@@ -2546,7 +2546,6 @@ mod tests {
                         {"name":"lookup","input_schema":{"type":"object"}},
                         {"type":"web_search_20250305","name":"web_search","input_schema":{"type":"object"}}
                     ]),
-                    json!([{"name":"web_search","input_schema":{"type":"object","properties":{"query":{"type":"object","enum":["test"]}}}}]),
                 ] {
                     payload["tools"] = invalid;
                     let response =
@@ -3313,18 +3312,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_or_missing_required_tool_arguments_never_reach_the_client() {
-        // Include a long MCP name to exercise schema lookup after name shortening.
-        let name = "mcp__very_long_server_name_with_many_characters__write_file_with_a_long_name";
-        for input in ["", "{}", "{\"path\":\"file.txt\"}"] {
+    async fn tool_schemas_reach_upstream_without_normalization_or_rejection() {
+        let description = format!("{} END_MARKER", "长".repeat(20000));
+        for schema in [
+            json!({}),
+            json!({"type":["object","null"],"properties":null,"required":null}),
+            json!({"type":"object","required":[],"properties":{
+                "nested":{"type":"object","required":[],"additionalProperties":false},
+                "impossible":{"type":"object","enum":["read"],"const":42}},
+                "additionalProperties":{"type":"string"},"customExtension":{"required":[]}}),
+            json!({"$id":"https://example.test/input.json","$schema":"https://json-schema.org/draft/2020-12/schema",
+                "$defs":{"value":{"type":"string"}},"properties":{"value":{"$ref":"#/$defs/value"}},
+                "oneOf":[{"required":["value"]}],"allOf":[{"type":"object"}],"anyOf":[{}],
+                "examples":[{"additionalProperties":false,"required":[]}]}),
+        ] {
             for (cc, buffered) in [(false, false), (true, false), (true, true)] {
                 for streaming in [false, true] {
-                    let req = request(json!({"model":"claude-sonnet-5", "max_tokens":1024,
-                        "stream":streaming, "messages":[{"role":"user","content":"write"}],
-                        "tools":[{"name":name,"input_schema":{"type":"object",
-                            "required":["path","content"], "properties":{"path":{"type":"string"},"content":{"type":"string"}}}}]}));
+                    let mut upstream = mock(frame(
+                        "assistantResponseEvent",
+                        json!({"content":"schema forwarded"}),
+                    ))
+                    .await;
+                    upstream.state.cc_buffered_stream = buffered;
+                    let req = request(
+                        json!({"model":"claude-haiku-5-5","max_tokens":1024,"stream":streaming,
+                        "messages":[{"role":"user","content":"test"}],
+                        "tools":[{"name":"write_file","description":description,"input_schema":schema}]}),
+                    );
+                    let response = dispatch(upstream.state.clone(), req, cc).await;
+                    assert_eq!(response.status(), StatusCode::OK);
+                    let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                    assert!(!String::from_utf8_lossy(&bytes).contains("event: error"));
+                    let requests = upstream.requests.lock().unwrap();
+                    assert_eq!(requests.len(), 1);
+                    assert_eq!(requests[0].pointer("/conversationState/currentMessage/userInputMessage/userInputMessageContext/tools/0/toolSpecification/inputSchema/json"),Some(&schema));
+                    assert_eq!(requests[0].pointer("/conversationState/currentMessage/userInputMessage/userInputMessageContext/tools/0/toolSpecification/description").and_then(Value::as_str),Some(description.as_str()));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_schema_constraints_do_not_filter_complete_arguments() {
+        let name = "mcp__very_long_server_name_with_many_characters__write_file_with_a_long_name";
+        let schema = json!({"type":"object","additionalProperties":false,
+        "required":["path","content"],"properties":{
+            "path":{"type":"string"},"content":{"type":"string"},
+            "capabilities":{"type":"object","additionalProperties":{"type":"string"}}
+        }});
+        for input in [
+            json!({}),
+            json!({"path":"file.txt"}),
+            json!({"path":"file.txt","extra":true}),
+            json!({"path":123,"capabilities":{"read":123}}),
+        ] {
+            for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+                for streaming in [false, true] {
+                    let req = request(
+                        json!({"model":"claude-haiku-5-5","max_tokens":1024,"stream":streaming,
+                        "messages":[{"role":"user","content":"test"}],
+                        "tools":[{"name":name,"input_schema":schema}]}),
+                    );
                     let converted = convert_request(&req).unwrap();
-                    let upstream_name = &converted
+                    let alias = &converted
                         .conversation_state
                         .current_message
                         .user_input_message
@@ -3334,54 +3384,35 @@ mod tests {
                         .name;
                     let mut upstream = mock(frame(
                         "toolUseEvent",
-                        json!({
-                            "name":upstream_name, "toolUseId":"t1", "input":input, "stop":true
-                        }),
+                        json!({"name":alias,
+                        "toolUseId":"passthrough-call","input":input.to_string(),"stop":true}),
                     ))
                     .await;
                     upstream.state.cc_buffered_stream = buffered;
                     let response = dispatch(upstream.state.clone(), req, cc).await;
-                    assert_tool_call_failure(response, streaming).await;
-                    assert_eq!(upstream.requests.lock().unwrap().len(), 1);
+                    assert_eq!(response.status(), StatusCode::OK);
+                    let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                    if streaming {
+                        let text = String::from_utf8_lossy(&bytes);
+                        assert!(!text.contains("event: error"), "{text}");
+                        assert!(text.contains("event: message_stop"), "{text}");
+                        let mut raw = String::new();
+                        for line in text.lines().filter_map(|line| line.strip_prefix("data: ")) {
+                            let event: Value = serde_json::from_str(line).unwrap();
+                            if event["delta"]["type"] == "input_json_delta" {
+                                raw.push_str(event["delta"]["partial_json"].as_str().unwrap());
+                            }
+                        }
+                        assert_eq!(serde_json::from_str::<Value>(&raw).unwrap(), input);
+                    } else {
+                        let body: Value = serde_json::from_slice(&bytes).unwrap();
+                        assert_eq!(body["content"][0]["input"], input);
+                    }
+                    let requests = upstream.requests.lock().unwrap();
+                    assert_eq!(requests.len(), 1);
+                    assert_eq!(requests[0].pointer("/conversationState/currentMessage/userInputMessage/userInputMessageContext/tools/0/toolSpecification/inputSchema/json"),Some(&schema));
+                    assert_eq!(upstream.manager.snapshot().entries[0].success_count, 1);
                 }
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn undeclared_tool_arguments_never_reach_the_client() {
-        for (cc, buffered) in [(false, false), (true, false), (true, true)] {
-            for streaming in [false, true] {
-                let req = request(json!({
-                    "model":"claude-sonnet-5", "max_tokens":1024, "stream":streaming,
-                    "messages":[{"role":"user","content":"read"}],
-                    "tools":[{"name":"read_file","input_schema":{
-                        "type":"object", "additionalProperties":false,
-                        "required":["path"], "properties":{"path":{"type":"string"}}
-                    }}]
-                }));
-                let converted = convert_request(&req).unwrap();
-                let upstream_name = &converted
-                    .conversation_state
-                    .current_message
-                    .user_input_message
-                    .user_input_message_context
-                    .tools[0]
-                    .tool_specification
-                    .name;
-                let mut upstream = mock(frame(
-                    "toolUseEvent",
-                    json!({
-                        "name":upstream_name, "toolUseId":"unexpected-argument",
-                        "input":"{\"path\":\"file.txt\",\"extra\":true}", "stop":true
-                    }),
-                ))
-                .await;
-                upstream.state.cc_buffered_stream = buffered;
-                let response = dispatch(upstream.state.clone(), req, cc).await;
-                assert_tool_call_failure(response, streaming).await;
-                assert_eq!(upstream.requests.lock().unwrap().len(), 1);
-                assert_eq!(upstream.manager.snapshot().entries[0].success_count, 0);
             }
         }
     }
