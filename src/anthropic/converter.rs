@@ -17,14 +17,6 @@ use crate::kiro::model::requests::tool::{
 
 use super::types::{ContentBlock, MessagesRequest};
 
-/// 追加到系统提示词的分块写入策略
-const SYSTEM_CHUNKED_POLICY: &str = "\
-Tool output safety: upstream generation can truncate large tool arguments even when a high max_tokens was requested. \
-Keep file writes, edits, patches, and generated shell scripts in small complete calls, below 50 lines and 12000 characters of generated content per call. \
-For large files, create a skeleton then fill it in incrementally using the available tools; do not move an oversized payload into a shell heredoc or encoded command. \
-Always include required arguments and close the JSON object. If a tool fails or output is truncated, inspect the current state, reduce the chunk size, and do not repeat the same failed call unchanged. \
-Finish all chunks and verify the final file.";
-
 /// 模型映射：将 Anthropic 模型名映射到 Kiro 模型 ID
 /// 严格对照版本号
 pub fn map_model(model: &str) -> Option<String> {
@@ -1037,7 +1029,7 @@ fn build_history(
     let mut history = Vec::new();
 
     // 1. 处理系统消息
-    let mut system_content: String = req
+    let system_content: String = req
         .system
         .as_ref()
         .map(|system| {
@@ -1049,18 +1041,6 @@ fn build_history(
         })
         .unwrap_or_default();
 
-    if req.tools.as_ref().is_some_and(|tools| !tools.is_empty()) {
-        if !system_content.is_empty() {
-            system_content.push('\n');
-        }
-        system_content.push_str(SYSTEM_CHUNKED_POLICY);
-        // This is a planning hint, not a claim that Kiro accepts max_tokens.
-        // Bound the whole response, since many small calls can also overflow it.
-        system_content.push_str(&format!(
-            " Aim to finish this entire response within {} output tokens, including reasoning and ALL tool arguments combined. Reserve room to close every JSON object. When a task needs more, return one small complete tool call and continue on the next client turn after its result; do not batch many chunks into one response.",
-            req.max_tokens.clamp(1, 4096)
-        ));
-    }
     if !system_content.is_empty() {
         // 系统消息作为 user + assistant 配对
         let user_msg = HistoryUserMessage::new(system_content, model_id);
@@ -1530,7 +1510,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_descriptions_are_preserved_and_chunked_policy_stays_in_system() {
+    fn tool_descriptions_and_system_instructions_are_preserved() {
         for name in [
             "Write",
             "write_file",
@@ -1563,43 +1543,42 @@ mod tests {
                     .tool_specification
                     .description;
                 assert_eq!(description, &original_description);
-                let history = serde_json::to_string(&state.history).unwrap();
-                assert!(history.contains(SYSTEM_CHUNKED_POLICY));
-                if !system.is_null() && system != "" {
-                    assert!(history.contains("Original instructions"));
+                let history = serde_json::to_value(&state.history).unwrap();
+                if system.is_null() || system == "" {
+                    assert_eq!(history, serde_json::json!([]));
+                } else {
+                    assert_eq!(history.as_array().unwrap().len(), 2);
+                    assert_eq!(history[0]["userInputMessage"]["content"], system);
                 }
             }
         }
     }
 
     #[test]
-    fn tool_response_budget_uses_client_limit_with_a_conservative_ceiling() {
-        for (requested, budget) in [(256, 256), (4096, 4096), (64000, 4096)] {
-            let req: MessagesRequest = serde_json::from_value(serde_json::json!({
-                "model":"claude-sonnet-5", "max_tokens":requested,
-                "messages":[{"role":"user","content":"hi"}],
-                "tools":[{"name":"write_file", "input_schema":{"type":"object"}}]
-            }))
-            .unwrap();
-            let converted = convert_request(&req).unwrap();
-            let history = serde_json::to_string(&converted.conversation_state.history).unwrap();
-            assert!(history.contains(&format!("within {budget} output tokens")));
-            assert!(history.contains("ALL tool arguments combined"));
-        }
-    }
-
-    #[test]
-    fn requests_without_tools_do_not_receive_chunked_policy() {
-        let req: MessagesRequest = serde_json::from_value(serde_json::json!({
-            "model":"claude-sonnet-5", "max_tokens":1024,
-            "messages":[{"role":"user","content":"hi"}], "system":"Original instructions"
-        }))
-        .unwrap();
-        let history =
-            serde_json::to_string(&convert_request(&req).unwrap().conversation_state.history)
+    fn tools_and_max_tokens_do_not_change_system_history() {
+        for max_tokens in [256, 4096, 16384, 64000] {
+            for system in [
+                serde_json::Value::Null,
+                serde_json::json!(""),
+                serde_json::json!("Caller instructions: produce the requested complete output."),
+            ] {
+                let mut req: MessagesRequest = serde_json::from_value(serde_json::json!({
+                    "model":"claude-haiku-5-5", "max_tokens":max_tokens, "system":system,
+                    "messages":[{"role":"user","content":"hi"}]
+                }))
                 .unwrap();
-        assert!(history.contains("Original instructions"));
-        assert!(!history.contains(SYSTEM_CHUNKED_POLICY));
+                let original_history =
+                    serde_json::to_value(convert_request(&req).unwrap().conversation_state.history)
+                        .unwrap();
+                req.tools = Some(serde_json::from_value(serde_json::json!([
+                    {"name":"write_file","description":"Write a file", "input_schema":{"type":"object"}}
+                ])).unwrap());
+                let tool_history =
+                    serde_json::to_value(convert_request(&req).unwrap().conversation_state.history)
+                        .unwrap();
+                assert_eq!(tool_history, original_history);
+            }
+        }
     }
 
     #[test]
@@ -2652,11 +2631,9 @@ mod tests {
             assert!(state.get("agentTaskType").is_none());
             let history = state["history"].as_array().unwrap();
             assert_eq!(history.len(), 6);
-            assert!(
-                history[0]["userInputMessage"]["content"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("You are a Rust programming assistant.\n")
+            assert_eq!(
+                history[0]["userInputMessage"]["content"],
+                "You are a Rust programming assistant."
             );
             assert_eq!(
                 history[2]["userInputMessage"]["content"],

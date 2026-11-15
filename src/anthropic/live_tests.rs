@@ -1145,6 +1145,16 @@ fn enforcement_evidence_contains_complete_upstream_counterexamples() {
 #[tokio::test]
 #[ignore = "Live tool description and generation controls probe consumes credits"]
 async fn live_raw_tool_controls_probe() -> anyhow::Result<()> {
+    raw_tool_controls_probe(false).await
+}
+
+#[tokio::test]
+#[ignore = "Live tool output budget comparison consumes credits"]
+async fn live_raw_tool_output_budget_probe() -> anyhow::Result<()> {
+    raw_tool_controls_probe(true).await
+}
+
+async fn raw_tool_controls_probe(output_budget: bool) -> anyhow::Result<()> {
     use crate::kiro::{machine_id, parser::decoder::EventStreamDecoder};
     use futures::StreamExt;
     use sha2::{Digest, Sha256};
@@ -1301,6 +1311,63 @@ async fn live_raw_tool_controls_probe() -> anyhow::Result<()> {
     ] {
         cases.push((label.into(), pointer.into(), patch, prompt.into(), None));
     }
+    let mut output_cases = HashMap::new();
+    if output_budget {
+        cases.clear();
+        for (label, content) in [
+            (
+                "lines-80",
+                (1..=80)
+                    .map(|i| format!("line {i:03}\n"))
+                    .collect::<String>(),
+            ),
+            ("chars-14000", "abcd".repeat(3500)),
+            (
+                "tokens-over-4096",
+                (1..=550)
+                    .map(|i| format!("ROW_{i:04} alpha beta gamma delta epsilon zeta eta theta\n"))
+                    .collect::<String>(),
+            ),
+        ] {
+            for with_policy in [false, true] {
+                let label = format!(
+                    "output-{label}-{}",
+                    if with_policy {
+                        "old-policy"
+                    } else {
+                        "no-policy"
+                    }
+                );
+                let system = if with_policy {
+                    include_str!("../../testdata/kiro_tool_output_policy_before_2026-11-15.txt")
+                } else {
+                    ""
+                };
+                let prompt = format!(
+                    "This is a transport fidelity test. Call write_file exactly once with path probe.txt and content equal to the entire literal payload between BEGIN_PAYLOAD and END_PAYLOAD below (the markers are not part of the content). Copy every character, including the final newline if present. Do not abbreviate, summarize, use placeholders, or split into multiple calls. Do not answer in text. The tool is a harmless recorder and will NOT execute a file write.\nBEGIN_PAYLOAD\n{content}END_PAYLOAD"
+                );
+                output_cases.insert(label.clone(), (content.clone(), system));
+                cases.push((label, "".into(), json!({"additionalModelRequestFields":{"max_tokens":16384,"thinking":{"type":"disabled"}}}), prompt, None));
+            }
+        }
+        let baseline = cases
+            .iter()
+            .find(|case| case.0 == "output-tokens-over-4096-no-policy")
+            .unwrap()
+            .clone();
+        let expected = output_cases[&baseline.0].0.clone();
+        for (label, system, max_tokens) in [
+            ("output-tokens-native-4096", "", 4096),
+            (
+                "output-tokens-soft-4096-only",
+                "Aim to finish this entire response within 4096 output tokens, including reasoning and ALL tool arguments combined. Reserve room to close every JSON object. When a task needs more, return one small complete tool call and continue on the next client turn after its result; do not batch many chunks into one response.",
+                16384,
+            ),
+        ] {
+            output_cases.insert(label.into(), (expected.clone(), system));
+            cases.push((label.into(), "".into(), json!({"additionalModelRequestFields":{"max_tokens":max_tokens,"thinking":{"type":"disabled"}}}), baseline.3.clone(), None));
+        }
+    }
     let selected = std::env::var("KIRO_CONTROLS_PROBE_CASES").ok();
     let mut results = Vec::new();
     for (label, pointer, patch, prompt, description_length) in cases {
@@ -1316,16 +1383,28 @@ async fn live_raw_tool_controls_probe() -> anyhow::Result<()> {
         } else {
             "Harmless echo probe. No tool will be executed.".into()
         };
+        let output_case = output_cases.get(&label);
+        let system = output_case.map(|(_, system)| *system).unwrap_or("");
+        let tool_name = if output_budget {
+            "write_file"
+        } else {
+            "probe_echo"
+        };
+        let schema = if output_budget {
+            json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]})
+        } else {
+            json!({"type":"object","properties":{"value":{"type":"string"}},"required":["value"]})
+        };
         let input: super::types::MessagesRequest = serde_json::from_value(json!({
-            "model":"claude-haiku-5-5","max_tokens":1024,
+            "model":"claude-haiku-5-5","max_tokens":if output_budget { 16384 } else { 1024 }, "system":system,
             "messages":[{"role":"user","content":prompt}]
         }))?;
         let converted = super::converter::convert_request(&input)?;
         let mut body = json!({"conversationState":converted.conversation_state});
         body.pointer_mut(context_pointer)
             .context("Missing context")?["tools"] = json!([
-            {"toolSpecification":{"name":"probe_echo","description":description,
-                "inputSchema":{"json":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}}}}
+            {"toolSpecification":{"name":tool_name,"description":description,
+                "inputSchema":{"json":schema}}}
         ]);
         // Insert candidate fields AFTER endpoint/model shaping, so none are stripped.
         let transformed = endpoint.transform_api_body(&body.to_string(), &rctx);
@@ -1356,6 +1435,17 @@ async fn live_raw_tool_controls_probe() -> anyhow::Result<()> {
             .and_then(reqwest::Body::as_bytes)
             .context("Missing literal body")?;
         let actual: Value = serde_json::from_slice(bytes)?;
+        let history = actual
+            .pointer("/conversationState/history")
+            .and_then(Value::as_array);
+        ensure!(
+            if system.is_empty() {
+                history.is_none_or(|history| history.is_empty())
+            } else {
+                history.is_some_and(|history| history[0]["userInputMessage"]["content"] == system)
+            },
+            "Unexpected injected history policy"
+        );
         for (key, value) in patch.as_object().unwrap() {
             ensure!(
                 actual.pointer(&pointer).unwrap().get(key) == Some(value),
@@ -1397,6 +1487,7 @@ async fn live_raw_tool_controls_probe() -> anyhow::Result<()> {
         .context("Response timeout")??;
         let mut events = Vec::new();
         let mut errors = Vec::new();
+        let mut metadata = Vec::new();
         let mut text = String::new();
         let mut calls = std::collections::BTreeMap::<String, Value>::new();
         if status.is_success() {
@@ -1411,6 +1502,9 @@ async fn live_raw_tool_controls_probe() -> anyhow::Result<()> {
                 }
                 if kind == "assistantResponseEvent" {
                     text.push_str(payload["content"].as_str().unwrap_or_default());
+                }
+                if kind == "metadataEvent" {
+                    metadata.push(payload.clone());
                 }
                 if kind == "toolUseEvent" {
                     let id = payload["toolUseId"]
@@ -1443,14 +1537,32 @@ async fn live_raw_tool_controls_probe() -> anyhow::Result<()> {
             call["input"] = serde_json::from_str(call["rawInput"].as_str().unwrap_or_default())
                 .unwrap_or(Value::Null);
         }
+        let output_observation = output_case.map(|(expected, _)| {
+            let observations: Vec<_> = calls.values().map(|call| {
+                let content = call["input"]["content"].as_str();
+                json!({"complete":call["complete"],"path":call["input"]["path"],
+                    "contentChars":content.map(|s| s.chars().count()),"contentLines":content.map(|s| s.lines().count()),
+                    "contentSha256":content.map(|s| hex::encode(Sha256::digest(s.as_bytes()))),
+                    "exactMatch":content == Some(expected.as_str())})
+            }).collect();
+            json!({"expectedChars":expected.chars().count(),"expectedLines":expected.lines().count(),
+                "expectedSha256":hex::encode(Sha256::digest(expected.as_bytes())),"calls":observations})
+        });
         let result = json!({"case":label,"endpoint":account.endpoint,"region":account.region,"model":"claude-haiku-5.5",
             "wireUnchanged":true,"patchPointer":pointer,"patch":patch,"prompt":prompt,
+            "system":system,"metadata":metadata,"outputObservation":output_observation,
             "descriptionChars":description.chars().count(),"descriptionSha256":hex::encode(Sha256::digest(description.as_bytes())),
             "descriptionTail":description.chars().rev().take(65).collect::<String>().chars().rev().collect::<String>(),
             "bodySha256":digest,"httpStatus":status.as_u16(),"requestId":request_id,"durationMs":start.elapsed().as_millis(),
             "events":events,"errors":errors,"assistantText":text,"toolCalls":calls});
         let result = crate::request_log::redact(&serde_json::to_string(&result)?);
-        eprintln!("RAW_CONTROLS result {result}");
+        if output_budget {
+            eprintln!(
+                "RAW_OUTPUT result case={label} status={status} metadata={metadata:?} observation={output_observation:?}"
+            );
+        } else {
+            eprintln!("RAW_CONTROLS result {result}");
+        }
         results.push(serde_json::from_str::<Value>(&result)?);
         std::fs::write(
             output.join("results.json"),

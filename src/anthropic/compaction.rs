@@ -3336,6 +3336,7 @@ mod tests {
                     upstream.state.cc_buffered_stream = buffered;
                     let req = request(
                         json!({"model":"claude-haiku-5-5","max_tokens":1024,"stream":streaming,
+                        "system":"Caller system instructions: return the requested complete output.",
                         "messages":[{"role":"user","content":"test"}],
                         "tools":[{"name":"write_file","description":description,"input_schema":schema}]}),
                     );
@@ -3346,6 +3347,12 @@ mod tests {
                     let requests = upstream.requests.lock().unwrap();
                     assert_eq!(requests.len(), 1);
                     assert_eq!(requests[0].pointer("/conversationState/currentMessage/userInputMessage/userInputMessageContext/tools/0/toolSpecification/inputSchema/json"),Some(&schema));
+                    assert_eq!(
+                        requests[0]
+                            .pointer("/conversationState/history/0/userInputMessage/content")
+                            .and_then(Value::as_str),
+                        Some("Caller system instructions: return the requested complete output.")
+                    );
                     assert_eq!(requests[0].pointer("/conversationState/currentMessage/userInputMessage/userInputMessageContext/tools/0/toolSpecification/description").and_then(Value::as_str),Some(description.as_str()));
                 }
             }

@@ -129,7 +129,7 @@ cargo test live_raw_additional_properties_enforcement_probe -- --ignored --nocap
 
 同次读取真实账号 `ListAvailableModels` 目录，Haiku 5.5 的模型参数 schema 仅声明 `thinking`、`output_config`、`max_tokens`，根层 `additionalProperties:false`。这与原生字段 400 相互印证，**不是所有模型或所有可能位置均不支持的证明**。
 
-生产调整：工具描述不再截断或追加内容；已有系统分块提示仍保留。采样/停止参数继续省略并给出“代理尚无已验证映射”的警告，强制 `tool_choice` 继续明确拒绝，避免成功响应掩盖未实现的调用约束；没有新增 schema 或工具参数校验。完整路由回归验证 20000 个中文字符加末尾标记经过 JSON、实时 SSE、缓冲 SSE 后保持原值，CLI 原生参数开关两种模式的最终请求也保留完整描述。
+本节验证后的调整：工具描述不再截断或追加内容；当时保留的系统分块提示已在下一轮真实对照后移除，见下节。采样/停止参数继续省略并给出“代理尚无已验证映射”的警告，强制 `tool_choice` 继续明确拒绝，避免成功响应掩盖未实现的调用约束；没有新增 schema 或工具参数校验。完整路由回归验证 20000 个中文字符加末尾标记经过 JSON、实时 SSE、缓冲 SSE 后保持原值，CLI 原生参数开关两种模式的最终请求也保留完整描述。
 
 [脱敏原始记录](../testdata/kiro_tool_controls_live_2026-11-15.json)包含所有候选字段、注入位置、提示、描述哈希及尾部、实际请求体哈希、上游 request ID、HTTP 错误和完整工具参数。结果仅适用于该账号、日期、模型、区域和端点；未验证超过 20000 字符的描述，也没有根据 HTTP 200 声称采样参数已生效。
 
@@ -144,3 +144,40 @@ cargo test live_raw_tool_controls_probe --no-default-features -- --ignored --noc
 ```
 
 可用 `KIRO_CONTROLS_PROBE_CASES` 选择逗号分隔的用例标签，例如 `description-20000,native-temperature,root-tool_choice-any`；完整标签见原始记录中的 `case`。探测会记录 400，而不把 400 视为测试失败；遇到 401/402/403/429 则停止。该测试的通过表示记录完成，不代表待测能力被支持。
+
+
+## 系统分块提示与输出预算实测
+
+2026-11-15，继续使用同一导入账号、CLI / us-east-1 / `claude-haiku-5.5` 做 **8 次**原始上游对照，不执行任何文件操作。待调用的 `write_file` 只是记录工具参数。比较实际发送的系统历史与预期相等，模型参数在端点和账号转换后注入并核对，保存实际请求体哈希。每组新的会话使用同一任务，只有系统提示不同；所有请求均 200，是否完成由原始工具事件与 JSON 参数核验，不能仅看 HTTP 状态。
+
+来源追溯：50 行源于本地提交 `f25d986`（2026-02-07）的 Write/Edit 分块提示；12000 字符与整次响应 `min(max_tokens,4096)` 软预算源于 `5b15337`（2026-11-04）的截断恢复优化。相关提交没有附官方上游依据或可复查的真实边界测试；它们是本地保守经验值。
+
+| 任务/控制 | 不带原提示 | 带原提示或控制 |
+|-----------|------------|----------------|
+| 复制 80 行、720 字符，一次工具调用 | 完整返回 80 行，逐字一致 | 原提示只返回前 40 行，解释中明确引用 50 行限制 |
+| 复制 550 行、30250 字符，一次工具调用 | 完整返回 550 行，逐字一致，stopReason=`TOOL_USE` | 原提示只返回前 100 行 |
+| 同一 550 行任务，仅加入 4096 soft prompt；原生预算仍为 16384 | 无提示完整返回，见上一行 | 仅软预算提示也使它只返回前 50 行 |
+| 同一 550 行任务，无软提示，原生 `max_tokens` 从 16384 改为 4096 | 16384 时完整返回 | 4096 时 `MAX_TOKENS`，工具 JSON 未完成 |
+| 14000 字符的连续 `abcd` 重复串，原生预算 16384 | `MAX_TOKENS`，工具 JSON 未完成 | 原提示不调用工具，文本引用 12000 字符限制并要求拆分 |
+
+除原生 4096 对照外，实际发送 `additionalModelRequestFields={max_tokens:16384,thinking:{type:"disabled"}}`。上游 metadata 仅报告停止原因，**没有精确 token 用量**，因此这里不把字符数、本地估算或生成任务名称当成真实输出 token 数。
+
+结果说明：50 行和 12000 字符不是该模型所有工具调用的硬边界，550 行/30250 字符的完整反例已超过它们；原提示和单独 4096 软预算会无谓改变任务完成范围。重复串用例同时证明真实长度失败仍可能发生，不能据此保证任意长输出成功，也不能从这一次失败推算字符上限。原生 4096 对照支持继续按客户端选择映射真实预算，不支持对所有工具请求注入统一的 4096 软限制。
+
+已移除常规工具请求的整段系统分块提示和软预算注入，不替换成另一组数字；调用方系统指令保持原值。保留原生 `max_tokens` 映射、完整 JSON/帧/结束标记/截断处理。真实截断后的可配置缩块恢复仍保留，恢复中的 20/10 行和 4000/2000 字符是本地重试策略，不是上游上限，也不会预先附加到普通请求。
+
+离线回归覆盖多个客户端预算、无/空/非空 system、各种工具名称，以及 `/v1`、`/cc/v1` 的 JSON、实时 SSE、缓冲 SSE，核对最终上游历史没有新增这些限制且调用方指令保持完整。
+
+[脱敏原始记录](../testdata/kiro_tool_output_budget_live_2026-11-15.json)保存提示、旧系统策略、实际请求体哈希、request ID、metadata、原始工具参数、内容长度与逐字比较结果。[旧提示快照](../testdata/kiro_tool_output_policy_before_2026-11-15.txt)只供复现实验，生产代码不再引用。每个用例只有一次样本，固定先无提示再有提示；结果不能外推到所有模型、端点或其他日期。
+
+复测（默认 8 次请求，会消耗额度；单请求 90 秒、响应最大 1 MiB，无重试）：
+
+```sh
+KIRO_LIVE_CREDENTIALS=/absolute/path/credentials.json \
+KIRO_LIVE_CONFIG=/absolute/path/config.json \
+KIRO_LIVE_ACCOUNT_ID=1 \
+KIRO_CONTROLS_PROBE_OUTPUT=/absolute/path/output-budget-probe \
+cargo test live_raw_tool_output_budget_probe --no-default-features -- --ignored --nocapture
+```
+
+可通过 `KIRO_CONTROLS_PROBE_CASES` 选择记录中的 `case` 标签。测试通过表示成功记录结果，包含 `MAX_TOKENS` 的未完成输出，不代表所有任务完成。
