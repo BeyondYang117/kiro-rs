@@ -888,8 +888,8 @@ impl KiroProvider {
     }
 }
 
-/// Remove boolean `additionalProperties` keywords that Kiro rejects. The
-/// original request body remains available to response validation.
+/// Adapt unsupported tool schema keywords for Kiro. The original request body
+/// remains available to response validation.
 fn normalize_kiro_tool_schemas(body: &str) -> String {
     let Ok(mut request) = serde_json::from_str::<serde_json::Value>(body) else {
         return body.to_owned();
@@ -902,7 +902,7 @@ fn normalize_kiro_tool_schemas(body: &str) -> String {
     {
         for tool in tools {
             if let Some(schema) = tool.pointer_mut("/toolSpecification/inputSchema/json") {
-                crate::anthropic::strip_kiro_boolean_additional_properties(schema);
+                crate::anthropic::normalize_kiro_wire_tool_schema(schema);
             }
         }
     }
@@ -932,6 +932,114 @@ mod response_tests {
             schema["properties"]["items"]["items"]
                 .get("additionalProperties")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn upstream_tool_schemas_relocate_root_compositions_without_losing_constraints() {
+        use serde_json::json;
+        for keyword in ["oneOf", "allOf", "anyOf"] {
+            let mut schema = json!({
+                "type":"object",
+                "properties":{"path":{"type":"string"},"query":{"type":"string"}},
+                "required":["path"],
+                "additionalProperties":false
+            });
+            schema[keyword] = json!([{"required":["path"]}, {"required":["query"]}]);
+            let mut tools = vec![
+                json!({"toolSpecification":{
+                    "name":"ordinary", "inputSchema":{"json":{"type":"object"}}
+                }});
+                158
+            ];
+            tools[59] = json!({"toolSpecification":{
+                "name":"composed", "inputSchema":{"json":schema}
+            }});
+            let body = json!({"conversationState":{"currentMessage":{"userInputMessage":{
+                "content":"test", "userInputMessageContext":{"tools":tools}
+            }}}})
+            .to_string();
+            let normalized = normalize_kiro_tool_schemas(&body);
+            let wire: serde_json::Value = serde_json::from_str(&normalized).unwrap();
+            let wire_tools = wire.pointer("/conversationState/currentMessage/userInputMessage/userInputMessageContext/tools").unwrap();
+            let adapted = &wire_tools[59]["toolSpecification"]["inputSchema"]["json"];
+            for forbidden in ["oneOf", "allOf", "anyOf"] {
+                assert!(adapted.get(forbidden).is_none(), "{keyword}: {adapted}");
+            }
+            assert_eq!(adapted["type"], "object");
+            let reference = adapted["$ref"].as_str().unwrap();
+            let nested = adapted.pointer(&reference[1..]).unwrap();
+            let mut expected = schema.clone();
+            expected
+                .as_object_mut()
+                .unwrap()
+                .remove("additionalProperties");
+            assert_eq!(nested, &expected);
+            assert_eq!(wire_tools.as_array().unwrap().len(), 158);
+            assert_eq!(wire_tools[58], tools[58]);
+            assert_eq!(wire_tools[60], tools[60]);
+            assert_eq!(normalize_kiro_tool_schemas(&normalized), normalized);
+            // Response validation still sees the original constraints.
+            let original: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(original.pointer("/conversationState/currentMessage/userInputMessage/userInputMessageContext/tools/59/toolSpecification/inputSchema/json"), Some(&schema));
+        }
+    }
+
+    #[test]
+    fn upstream_composed_schemas_preserve_references_and_literal_data() {
+        use serde_json::json;
+        let literal = json!({"$ref":"#/$defs/path", "oneOf":[1,2]});
+        let mut schema = json!({
+            "$schema":"https://json-schema.org/draft/2020-12/schema",
+            "$id":"https://example.test/input.json",
+            "$defs":{
+                "path":{"type":"string"},
+                "kiro_tool_input":{"type":"integer"},
+                "resource":{"$id":"other.json", "$defs":{"value":{"type":"number"}},
+                    "$ref":"#/$defs/value"}
+            },
+            "type":"object",
+            "properties":{
+                "path":{"$ref":"#/$defs/path"},
+                "self":{"$ref":"#"},
+                "external":{"$ref":"other.json#/$defs/value"},
+                "anchored":{"$ref":"#pathAnchor"},
+                "nested":{"anyOf":[{"type":"string"},{"type":"null"}]},
+                "literal":{"const":literal, "default":literal, "examples":[literal]}
+            },
+            "oneOf":[{"required":["path"]}, {"required":["nested"]}]
+        });
+        crate::anthropic::normalize_kiro_wire_tool_schema(&mut schema);
+        assert_eq!(schema["$id"], "https://example.test/input.json");
+        assert_eq!(
+            schema["$schema"],
+            "https://json-schema.org/draft/2020-12/schema"
+        );
+        let nested = &schema["$defs"]["kiro_tool_input"];
+        assert!(nested.get("$id").is_none());
+        for (name, expected) in [("path", json!({"type":"string"})), ("self", nested.clone())] {
+            let reference = nested["properties"][name]["$ref"].as_str().unwrap();
+            assert_eq!(schema.pointer(&reference[1..]), Some(&expected));
+        }
+        assert_eq!(
+            nested["$defs"]["kiro_tool_input"],
+            json!({"type":"integer"})
+        );
+        assert_eq!(nested["$defs"]["resource"]["$ref"], "#/$defs/value");
+        assert_eq!(
+            nested["properties"]["external"]["$ref"],
+            "other.json#/$defs/value"
+        );
+        assert_eq!(nested["properties"]["anchored"]["$ref"], "#pathAnchor");
+        assert_eq!(nested["properties"]["literal"]["const"], literal);
+        assert_eq!(nested["properties"]["literal"]["default"], literal);
+        assert_eq!(
+            nested["properties"]["literal"]["examples"],
+            json!([literal])
+        );
+        assert_eq!(
+            nested["properties"]["nested"]["anyOf"],
+            json!([{"type":"string"},{"type":"null"}])
         );
     }
 

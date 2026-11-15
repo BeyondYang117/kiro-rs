@@ -294,6 +294,103 @@ pub(crate) fn strip_kiro_boolean_additional_properties(schema: &mut serde_json::
     }
 }
 
+/// Keep the original schema for local response checks; adapt only the wire copy.
+/// Kiro forbids composition keywords at the root, but accepts nested schemas.
+pub(crate) fn normalize_kiro_wire_tool_schema(schema: &mut serde_json::Value) {
+    strip_kiro_boolean_additional_properties(schema);
+    if !["oneOf", "allOf", "anyOf"]
+        .iter()
+        .any(|key| schema.get(key).is_some())
+    {
+        return;
+    }
+
+    let mut original = std::mem::take(schema);
+    let mut wrapper = serde_json::json!({
+        "type": "object",
+        "$ref": "#/$defs/kiro_tool_input"
+    });
+    // Keep the dialect and base URI at the document root. Leaving $id in the
+    // relocated schema would create a second resource with the same URI.
+    for key in ["$schema", "$id"] {
+        if let Some(value) = original.as_object_mut().and_then(|obj| obj.remove(key)) {
+            wrapper[key] = value;
+        }
+    }
+    rebase_tool_schema_refs(&mut original);
+    wrapper["$defs"] = serde_json::json!({"kiro_tool_input": original});
+    *schema = wrapper;
+}
+
+/// Rewrite document-local JSON pointers after moving the input schema. Only
+/// schema positions are visited: examples, enum values and defaults are data.
+fn rebase_tool_schema_refs(schema: &mut serde_json::Value) {
+    use serde_json::Value;
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+    // A nested $id starts its own resource; its fragments are independent of
+    // the input schema's position in the containing document.
+    if object.contains_key("$id") {
+        return;
+    }
+    for key in ["$ref", "$dynamicRef", "$recursiveRef"] {
+        if let Some(Value::String(reference)) = object.get_mut(key) {
+            if reference == "#" || reference.starts_with("#/") {
+                *reference = format!("#/$defs/kiro_tool_input{}", &reference[1..]);
+            }
+        }
+    }
+    for key in [
+        "properties",
+        "$defs",
+        "definitions",
+        "patternProperties",
+        "dependentSchemas",
+    ] {
+        if let Some(children) = object.get_mut(key).and_then(Value::as_object_mut) {
+            for child in children.values_mut() {
+                rebase_tool_schema_refs(child);
+            }
+        }
+    }
+    if let Some(children) = object
+        .get_mut("dependencies")
+        .and_then(Value::as_object_mut)
+    {
+        for child in children.values_mut().filter(|child| child.is_object()) {
+            rebase_tool_schema_refs(child);
+        }
+    }
+    for key in [
+        "items",
+        "additionalItems",
+        "additionalProperties",
+        "contains",
+        "not",
+        "if",
+        "then",
+        "else",
+        "propertyNames",
+        "unevaluatedProperties",
+        "unevaluatedItems",
+        "allOf",
+        "anyOf",
+        "oneOf",
+        "prefixItems",
+    ] {
+        if let Some(child) = object.get_mut(key) {
+            if let Some(children) = child.as_array_mut() {
+                for child in children {
+                    rebase_tool_schema_refs(child);
+                }
+            } else {
+                rebase_tool_schema_refs(child);
+            }
+        }
+    }
+}
+
 /// 追加到 Write 工具 description 末尾的内容
 const WRITE_TOOL_DESCRIPTION_SUFFIX: &str = "- IMPORTANT: Large tool arguments can be truncated upstream. For large files, create a small skeleton first, then append or edit in chunks using the available tools. Keep each call below 50 lines and 12000 characters of generated content, whichever limit is reached first. Include all required arguments and finish the JSON object. After a failure, inspect the file and use smaller chunks; never repeat the same oversized write unchanged.";
 

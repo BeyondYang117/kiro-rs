@@ -35,7 +35,7 @@ mod websearch;
 
 pub(crate) use converter::is_non_claude;
 pub(crate) use converter::map_model;
-pub(crate) use converter::strip_kiro_boolean_additional_properties;
+pub(crate) use converter::normalize_kiro_wire_tool_schema;
 pub use router::create_router_with_provider;
 pub(crate) use upstream::UpstreamResponseDecoder;
 
