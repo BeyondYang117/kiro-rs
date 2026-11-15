@@ -1157,7 +1157,9 @@ async fn request_debug_is_opt_in_and_tracks_original_and_final_retry_bodies_on_b
                     expected["profileArn"] = json!("[REDACTED]");
                     let text = &mut expected["conversationState"]["currentMessage"]["userInputMessage"]
                         ["content"];
-                    *text = json!("Debug src/main.rs [REDACTED] [REDACTED] [REDACTED] [REDACTED]");
+                    *text = json!(
+                        "Inspect Rust code only.\nPreserve code formatting.\nDebug src/main.rs [REDACTED] [REDACTED] [REDACTED] [REDACTED]"
+                    );
                     assert_eq!(debug["json"], expected);
                     assert_eq!(
                         debug["json"]["conversationState"]["currentMessage"]["userInputMessage"]["origin"],

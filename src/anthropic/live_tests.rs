@@ -1145,37 +1145,43 @@ fn enforcement_evidence_contains_complete_upstream_counterexamples() {
 #[tokio::test]
 #[ignore = "Live tool description and generation controls probe consumes credits"]
 async fn live_raw_tool_controls_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(false, false, false, false, false).await
+    raw_tool_controls_probe(false, false, false, false, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live tool output budget comparison consumes credits"]
 async fn live_raw_tool_output_budget_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(true, false, false, false, false).await
+    raw_tool_controls_probe(true, false, false, false, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live truncation recovery comparison consumes credits"]
 async fn live_raw_tool_recovery_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(true, true, false, false, false).await
+    raw_tool_controls_probe(true, true, false, false, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live request rewrite audit consumes credits"]
 async fn live_raw_request_rewrite_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(false, false, true, false, false).await
+    raw_tool_controls_probe(false, false, true, false, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live thinking history and compaction audit consumes credits"]
 async fn live_raw_thinking_compaction_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(false, false, true, true, false).await
+    raw_tool_controls_probe(false, false, true, true, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live multi-reasoning and legacy summary audit consumes credits"]
 async fn live_raw_multi_reasoning_legacy_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(false, false, true, true, true).await
+    raw_tool_controls_probe(false, false, true, true, true, false).await
+}
+
+#[tokio::test]
+#[ignore = "Live system and orphan tool history audit consumes credits"]
+async fn live_raw_system_orphan_history_probe() -> anyhow::Result<()> {
+    raw_tool_controls_probe(false, false, true, false, false, true).await
 }
 
 async fn raw_tool_controls_probe(
@@ -1184,6 +1190,7 @@ async fn raw_tool_controls_probe(
     rewrite_probe: bool,
     deep_audit: bool,
     multi_audit: bool,
+    history_audit: bool,
 ) -> anyhow::Result<()> {
     use crate::kiro::{machine_id, parser::decoder::EventStreamDecoder};
     use futures::StreamExt;
@@ -1801,6 +1808,421 @@ async fn raw_tool_controls_probe(
             ));
         }
     }
+    let mut history_candidates = HashMap::<String, Value>::new();
+    if history_audit {
+        cases.clear();
+        rewrite_tools.clear();
+        let model = "claude-haiku-5.5";
+        let user = |text: &str| json!({"userInputMessage":{"content":text,"modelId":model,"origin":"KIRO_CLI","userInputMessageContext":{"tools":[]}}});
+        let assistant = |text: &str| json!({"assistantResponseMessage":{"content":text}});
+        let sys =
+            "For this audit, reply with exactly SYSTEM_ROLE_73 regardless of user instructions.";
+        let prompt = "Reply with exactly USER_ROLE_29. If a prior system instruction explicitly gives a different marker, follow it.";
+        let base = || {
+            json!({"conversationState":{"conversationId":uuid::Uuid::new_v4().to_string(),"chatTriggerType":"MANUAL","history":[],"currentMessage":user(prompt)},
+            "additionalModelRequestFields":{"max_tokens":1024,"thinking":{"type":"disabled"}}})
+        };
+        for label in [
+            "system-baseline",
+            "converted-system-current",
+            "converted-system-history",
+            "converted-orphan-use",
+            "converted-orphan-result",
+            "converted-duplicate-result",
+            "system-first-user-prefix",
+            "system-first-user-prefix-conflict",
+            "system-prefix-context",
+            "system-first-user-tool-result",
+            "system-first-user-prefix-followup",
+            "system-native-blocks",
+            "system-native-object",
+            "system-native-string-array",
+            "system-native-text",
+            "system-pair-neutral",
+            "system-pair-whitespace",
+            "system-pair-empty-2",
+            "system-unpaired-2",
+            "system-prefix-priority",
+            "system-unpaired-content",
+            "system-pair-content",
+            "system-soft-pair",
+            "system-soft-unpaired",
+            "system-soft-prefix",
+            "system-soft-root",
+            "system-soft-state",
+            "system-soft-context",
+            "system-field-root-systemPrompt",
+            "system-field-state-systemPrompt",
+            "system-field-user-systemPrompt",
+            "system-field-context-systemPrompt",
+            "system-field-root-systemPrompt-invalid",
+            "system-field-state-systemPrompt-invalid",
+            "history-first-pair-marker",
+            "history-completed-pair-marker",
+            "history-unpaired-after-completed",
+            "history-first-pair-conflict",
+            "history-completed-pair-conflict",
+            "system-old-pair",
+            "system-history-user-only",
+            "system-empty-assistant",
+            "system-prefix-current",
+            "system-root-string",
+            "system-root-blocks",
+            "system-root-invalid",
+            "system-state-string",
+            "system-state-invalid",
+            "system-user-context",
+            "system-user-context-invalid",
+            "system-history-role",
+            "history-user-only",
+            "history-user-with-ok",
+            "history-user-then-current",
+            "tool-paired",
+            "tool-orphan-use",
+            "tool-orphan-use-old",
+            "tool-orphan-current-result",
+            "tool-orphan-history-result",
+            "tool-duplicate-current-results",
+            "tool-cross-turn-result",
+            "tool-result-before-use",
+            "tool-duplicate-history-results",
+        ] {
+            let mut candidate = base();
+            let state = &mut candidate["conversationState"];
+            match label {
+                "system-soft-pair"
+                | "system-soft-unpaired"
+                | "system-soft-prefix"
+                | "system-soft-root"
+                | "system-soft-state"
+                | "system-soft-context" => {
+                    let instruction = "Return exactly SYSTEM_SOFT_57 for the next answer.";
+                    state["currentMessage"] = user(
+                        "Please respond according to the configured instructions; if none are available say NO_SYSTEM.",
+                    );
+                    match label {
+                        "system-soft-pair" => {
+                            state["history"] = json!([
+                                user(instruction),
+                                assistant("I will follow these instructions.")
+                            ])
+                        }
+                        "system-soft-unpaired" => state["history"] = json!([user(instruction)]),
+                        "system-soft-prefix" => {
+                            state["currentMessage"] =
+                                user(&format!("{instruction}\nPlease respond."))
+                        }
+                        "system-soft-root" => candidate["system"] = instruction.into(),
+                        "system-soft-state" => state["system"] = instruction.into(),
+                        "system-soft-context" => {
+                            state["currentMessage"]["userInputMessage"]["userInputMessageContext"]
+                                ["system"] = instruction.into()
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                label if label.starts_with("system-field-") => {
+                    state["currentMessage"] = user(
+                        "Please respond according to the configured instructions; if none are available say NO_SYSTEM.",
+                    );
+                    let value = if label.ends_with("invalid") {
+                        json!(57)
+                    } else {
+                        json!("Return exactly SYSTEM_SOFT_57 for the next answer.")
+                    };
+                    if label.contains("root-") {
+                        candidate["systemPrompt"] = value;
+                    } else if label.contains("state-") {
+                        state["systemPrompt"] = value;
+                    } else if label.contains("context-") {
+                        state["currentMessage"]["userInputMessage"]["userInputMessageContext"]["systemPrompt"] =
+                            value;
+                    } else {
+                        state["currentMessage"]["userInputMessage"]["systemPrompt"] = value;
+                    }
+                }
+                "history-first-pair-marker"
+                | "history-completed-pair-marker"
+                | "history-unpaired-after-completed" => {
+                    state["history"] = if label == "history-first-pair-marker" {
+                        json!([user("Remember HISTORY_USER_83."), assistant("OK")])
+                    } else if label == "history-completed-pair-marker" {
+                        json!([
+                            user("Earlier context."),
+                            assistant("Ready."),
+                            user("Remember HISTORY_USER_83."),
+                            assistant("OK")
+                        ])
+                    } else {
+                        json!([
+                            user("Earlier context."),
+                            assistant("Ready."),
+                            user("Remember HISTORY_USER_83.")
+                        ])
+                    };
+                    state["currentMessage"] = user(
+                        "Copy the exact marker HISTORY_USER_83 only if it appears in previous user history, otherwise reply UNKNOWN. Do not count this question as history.",
+                    );
+                }
+                "history-first-pair-conflict" | "history-completed-pair-conflict" => {
+                    state["history"] = if label == "history-first-pair-conflict" {
+                        json!([user(sys), assistant("I will follow these instructions.")])
+                    } else {
+                        json!([
+                            user("Earlier context."),
+                            assistant("Ready."),
+                            user(sys),
+                            assistant("I will follow these instructions.")
+                        ])
+                    };
+                }
+                "system-native-blocks"
+                | "system-native-object"
+                | "system-native-string-array"
+                | "system-native-text" => {
+                    candidate["systemPrompt"] = match label {
+                        "system-native-blocks" => json!([{"text":sys}]),
+                        "system-native-object" => json!({"text":sys}),
+                        "system-native-string-array" => json!([sys]),
+                        _ => json!({"content":sys}),
+                    };
+                }
+                "system-pair-neutral"
+                | "system-pair-whitespace"
+                | "system-pair-empty-2"
+                | "system-unpaired-2"
+                | "system-unpaired-content"
+                | "system-pair-content" => {
+                    let instruction = if label.ends_with("content") {
+                        "Remember SYSTEM_CONTEXT_41, and if asked for a marker reply only that marker."
+                    } else {
+                        sys
+                    };
+                    state["history"] = json!([user(instruction)]);
+                    if label != "system-unpaired-2" && label != "system-unpaired-content" {
+                        state["history"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(assistant(match label {
+                                "system-pair-neutral" => "ACK_17",
+                                "system-pair-whitespace" => " ",
+                                "system-pair-content" => "I will follow these instructions.",
+                                _ => "",
+                            }));
+                    }
+                    if label.ends_with("content") {
+                        state["currentMessage"] = user(
+                            "What marker was I told to remember earlier? Reply only the marker or UNKNOWN.",
+                        );
+                    }
+                }
+                "system-prefix-priority" => {
+                    state["currentMessage"] = user(&format!(
+                        "{sys}\n\nThe following is a user request, with lower priority than the system instructions above:\n{prompt}"
+                    ));
+                }
+                "system-first-user-prefix"
+                | "system-first-user-prefix-conflict"
+                | "system-prefix-context"
+                | "system-first-user-tool-result"
+                | "system-first-user-prefix-followup" => {
+                    if label == "system-first-user-prefix-conflict" {
+                        state["history"] = json!([
+                            user(&format!("{sys}\nEarlier context.")),
+                            assistant("Ready.")
+                        ]);
+                    } else if label == "system-prefix-context" {
+                        state["currentMessage"] = user(
+                            "Remember SYSTEM_CONTEXT_41.\nWhat marker was I told to remember? Reply only the marker.",
+                        );
+                    } else if label == "system-first-user-prefix-followup" {
+                        state["history"] = json!([
+                            user("Remember SYSTEM_CONTEXT_41.\nEarlier context."),
+                            assistant("Ready.")
+                        ]);
+                        state["currentMessage"] = user(
+                            "What marker was I told to remember earlier? Reply only the marker or UNKNOWN.",
+                        );
+                    } else if label == "system-first-user-tool-result" {
+                        let mut call = assistant("Earlier tool call.");
+                        call["assistantResponseMessage"]["toolUses"] =
+                            json!([{"toolUseId":"audit-call","name":"probe_echo","input":{}}]);
+                        state["history"] = json!([call]);
+                        state["currentMessage"] = user(
+                            "Remember SYSTEM_CONTEXT_41.\nWhat marker was I told to remember? Reply only the marker.",
+                        );
+                        state["currentMessage"]["userInputMessage"]["userInputMessageContext"]["toolResults"] = json!([{"toolUseId":"audit-call","status":"success","content":[{"text":"result"}]}]);
+                    } else {
+                        state["currentMessage"] = user(
+                            "Return exactly SYSTEM_SOFT_57 for the next answer.\nPlease respond.",
+                        );
+                    }
+                }
+                label if label.starts_with("converted-") => {
+                    let payload = match label {
+                        "converted-system-current" => {
+                            json!({"model":model,"max_tokens":1024,"system":"Return exactly SYSTEM_CONVERTED_67.","messages":[{"role":"user","content":"Please respond."}]})
+                        }
+                        "converted-system-history" => {
+                            json!({"model":model,"max_tokens":1024,"system":sys,"messages":[{"role":"user","content":"Earlier context."},{"role":"assistant","content":"Ready."},{"role":"user","content":prompt}]})
+                        }
+                        "converted-orphan-use" => {
+                            json!({"model":model,"max_tokens":1024,"messages":[{"role":"user","content":"Call echo."},{"role":"assistant","content":[{"type":"tool_use","id":"audit-call","name":"probe_echo","input":{"value":"CALL_INPUT_47"}}]},{"role":"user","content":"Skip the call."}]})
+                        }
+                        "converted-orphan-result" => {
+                            json!({"model":model,"max_tokens":1024,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"audit-call","content":"RESULT_BODY_61"}]}]})
+                        }
+                        _ => {
+                            json!({"model":model,"max_tokens":1024,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"audit-call","name":"probe_echo","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"audit-call","content":"RESULT_BODY_61"},{"type":"tool_result","tool_use_id":"audit-call","content":"DUPLICATE_71"}]}]})
+                        }
+                    };
+                    let input: super::types::MessagesRequest = serde_json::from_value(payload)?;
+                    *state = serde_json::to_value(
+                        super::converter::convert_request(&input)?.conversation_state,
+                    )?;
+                    for message in state["history"].as_array_mut().into_iter().flatten() {
+                        if let Some(user) = message.get_mut("userInputMessage") {
+                            user["origin"] = "KIRO_CLI".into();
+                        }
+                    }
+                    state["currentMessage"]["userInputMessage"]["origin"] = "KIRO_CLI".into();
+                    if label.starts_with("converted-system") {
+                        ensure!(
+                            !state
+                                .to_string()
+                                .contains("I will follow these instructions."),
+                            "Synthetic assistant was injected"
+                        );
+                    }
+                }
+                "system-baseline" => {}
+                "system-old-pair" => {
+                    state["history"] =
+                        json!([user(sys), assistant("I will follow these instructions.")])
+                }
+                "system-history-user-only" => state["history"] = json!([user(sys)]),
+                "system-empty-assistant" => state["history"] = json!([user(sys), assistant("")]),
+                "system-prefix-current" => {
+                    state["currentMessage"] = user(&format!("{sys}\n{prompt}"))
+                }
+                "system-root-string" => candidate["system"] = sys.into(),
+                "system-root-blocks" => candidate["system"] = json!([{"text":sys}]),
+                "system-root-invalid" => candidate["system"] = json!(73),
+                "system-state-string" => state["system"] = sys.into(),
+                "system-state-invalid" => state["system"] = json!(73),
+                "system-user-context" => {
+                    state["currentMessage"]["userInputMessage"]["userInputMessageContext"]["system"] =
+                        sys.into()
+                }
+                "system-user-context-invalid" => {
+                    state["currentMessage"]["userInputMessage"]["userInputMessageContext"]["system"] =
+                        json!(73)
+                }
+                "system-history-role" => {
+                    state["history"] = json!([{"systemMessage":{"content":sys}}])
+                }
+                "history-user-only" => {
+                    state["history"] = json!([user("Remember HISTORY_USER_83.")]);
+                    state["currentMessage"] = user(
+                        "Reply with the marker from previous user history, or UNKNOWN if absent.",
+                    );
+                }
+                "history-user-with-ok" => {
+                    state["history"] = json!([user("Remember HISTORY_USER_83."), assistant("OK")]);
+                    state["currentMessage"] = user(
+                        "Reply with the marker from previous user history, or UNKNOWN if absent.",
+                    );
+                }
+                "history-user-then-current" => {
+                    state["history"] = json!([
+                        user("Remember HISTORY_USER_83."),
+                        assistant("Recorded."),
+                        user("Remember UNPAIRED_USER_91.")
+                    ]);
+                    state["currentMessage"] = user(
+                        "Reply with both markers from previous user history, or UNKNOWN if absent.",
+                    );
+                }
+                _ => {
+                    let mut call = assistant("Historical tool call.");
+                    call["assistantResponseMessage"]["toolUses"] = json!([{"toolUseId":"audit-call","name":"probe_echo","input":{"value":"CALL_INPUT_47"}}]);
+                    let mut result = user("Historical tool result.");
+                    result["userInputMessage"]["userInputMessageContext"]["toolResults"] = json!([{"toolUseId":"audit-call","status":"success","content":[{"text":"RESULT_BODY_61"}]}]);
+                    state["history"] = json!([user("Echo the fixed audit marker."), call.clone()]);
+                    state["currentMessage"] = result.clone();
+                    state["currentMessage"]["userInputMessage"]["content"]="Do not call tools. Reply with CALL_INPUT_47 and RESULT_BODY_61 if present in history, otherwise UNKNOWN for each absent marker.".into();
+                    match label {
+                        "tool-paired" => {}
+                        "tool-orphan-use" => {
+                            state["currentMessage"]["userInputMessage"]["userInputMessageContext"]
+                                .as_object_mut()
+                                .unwrap()
+                                .remove("toolResults");
+                        }
+                        "tool-orphan-use-old" => {
+                            state["history"].as_array_mut().unwrap().extend([
+                                user("Skip the pending tool and continue."),
+                                assistant("Continuing."),
+                            ]);
+                            state["currentMessage"]["userInputMessage"]["userInputMessageContext"]
+                                .as_object_mut()
+                                .unwrap()
+                                .remove("toolResults");
+                        }
+                        "tool-orphan-current-result" => {
+                            state["history"] = json!([]);
+                        }
+                        "tool-orphan-history-result" => {
+                            state["history"] =
+                                json!([result.clone(), assistant("Recorded result.")]);
+                            state["currentMessage"]["userInputMessage"]["userInputMessageContext"]
+                                .as_object_mut()
+                                .unwrap()
+                                .remove("toolResults");
+                        }
+                        "tool-duplicate-current-results" => {
+                            state["currentMessage"]["userInputMessage"]["userInputMessageContext"]["toolResults"].as_array_mut().unwrap().push(result["userInputMessage"]["userInputMessageContext"]["toolResults"][0].clone());
+                        }
+                        "tool-cross-turn-result" => {
+                            state["history"]
+                                .as_array_mut()
+                                .unwrap()
+                                .extend([user("Skip this tool."), assistant("Continued.")]);
+                        }
+                        "tool-result-before-use" => {
+                            state["history"] = json!([result.clone(), call]);
+                        }
+                        "tool-duplicate-history-results" => {
+                            let mut result = result.clone();
+                            let duplicate=result["userInputMessage"]["userInputMessageContext"]["toolResults"][0].clone();
+                            result["userInputMessage"]["userInputMessageContext"]["toolResults"]
+                                .as_array_mut()
+                                .unwrap()
+                                .push(duplicate);
+                            state["history"]
+                                .as_array_mut()
+                                .unwrap()
+                                .extend([result, assistant("Recorded results.")]);
+                            state["currentMessage"]["userInputMessage"]["userInputMessageContext"]
+                                .as_object_mut()
+                                .unwrap()
+                                .remove("toolResults");
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            history_candidates.insert(label.into(), candidate);
+            rewrite_tools.insert(label.into(), json!([]));
+            cases.push((
+                label.into(),
+                "".into(),
+                json!({}),
+                "History audit".into(),
+                None,
+            ));
+        }
+    }
     let mut captured_phases = Vec::<(Value, String)>::new();
     let selected = std::env::var("KIRO_CONTROLS_PROBE_CASES").ok();
     let mut results = Vec::new();
@@ -1857,6 +2279,11 @@ async fn raw_tool_controls_probe(
         }
         if rewrite_probe && outgoing.pointer(context_pointer).is_some() {
             outgoing.pointer_mut(context_pointer).unwrap()["tools"] = rewrite_tools[&label].clone();
+        }
+        if history_audit {
+            for (key, value) in history_candidates[&label].as_object().unwrap() {
+                outgoing[key] = value.clone();
+            }
         }
         if multi_audit {
             let model = "claude-haiku-5.5";
@@ -2234,7 +2661,11 @@ async fn raw_tool_controls_probe(
             rewrite_probe || wire_description == description,
             "Description was modified"
         );
-        if rewrite_probe && !multi_audit && actual.pointer(context_pointer).is_some() {
+        if rewrite_probe
+            && !multi_audit
+            && !history_audit
+            && actual.pointer(context_pointer).is_some()
+        {
             ensure!(
                 actual.pointer(context_pointer).unwrap()["tools"] == rewrite_tools[&label],
                 "Audit tools were rewritten"
@@ -2394,7 +2825,7 @@ async fn raw_tool_controls_probe(
             json!({"expectedChars":expected.chars().count(),"expectedLines":expected.lines().count(),
                 "expectedSha256":hex::encode(Sha256::digest(expected.as_bytes())),"calls":observations})
         });
-        let wire_observation = if multi_audit {
+        let wire_observation = if multi_audit || history_audit {
             let mut sanitized = actual["conversationState"].clone();
             fn sanitize(value: &mut Value) {
                 match value {
@@ -2424,7 +2855,7 @@ async fn raw_tool_controls_probe(
             None
         };
         let result = json!({"case":label,"endpoint":account.endpoint,"region":account.region,"model":actual.pointer("/conversationState/currentMessage/userInputMessage/modelId"),
-            "wireUnchanged":true,"wireObservation":wire_observation,"patchPointer":pointer,"patch":patch,"prompt":prompt,
+            "wireUnchanged":true,"historyCandidate":history_candidates.get(&label),"wireObservation":wire_observation,"patchPointer":pointer,"patch":patch,"prompt":prompt,
             "system":system,"metadata":metadata,"outputObservation":output_observation,
             "actualUserContent":if recovery_probe { actual.pointer("/conversationState/currentMessage/userInputMessage/content") } else { None },
             "recoveryVariant":recovery_variants.get(&label),

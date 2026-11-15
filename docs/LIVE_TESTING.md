@@ -329,3 +329,43 @@ cargo test live_raw_multi_reasoning_legacy_probe -- --ignored --nocapture
 ```
 
 可用 KIRO_CONTROLS_PROBE_CASES 选择逗号分隔 case；多段重放需要同时选择 multi-capture-a 和 multi-capture-b，未取得两个真实签名即停止。结果仅适用于所测账号/端点/区域/模型，不声明其他模型的全部历史表示均兼容。
+
+
+## system 配对与工具历史清理实测
+
+2026-11-15，同一导入账号、CLI / us-east-1 / Haiku 5.5，共 **63 次真实请求**：45 次 HTTP 200、18 次 HTTP 400，包含修改后生产转换器的 5 次补验。见[脱敏记录](../testdata/kiro_system_orphan_history_live_2026-11-15.json)。每例在端点/模型转换后设置候选，断言实际 HTTP body 与最终候选一致并计算 SHA-256；候选及实际 conversationState、上游 request ID、错误、停止原因和生成文本均保留。工具仅为合成历史，未执行任何工具，也未自动重试。
+
+| 对照 | 上游结果 | 修改依据 |
+|---|---|---|
+| system 原文转首个 user + “I will follow these instructions.” assistant | 200，部分冲突提示返回 system 标记；另一普通指令对照未按标记回答 | 配对会影响模型行为，不能把伪造确认视为无害协议占位 |
+| 单独历史 user、空/空格 assistant、当前 user 前缀 | 均可 200，标记读取与冲突结果存在差异 | 不能仅据 HTTP 200 判断等价；也不能宣布空 assistant 是有效替代 |
+| root / conversationState / user context 的 system 字段，及非法数值对照 | 均 200，但未返回候选标记；非法值同样接受 | 未证实字段有效，不采用“原样加字段就生效”的猜测 |
+| root systemPrompt 字符串、数组、text/content 对象及非法值 | 均 400；state / user / context 同名候选则 200，但未执行标记 | 所测候选未找到有效原生 system 入口；不外推所有可能字段或模型都不支持 |
+| systemMessage 历史角色 | 400 | 不新增假定原生 role |
+| 仅把调用方 system 原文放在首个真实 user 之前，不加角色说明或确认消息 | 无历史、普通历史、工具结果历史均 200；修改后转换器也 200，普通指令返回 SYSTEM_CONVERTED_67 | 采用无虚构 assistant 的文本映射；相对后续 user 的严格优先级不保证，记录警告 |
+| 历史首个配对 / 后续配对 / 未配对 user 的标记读取与冲突 | 都 200，但 UNKNOWN、标记及优先级行为不同 | 不补 OK 制造历史；不能以个别 UNKNOWN 断言上游一律丢弃所有未配对 user |
+| 正常 tool_use + 当前 tool_result | 200，返回调用参数及结果标记 | 配对控制成功 |
+| 无结果 tool_use（当前前一轮或更早）、孤立当前/历史 tool_result、跨轮结果、先结果后调用、重复当前/历史结果 | 均 400 TOOL_USE_RESULT_MISMATCH，上游明确要求相邻调用和单个结果 | 移除历史/当前结果过滤、孤立调用删除；保留原块并透出上游错误，不把无效请求悄悄改成另一段历史 |
+| 修改后转换器：孤立调用、孤立结果、重复结果 | 均保留到实际 body，收到 400 TOOL_USE_RESULT_MISMATCH | 不是只在原始探针中绕开清理，实际转换器也不再丢块 |
+
+system 映射只将原文与首个真实 user 文本用换行连接，不插入“低优先级 user”之类额外提示。原生 system 的优先级尚未得到验证，正文保留不代表角色语义完全等价；各单次冲突/回忆输出亦不当成严格执行证明。不同轮次/措辞的结果确实有差异，记录包含这些反例，不选择性报告。
+
+自动补 OK 的兜底分支在正常 convert_request 路径不可达：末尾连续 user 已整体变成 currentMessage，历史切片必以 assistant 结束。仍移除该兜底，并通过直接历史构建回归验证，未配对 user 不会增加虚构 assistant。正常末尾连续 user 的原文、图片、工具结果仍合并为当前输入。
+
+已有工具 ID 复用的确定性重映射和同回合重复调用处理不属于本轮新增行为，本轮不根据工具配对 400 扩展新的本地清理规则。移除清理后，保留调用方孤立结果正文、重复结果和未完成调用；上游拒绝只尝试一次，JSON / SSE 两种消息接口均覆盖错误和实际 body 回归。
+
+重建并重启服务后，经真实 `/v1/messages` 的 system 请求返回 SYSTEM_PRODUCTION_37；孤立 tool_result 经 `/v1/messages`、孤立 tool_use 经 `/cc/v1/messages` 均返回 400 TOOL_USE_RESULT_MISMATCH，日志各记录 1 次上游尝试。见[生产接口记录](../testdata/kiro_system_orphan_history_production_live_2026-11-15.json)。其中第一次孤立结果补验遇到本地总尝试预算 1 耗尽，生成 attempts=0 / HTTP 503；该记录保留，随后独立请求取得真实 400，未修改预算。这 4 次接口请求独立于上述 63 次原始探针。
+
+最终 `cargo test --all-targets --no-default-features`：614 项通过、10 项付费联调默认跳过；移除了专门验证旧静默清理实现的测试，增加内容保留、无虚构 OK、JSON / SSE 错误透传回归。构建、格式及差异检查通过，服务保持运行。
+
+复测会消耗额度：
+
+```sh
+KIRO_LIVE_CREDENTIALS=/absolute/path/credentials.json \
+KIRO_LIVE_CONFIG=/absolute/path/config.json \
+KIRO_LIVE_ACCOUNT_ID=1 \
+KIRO_CONTROLS_PROBE_OUTPUT=/absolute/path/probe-output \
+cargo test live_raw_system_orphan_history_probe -- --ignored --nocapture
+```
+
+KIRO_CONTROLS_PROBE_CASES 可筛选逗号分隔 case 名。结果仅适用于所测账号/模型/端点/区域，不能视为全部 Kiro 协议的字段支持清单。前节中依赖原 system 配对生成的历史测试记录保留为当时行为，不代表当前仍注入该配对。

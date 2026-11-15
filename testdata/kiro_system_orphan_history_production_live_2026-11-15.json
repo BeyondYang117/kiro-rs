@@ -1,0 +1,136 @@
+[
+  {
+    "case": "system-current",
+    "route": "/v1/messages",
+    "request": {
+      "model": "claude-haiku-5-5",
+      "max_tokens": 1024,
+      "system": "Reply with exactly SYSTEM_PRODUCTION_37.",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Please respond."
+        }
+      ]
+    },
+    "httpStatus": 200,
+    "bodySha256": "1592105c7b2f34848ecb87b4f2c371b0ed184a98fde8fc26dc4ee52253af593f",
+    "durationMs": 3646,
+    "response": {
+      "content": [
+        {
+          "text": "SYSTEM_PRODUCTION_37",
+          "type": "text"
+        }
+      ],
+      "id": "msg_d4932e3f26fe4898ab237bd18d448bd3",
+      "model": "claude-haiku-5-5",
+      "role": "assistant",
+      "stop_reason": "end_turn",
+      "stop_sequence": null,
+      "type": "message",
+      "usage": {
+        "input_tokens": 1937,
+        "output_tokens": 7
+      }
+    },
+    "attempts": 1
+  },
+  {
+    "case": "orphan-result",
+    "route": "/v1/messages",
+    "request": {
+      "model": "claude-haiku-5-5",
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "unmatched-live",
+              "content": "PRESERVE_RESULT_41"
+            }
+          ]
+        }
+      ]
+    },
+    "httpStatus": 503,
+    "bodySha256": "ef976c324023f302935194c3aaef6196c65889bcb5ef0b198523b0cac8cb0cad",
+    "durationMs": 961,
+    "response": {
+      "error": {
+        "type": "overloaded_error",
+        "message": "Request upstream attempt budget or total deadline exceeded"
+      }
+    },
+    "attempts": 0
+  },
+  {
+    "case": "orphan-result-recheck",
+    "route": "/v1/messages",
+    "request": {
+      "model": "claude-haiku-5-5",
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "unmatched-live",
+              "content": "PRESERVE_RESULT_41"
+            }
+          ]
+        }
+      ]
+    },
+    "httpStatus": 400,
+    "bodySha256": "ef976c324023f302935194c3aaef6196c65889bcb5ef0b198523b0cac8cb0cad",
+    "durationMs": 633,
+    "response": {
+      "error": {
+        "type": "invalid_request_error",
+        "message": "Kiro API 请求失败: 400 Bad Request {\"__type\":\"com.amazon.kiro.runtimeservice#ValidationException\",\"message\":\"messages.0.content.0: unexpected `tool_use_id` found in `tool_result` blocks: unmatched-live. Each `tool_result` block must have a corresponding `tool_use` block in the previous message.\",\"reason\":\"TOOL_USE_RESULT_MISMATCH\"}"
+      }
+    },
+    "attempts": 1
+  },
+  {
+    "case": "orphan-use",
+    "route": "/cc/v1/messages",
+    "request": {
+      "model": "claude-haiku-5-5",
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "unmatched-live",
+              "name": "probe_echo",
+              "input": {
+                "value": "PRESERVE_CALL_31"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": "Skip this call."
+        }
+      ]
+    },
+    "httpStatus": 400,
+    "bodySha256": "98f037aa2c7c41b3aae16ed28aba74a104e714a6100866a0472e0649bab74989",
+    "durationMs": 923,
+    "response": {
+      "error": {
+        "type": "invalid_request_error",
+        "message": "Kiro API 请求失败: 400 Bad Request {\"__type\":\"com.amazon.kiro.runtimeservice#ValidationException\",\"message\":\"messages.2: `tool_use` ids were found without `tool_result` blocks immediately after: unmatched-live. Each `tool_use` block must have a corresponding `tool_result` block in the next message.\",\"reason\":\"TOOL_USE_RESULT_MISMATCH\"}"
+      }
+    },
+    "attempts": 1
+  }
+]

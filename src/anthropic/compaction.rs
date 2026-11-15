@@ -2579,6 +2579,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn orphan_tools_reach_upstream_and_errors_are_never_hidden() {
+        for cc in [false, true] {
+            for streaming in [false, true] {
+                for kind in [
+                    "orphan-use",
+                    "orphan-result",
+                    "duplicate-result",
+                    "history-result",
+                ] {
+                    let bytes=serde_json::to_vec(&json!({"reason":"TOOL_USE_RESULT_MISMATCH","message":"Upstream pairing rejection"})).unwrap();
+                    let upstream = mock_with_status(bytes, StatusCode::BAD_REQUEST).await;
+                    let call = json!({"type":"tool_use","id":"audit-call","name":"read","input":{"path":"keep-input"}});
+                    let result = json!({"type":"tool_result","tool_use_id":"audit-call","content":"keep-result"});
+                    let messages = match kind {
+                        "orphan-use" => {
+                            json!([{"role":"assistant","content":[call]},{"role":"user","content":"skip"}])
+                        }
+                        "orphan-result" => json!([{"role":"user","content":[result]}]),
+                        "duplicate-result" => {
+                            json!([{"role":"assistant","content":[call]},{"role":"user","content":[result.clone(),result]}])
+                        }
+                        _ => {
+                            json!([{"role":"user","content":[result]},{"role":"assistant","content":"continued"},{"role":"user","content":"next"}])
+                        }
+                    };
+                    let response=dispatch(upstream.state.clone(),request(json!({"model":"claude-haiku-5-5","max_tokens":1024,"stream":streaming,"messages":messages})),cc).await;
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                    let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                    assert!(String::from_utf8_lossy(&body).contains("TOOL_USE_RESULT_MISMATCH"));
+                    let requests = upstream.requests.lock().unwrap();
+                    assert_eq!(requests.len(), 1);
+                    let state = &requests[0]["conversationState"];
+                    match kind {
+                        "orphan-use" => assert_eq!(
+                            state["history"][0]["assistantResponseMessage"]["toolUses"][0]["input"]
+                                ["path"],
+                            "keep-input"
+                        ),
+                        "orphan-result" => assert_eq!(
+                            state["currentMessage"]["userInputMessage"]["userInputMessageContext"]
+                                ["toolResults"][0]["content"][0]["text"],
+                            "keep-result"
+                        ),
+                        "duplicate-result" => assert_eq!(
+                            state["currentMessage"]["userInputMessage"]["userInputMessageContext"]
+                                ["toolResults"]
+                                .as_array()
+                                .unwrap()
+                                .len(),
+                            2
+                        ),
+                        _ => assert_eq!(
+                            state["history"][0]["userInputMessage"]["userInputMessageContext"]["toolResults"]
+                                [0]["content"][0]["text"],
+                            "keep-result"
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn upstream_request_rejection_is_400_without_retry_for_both_handlers() {
         for cc in [false, true] {
             for stream in [false, true] {
@@ -2981,16 +3044,16 @@ mod tests {
                     state["currentMessage"]["userInputMessage"]["content"],
                     payload["messages"][2]["content"]
                 );
+                assert_eq!(state["history"].as_array().unwrap().len(), 2);
                 assert_eq!(
                     state["history"][0]["userInputMessage"]["content"],
-                    payload["system"]
+                    format!(
+                        "{}\nRemember ALPHA_71.",
+                        payload["system"].as_str().unwrap()
+                    )
                 );
                 assert_eq!(
-                    state["history"][2]["userInputMessage"]["content"],
-                    "Remember ALPHA_71."
-                );
-                assert_eq!(
-                    state["history"][3]["assistantResponseMessage"]["content"],
+                    state["history"][1]["assistantResponseMessage"]["content"],
                     "Recorded BETA_93."
                 );
                 assert_eq!(
@@ -3573,9 +3636,11 @@ mod tests {
                     assert_eq!(requests[0].pointer("/conversationState/currentMessage/userInputMessage/userInputMessageContext/tools/0/toolSpecification/inputSchema/json"),Some(&schema));
                     assert_eq!(
                         requests[0]
-                            .pointer("/conversationState/history/0/userInputMessage/content")
+                            .pointer("/conversationState/currentMessage/userInputMessage/content")
                             .and_then(Value::as_str),
-                        Some("Caller system instructions: return the requested complete output.")
+                        Some(
+                            "Caller system instructions: return the requested complete output.\ntest"
+                        )
                     );
                     assert_eq!(requests[0].pointer("/conversationState/currentMessage/userInputMessage/userInputMessageContext/tools/0/toolSpecification/description").and_then(Value::as_str),Some(description.as_str()));
                 }
@@ -4083,17 +4148,19 @@ mod tests {
                     {
                         let requests = upstream.requests.lock().unwrap();
                         assert_eq!(requests.len(), 1, "{mode}");
-                        assert_eq!(
-                            requests[0]["conversationState"]["history"][0]["userInputMessage"]["content"],
-                            "top-level instructions\nembedded system\ndeveloper first\ndeveloper second"
-                        );
+                        let content =
+                            requests[0]["conversationState"]["currentMessage"]["userInputMessage"]
+                                ["content"]
+                                .as_str()
+                                .unwrap();
+                        assert!(content.starts_with("top-level instructions\nembedded system\ndeveloper first\ndeveloper second\n"));
                         if mode != "compact" {
                             assert_eq!(
-                                requests[0]["conversationState"]["currentMessage"]["userInputMessage"]
-                                    ["content"],
-                                "hi"
+                                content,
+                                "top-level instructions\nembedded system\ndeveloper first\ndeveloper second\nhi"
                             );
                         }
+                        assert!(requests[0]["conversationState"].get("history").is_none());
                     }
                     let mut counts = Vec::new();
                     for normalized in [false, true] {
