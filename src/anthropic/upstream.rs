@@ -188,12 +188,12 @@ pub(super) fn response_events(
                 return Ok(false);
             };
             // No response content has left the decoder. Release capacity before
-            // regenerating with a smaller chunk and discard the failed prefix.
+            // regenerating complete arguments and discard the failed prefix.
             self.body.take();
             self.recoveries += 1;
             tracing::warn!(
                 recovery = self.recoveries,
-                "Recovering truncated tool output with smaller chunks"
+                "Regenerating truncated tool output while preserving caller scope"
             );
             let response = if is_stream {
                 provider.call_api_stream(&body).await?
@@ -471,22 +471,17 @@ pub(super) fn response_events(
     .boxed()
 }
 
-/// Keep history, tool results and schemas intact. Only strengthen the current
-/// user instruction; never manufacture a tool result for an unexecuted call.
-fn tool_recovery_request(request_body: &str, recovery: u8) -> Option<String> {
+/// Report the failed attempt without replacing the caller's task or output budget.
+/// Never manufacture a tool result for an unexecuted call.
+pub(super) fn tool_recovery_request(request_body: &str, recovery: u8) -> Option<String> {
     use crate::kiro::model::requests::kiro::KiroRequest;
     let mut request: KiroRequest = serde_json::from_str(request_body).ok()?;
     let message = &mut request
         .conversation_state
         .current_message
         .user_input_message;
-    let (lines, characters) = if recovery == 1 {
-        (20, 4000)
-    } else {
-        (10, 2000)
-    };
     message.content.push_str(&format!(
-        "\n\n[Proxy tool output recovery {recovery}] The previous tool arguments were truncated upstream and were discarded before any response content was sent to the client. No tools from that attempt were executed. Regenerate a smaller complete call, not a continuation of partial JSON. Make only ONE tool call in this response, with at most {lines} lines and {characters} characters of generated content. For a large file, create a small skeleton first; subsequent client turns can fill it in. Do not claim the whole file is complete. Do not move the large payload into shell commands or encoded strings. Include every required argument and close the JSON object."
+        "\n\n[Proxy tool output recovery {recovery}] The previous tool arguments were truncated upstream and were discarded before any response content was sent to the client. No tools from that attempt were executed. Regenerate complete tool arguments, not a continuation of partial JSON. Preserve the caller's requested task, content and scope; do not silently replace requested content with a skeleton, placeholder or incomplete prefix. If the requested result cannot fit in the available output budget, explain that limitation instead of presenting partial work as complete."
     ));
     serde_json::to_string(&request).ok()
 }

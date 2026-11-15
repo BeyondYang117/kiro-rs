@@ -3118,15 +3118,16 @@ mod tests {
     }
 
     fn recovered_write() -> Vec<u8> {
+        let content = "Complete requested content, preserved without proxy size caps.\n".repeat(80);
         frame(
             "toolUseEvent",
             json!({"name":"write_file", "toolUseId":"recovered-tool",
-            "input":json!({"path":"large.txt","content":"small skeleton"}).to_string(), "stop":true}),
+            "input":json!({"path":"large.txt","content":content}).to_string(), "stop":true}),
         )
     }
 
     #[tokio::test]
-    async fn truncated_tools_recover_with_smaller_requests_before_emitting_content() {
+    async fn truncated_tools_recover_without_imposing_size_limits_before_emitting_content() {
         for ending in ["eof", "exception", "metadata", "json_eof"] {
             for (cc, buffered) in [(false, false), (true, false), (true, true)] {
                 for streaming in [false, true] {
@@ -3157,6 +3158,10 @@ mod tests {
                     let text = String::from_utf8_lossy(&body);
                     assert!(text.contains("recovered-tool"), "{ending}: {text}");
                     assert!(
+                        text.contains("Complete requested content"),
+                        "{ending}: {text}"
+                    );
+                    assert!(
                         !text.contains("failed-tool")
                             && !text.contains("private-truncated-sentinel"),
                         "{text}"
@@ -3170,14 +3175,26 @@ mod tests {
                     assert_eq!(requests.len(), 2);
                     let pointer = "/conversationState/currentMessage/userInputMessage/content";
                     assert_eq!(requests[0].pointer(pointer).unwrap(), "Write the full file");
+                    let content = requests[1].pointer(pointer).unwrap().as_str().unwrap();
                     assert!(
-                        requests[1]
-                            .pointer(pointer)
-                            .unwrap()
-                            .as_str()
-                            .unwrap()
-                            .contains("at most 20 lines and 4000 characters")
+                        content
+                            .starts_with("Write the full file\n\n[Proxy tool output recovery 1]")
                     );
+                    assert!(
+                        content.contains("Preserve the caller's requested task, content and scope")
+                    );
+                    for instruction in [
+                        "at most",
+                        "ONE tool call",
+                        "small skeleton",
+                        "4000 characters",
+                        "20 lines",
+                    ] {
+                        assert!(!content.contains(instruction), "{content}");
+                    }
+                    let mut expected = requests[0].clone();
+                    *expected.pointer_mut(pointer).unwrap() = content.into();
+                    assert_eq!(requests[1], expected);
                     assert_eq!(
                         requests[0]["conversationState"]["history"],
                         requests[1]["conversationState"]["history"]
@@ -3209,11 +3226,17 @@ mod tests {
                 let requests = upstream.requests.lock().unwrap();
                 assert_eq!(requests.len(), usize::from(attempts) + 1);
                 if attempts == 2 {
+                    let content = requests[2]
+                        .pointer("/conversationState/currentMessage/userInputMessage/content")
+                        .unwrap()
+                        .as_str()
+                        .unwrap();
+                    assert!(content.contains("[Proxy tool output recovery 2]"));
                     assert!(
-                        requests[2]
-                            .to_string()
-                            .contains("10 lines and 2000 characters")
+                        content.contains("Preserve the caller's requested task, content and scope")
                     );
+                    assert!(!content.contains("10 lines"));
+                    assert!(!content.contains("2000 characters"));
                 }
             }
         }

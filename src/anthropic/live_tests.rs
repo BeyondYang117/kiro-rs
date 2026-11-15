@@ -1145,16 +1145,22 @@ fn enforcement_evidence_contains_complete_upstream_counterexamples() {
 #[tokio::test]
 #[ignore = "Live tool description and generation controls probe consumes credits"]
 async fn live_raw_tool_controls_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(false).await
+    raw_tool_controls_probe(false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live tool output budget comparison consumes credits"]
 async fn live_raw_tool_output_budget_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(true).await
+    raw_tool_controls_probe(true, false).await
 }
 
-async fn raw_tool_controls_probe(output_budget: bool) -> anyhow::Result<()> {
+#[tokio::test]
+#[ignore = "Live truncation recovery comparison consumes credits"]
+async fn live_raw_tool_recovery_probe() -> anyhow::Result<()> {
+    raw_tool_controls_probe(true, true).await
+}
+
+async fn raw_tool_controls_probe(output_budget: bool, recovery_probe: bool) -> anyhow::Result<()> {
     use crate::kiro::{machine_id, parser::decoder::EventStreamDecoder};
     use futures::StreamExt;
     use sha2::{Digest, Sha256};
@@ -1368,6 +1374,44 @@ async fn raw_tool_controls_probe(output_budget: bool) -> anyhow::Result<()> {
             cases.push((label.into(), "".into(), json!({"additionalModelRequestFields":{"max_tokens":max_tokens,"thinking":{"type":"disabled"}}}), baseline.3.clone(), None));
         }
     }
+    let mut recovery_variants = HashMap::new();
+    if recovery_probe {
+        let baseline = cases
+            .iter()
+            .find(|case| case.0 == "output-tokens-native-4096")
+            .unwrap()
+            .clone();
+        let expected = output_cases[&baseline.0].0.clone();
+        cases.clear();
+        output_cases.clear();
+        let old: Value = serde_json::from_str(include_str!(
+            "../../testdata/kiro_tool_recovery_policy_before_2026-11-15.json"
+        ))?;
+        for (label, variant) in [
+            ("recovery-baseline", "baseline"),
+            ("recovery-old-first", "old-1"),
+            ("recovery-old-second", "old-2"),
+            ("recovery-preserve-first", "new-1"),
+            ("recovery-preserve-second", "new-2"),
+            ("recovery-unchanged", "unchanged"),
+        ] {
+            let suffix = match variant {
+                "old-1" => old["1"].as_str().unwrap(),
+                "old-2" => old["2"].as_str().unwrap(),
+                _ => "",
+            };
+            recovery_variants.insert(label.to_owned(), variant);
+            output_cases.insert(label.to_owned(), (expected.clone(), ""));
+            cases.push((
+                label.to_owned(),
+                baseline.1.clone(),
+                baseline.2.clone(),
+                format!("{}{suffix}", baseline.3),
+                None,
+            ));
+        }
+    }
+    let mut failed_recovery_body: Option<Value> = None;
     let selected = std::env::var("KIRO_CONTROLS_PROBE_CASES").ok();
     let mut results = Vec::new();
     for (label, pointer, patch, prompt, description_length) in cases {
@@ -1420,6 +1464,50 @@ async fn raw_tool_controls_probe(output_budget: bool) -> anyhow::Result<()> {
             .context("Not object")?;
         for (key, value) in patch.as_object().unwrap() {
             target.insert(key.clone(), value.clone());
+        }
+        if recovery_probe && label != "recovery-baseline" {
+            let baseline = failed_recovery_body
+                .as_ref()
+                .context("A real truncated baseline is required before recovery probes")?;
+            let variant = recovery_variants[&label];
+            let prompt_pointer = "/conversationState/currentMessage/userInputMessage/content";
+            outgoing = match variant {
+                "new-1" | "new-2" => {
+                    let first = super::upstream::tool_recovery_request(&baseline.to_string(), 1)
+                        .context("Cannot build first recovery")?;
+                    serde_json::from_str(&if variant == "new-2" {
+                        super::upstream::tool_recovery_request(&first, 2)
+                            .context("Cannot build second recovery")?
+                    } else {
+                        first
+                    })?
+                }
+                "old-1" | "old-2" => {
+                    let mut recovered = baseline.clone();
+                    let old: Value = serde_json::from_str(include_str!(
+                        "../../testdata/kiro_tool_recovery_policy_before_2026-11-15.json"
+                    ))?;
+                    let mut content = baseline
+                        .pointer(prompt_pointer)
+                        .and_then(Value::as_str)
+                        .unwrap()
+                        .to_owned();
+                    content.push_str(old["1"].as_str().unwrap());
+                    if variant == "old-2" {
+                        content.push_str(old["2"].as_str().unwrap());
+                    }
+                    *recovered.pointer_mut(prompt_pointer).unwrap() = content.into();
+                    recovered
+                }
+                _ => baseline.clone(),
+            };
+            let mut without_instruction = outgoing.clone();
+            *without_instruction.pointer_mut(prompt_pointer).unwrap() =
+                baseline.pointer(prompt_pointer).unwrap().clone();
+            ensure!(
+                &without_instruction == baseline,
+                "Recovery modified fields other than current user content"
+            );
         }
         let request = endpoint
             .decorate_api(
@@ -1537,6 +1625,20 @@ async fn raw_tool_controls_probe(output_budget: bool) -> anyhow::Result<()> {
             call["input"] = serde_json::from_str(call["rawInput"].as_str().unwrap_or_default())
                 .unwrap_or(Value::Null);
         }
+        if recovery_probe && label == "recovery-baseline" {
+            ensure!(
+                status.is_success()
+                    && metadata.iter().any(|m| m["stopReason"]
+                        .as_str()
+                        .is_some_and(|s| s.eq_ignore_ascii_case("max_tokens")))
+                    && !calls.is_empty()
+                    && calls
+                        .values()
+                        .any(|c| c["complete"] != true || c["input"].is_null()),
+                "Baseline was not an actual upstream tool truncation; refusing to claim recovery evidence"
+            );
+            failed_recovery_body = Some(actual.clone());
+        }
         let output_observation = output_case.map(|(expected, _)| {
             let observations: Vec<_> = calls.values().map(|call| {
                 let content = call["input"]["content"].as_str();
@@ -1551,6 +1653,8 @@ async fn raw_tool_controls_probe(output_budget: bool) -> anyhow::Result<()> {
         let result = json!({"case":label,"endpoint":account.endpoint,"region":account.region,"model":"claude-haiku-5.5",
             "wireUnchanged":true,"patchPointer":pointer,"patch":patch,"prompt":prompt,
             "system":system,"metadata":metadata,"outputObservation":output_observation,
+            "actualUserContent":if recovery_probe { actual.pointer("/conversationState/currentMessage/userInputMessage/content") } else { None },
+            "recoveryVariant":recovery_variants.get(&label),
             "descriptionChars":description.chars().count(),"descriptionSha256":hex::encode(Sha256::digest(description.as_bytes())),
             "descriptionTail":description.chars().rev().take(65).collect::<String>().chars().rev().collect::<String>(),
             "bodySha256":digest,"httpStatus":status.as_u16(),"requestId":request_id,"durationMs":start.elapsed().as_millis(),
