@@ -1,0 +1,53 @@
+{
+  "date": "2026-11-15",
+  "route": "/v1/messages",
+  "httpStatus": 200,
+  "durationMs": 4815,
+  "request": {
+    "model": "claude-haiku-5-5",
+    "max_tokens": 1024,
+    "system": "You are a helpful AI assistant tasked with summarizing conversations.",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Remember ALPHA_71 and BETA_93."
+      },
+      {
+        "role": "assistant",
+        "content": "Recorded both markers."
+      },
+      {
+        "role": "user",
+        "content": "Summarize the prior conversation in exactly one sentence containing LEGACY_ORIGINAL_OK and both markers ALPHA_71 and BETA_93. Do not use XML tags. Do not call tools."
+      }
+    ],
+    "tools": [
+      {
+        "name": "probe_echo",
+        "description": "Harmless probe; do not call.",
+        "input_schema": {
+          "type": "object"
+        }
+      }
+    ]
+  },
+  "bodySha256": "a78f55921c8e25dbe031921d128d179c7c595b5e0fa1d45d8cbb6ebaf9c01018",
+  "response": {
+    "content": [
+      {
+        "text": "The user asked me to remember the markers ALPHA_71 and BETA_93, and I confirmed that I recorded both, LEGACY_ORIGINAL_OK is included here as requested. ",
+        "type": "text"
+      }
+    ],
+    "id": "msg_bca553b446e942589649cc8e85aabd27",
+    "model": "claude-haiku-5-5",
+    "role": "assistant",
+    "stop_reason": "end_turn",
+    "stop_sequence": null,
+    "type": "message",
+    "usage": {
+      "input_tokens": 2607,
+      "output_tokens": 57
+    }
+  }
+}

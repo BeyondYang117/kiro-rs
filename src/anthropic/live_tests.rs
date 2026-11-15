@@ -1145,31 +1145,37 @@ fn enforcement_evidence_contains_complete_upstream_counterexamples() {
 #[tokio::test]
 #[ignore = "Live tool description and generation controls probe consumes credits"]
 async fn live_raw_tool_controls_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(false, false, false, false).await
+    raw_tool_controls_probe(false, false, false, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live tool output budget comparison consumes credits"]
 async fn live_raw_tool_output_budget_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(true, false, false, false).await
+    raw_tool_controls_probe(true, false, false, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live truncation recovery comparison consumes credits"]
 async fn live_raw_tool_recovery_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(true, true, false, false).await
+    raw_tool_controls_probe(true, true, false, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live request rewrite audit consumes credits"]
 async fn live_raw_request_rewrite_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(false, false, true, false).await
+    raw_tool_controls_probe(false, false, true, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live thinking history and compaction audit consumes credits"]
 async fn live_raw_thinking_compaction_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(false, false, true, true).await
+    raw_tool_controls_probe(false, false, true, true, false).await
+}
+
+#[tokio::test]
+#[ignore = "Live multi-reasoning and legacy summary audit consumes credits"]
+async fn live_raw_multi_reasoning_legacy_probe() -> anyhow::Result<()> {
+    raw_tool_controls_probe(false, false, true, true, true).await
 }
 
 async fn raw_tool_controls_probe(
@@ -1177,6 +1183,7 @@ async fn raw_tool_controls_probe(
     recovery_probe: bool,
     rewrite_probe: bool,
     deep_audit: bool,
+    multi_audit: bool,
 ) -> anyhow::Result<()> {
     use crate::kiro::{machine_id, parser::decoder::EventStreamDecoder};
     use futures::StreamExt;
@@ -1746,6 +1753,55 @@ async fn raw_tool_controls_probe(
         rewrite_tools.insert("summary-no-native-budget".into(), json!([]));
         cases.push(("summary-no-native-budget".into(), "".into(), json!({}), format!("This is a summary transport fidelity test. Return the entire following summary text exactly as given, no omissions or extra commentary.\nBEGIN_SUMMARY\n{payload}END_SUMMARY"), None));
     }
+    if multi_audit {
+        cases.clear();
+        rewrite_tools.clear();
+        for label in [
+            "multi-capture-a",
+            "multi-capture-b",
+            "multi-single-a",
+            "multi-single-b",
+            "multi-reasoning-array",
+            "multi-text-array",
+            "multi-reasoning-contents",
+            "multi-consecutive-assistants",
+            "multi-consecutive-assistants-tools",
+            "multi-consecutive-mixed-redacted",
+            "multi-content-array",
+            "multi-reasoning-contents-invalid",
+            "multi-alternating-real-turns",
+            "multi-consecutive-nonempty",
+            "multi-three-signed",
+            "multi-three-invalid-first",
+            "multi-array-invalid-control",
+            "multi-plural-invalid-control",
+            "multi-two-leading-users",
+            "multi-first-empty-second-text",
+            "multi-first-text-second-empty",
+            "multi-nonempty-invalid-first",
+            "multi-phase-tools-between",
+            "multi-three-first-text",
+            "multi-whitespace-first",
+            "multi-empty-first-tools",
+            "multi-three-text-mixed",
+            "multi-converted-blocks",
+            "multi-converted-consecutive",
+            "legacy-original",
+            "legacy-rewritten",
+            "legacy-trailing-assistant",
+            "legacy-empty-current",
+        ] {
+            rewrite_tools.insert(label.into(), json!([]));
+            cases.push((
+                label.into(),
+                "".into(),
+                json!({}),
+                "Audit request".into(),
+                None,
+            ));
+        }
+    }
+    let mut captured_phases = Vec::<(Value, String)>::new();
     let selected = std::env::var("KIRO_CONTROLS_PROBE_CASES").ok();
     let mut results = Vec::new();
     for (label, pointer, patch, prompt, description_length) in cases {
@@ -1801,6 +1857,273 @@ async fn raw_tool_controls_probe(
         }
         if rewrite_probe && outgoing.pointer(context_pointer).is_some() {
             outgoing.pointer_mut(context_pointer).unwrap()["tools"] = rewrite_tools[&label].clone();
+        }
+        if multi_audit {
+            let model = "claude-haiku-5.5";
+            let user = |text: &str| json!({"userInputMessage":{"content":text,"modelId":model,"origin":"KIRO_CLI"}});
+            let original_prompt = "Summarize the prior conversation in exactly one sentence containing LEGACY_ORIGINAL_OK and both markers ALPHA_71 and BETA_93. Do not use XML tags. Do not call tools.";
+            let mut state = json!({"conversationId":uuid::Uuid::new_v4().to_string(),"chatTriggerType":"MANUAL",
+                "history":[],"currentMessage":user("Reply with exactly MULTI_REPLAY_OK. Do not call tools.")});
+            outgoing["additionalModelRequestFields"] = json!({"max_tokens":2048,"thinking":{"type":"adaptive","display":"summarized"},"output_config":{"effort":"low"}});
+            if label.starts_with("multi-capture") {
+                outgoing["additionalModelRequestFields"] = json!({"max_tokens":4096,"thinking":{"type":"adaptive","display":"summarized"},"output_config":{"effort":"high"}});
+                state["currentMessage"] = user(if label.ends_with('a') {
+                    "How many 6-digit integers have digits summing to 17 and no adjacent equal digits? Derive an exact count using a recurrence and show the calculation."
+                } else {
+                    "Find the smallest positive integer n such that n has exactly 36 positive divisors and n+1 is divisible by 7. Explain the minimality proof."
+                });
+            } else if label.starts_with("multi-") {
+                ensure!(
+                    captured_phases.len() >= 2,
+                    "Two genuine signed reasoning phases are required"
+                );
+                let (a, answer_a) = &captured_phases[0];
+                let (b, answer_b) = &captured_phases[1];
+                let assistant_a =
+                    json!({"assistantResponseMessage":{"content":answer_a,"reasoningContent":a}});
+                let assistant_b =
+                    json!({"assistantResponseMessage":{"content":answer_b,"reasoningContent":b}});
+                state["history"] =
+                    json!([user("Previous arithmetic exercises."), assistant_a.clone()]);
+                match label.as_str() {
+                    "multi-single-a" => {}
+                    "multi-single-b" => state["history"][1] = assistant_b.clone(),
+                    "multi-reasoning-array" => {
+                        state["history"][1]["assistantResponseMessage"]["reasoningContent"] =
+                            json!([a, b])
+                    }
+                    "multi-text-array" => {
+                        state["history"][1]["assistantResponseMessage"]["reasoningContent"] =
+                            json!({"reasoningText":[a["reasoningText"],b["reasoningText"]]})
+                    }
+                    "multi-reasoning-contents" | "multi-reasoning-contents-invalid" => {
+                        state["history"][1]["assistantResponseMessage"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("reasoningContent");
+                        state["history"][1]["assistantResponseMessage"]["reasoningContents"] =
+                            if label.ends_with("invalid") {
+                                json!("NOT_REASONING")
+                            } else {
+                                json!([a, b])
+                            };
+                    }
+                    "multi-converted-blocks" | "multi-converted-consecutive" => {
+                        let blocks = vec![
+                            json!({"type":"thinking","thinking":a["reasoningText"]["text"],"signature":a["reasoningText"]["signature"]}),
+                            json!({"type":"text","text":"First arithmetic exercise recorded."}),
+                            json!({"type":"tool_use","id":"phase-tool-a","name":"probe_echo","input":{"value":"a"}}),
+                            json!({"type":"thinking","thinking":b["reasoningText"]["text"],"signature":b["reasoningText"]["signature"]}),
+                            json!({"type":"text","text":"Second arithmetic exercise recorded."}),
+                            json!({"type":"tool_use","id":"phase-tool-b","name":"probe_echo","input":{"value":"b"}}),
+                        ];
+                        let mut messages =
+                            vec![json!({"role":"user","content":"Previous arithmetic exercises."})];
+                        if label.ends_with("consecutive") {
+                            messages.push(json!({"role":"assistant","content":blocks[..3]}));
+                            messages.push(json!({"role":"assistant","content":blocks[3..]}));
+                        } else {
+                            messages.push(json!({"role":"assistant","content":blocks}));
+                        }
+                        messages.push(json!({"role":"user","content":[
+                            {"type":"tool_result","tool_use_id":"phase-tool-a","content":"synthetic result a"},
+                            {"type":"tool_result","tool_use_id":"phase-tool-b","content":"synthetic result b"},
+                            {"type":"text","text":"Reply with exactly MULTI_REPLAY_OK. Do not call tools."}
+                        ]}));
+                        let input: super::types::MessagesRequest = serde_json::from_value(
+                            json!({"model":model,"max_tokens":2048,"messages":messages}),
+                        )?;
+                        state = serde_json::to_value(
+                            super::converter::convert_request(&input)?.conversation_state,
+                        )?;
+                        for message in state["history"].as_array_mut().unwrap() {
+                            if let Some(user) = message.get_mut("userInputMessage") {
+                                user["origin"] = "KIRO_CLI".into();
+                            }
+                        }
+                        state["currentMessage"]["userInputMessage"]["origin"] = "KIRO_CLI".into();
+                        ensure!(
+                            state["history"][1]["assistantResponseMessage"]["reasoningContent"]
+                                == *a
+                                && state["history"][2]["assistantResponseMessage"]["reasoningContent"]
+                                    == *b,
+                            "Converted reasoning was changed or lost"
+                        );
+                        ensure!(
+                            state["currentMessage"]["userInputMessage"]["userInputMessageContext"]
+                                ["toolResults"]
+                                .as_array()
+                                .unwrap()
+                                .len()
+                                == 2,
+                            "Converted tool result lost"
+                        );
+                    }
+                    "multi-three-first-text"
+                    | "multi-whitespace-first"
+                    | "multi-empty-first-tools"
+                    | "multi-three-text-mixed" => {
+                        let mut first = assistant_a.clone();
+                        let mut second = assistant_b.clone();
+                        first["assistantResponseMessage"]["content"] =
+                            if label == "multi-whitespace-first" {
+                                " "
+                            } else if label == "multi-empty-first-tools" {
+                                ""
+                            } else {
+                                "Both arithmetic exercises recorded."
+                            }
+                            .into();
+                        second["assistantResponseMessage"]["content"] = "".into();
+                        state["history"] =
+                            json!([user("Previous arithmetic exercises."), first, second]);
+                        if label == "multi-three-first-text" {
+                            state["history"]
+                                .as_array_mut()
+                                .unwrap()
+                                .push(assistant_a.clone());
+                        }
+                        if label == "multi-three-text-mixed" {
+                            state["history"].as_array_mut().unwrap().insert(2,json!({"assistantResponseMessage":{"content":"","reasoningContent":{"redactedContent":"c3ludGhldGljLWF1ZGl0"}}}));
+                        }
+                        if label == "multi-empty-first-tools" {
+                            state["history"][1]["assistantResponseMessage"]["toolUses"] = json!([{"toolUseId":"audit-tool","name":"probe_echo","input":{"value":"a"}}]);
+                            state["currentMessage"]["userInputMessage"]["userInputMessageContext"] = json!({"tools":[],"toolResults":[{"toolUseId":"audit-tool","status":"success","content":[{"text":"synthetic result"}]}]});
+                        }
+                    }
+                    "multi-first-empty-second-text"
+                    | "multi-first-text-second-empty"
+                    | "multi-nonempty-invalid-first"
+                    | "multi-phase-tools-between" => {
+                        let mut first = assistant_a.clone();
+                        let mut second = assistant_b.clone();
+                        first["assistantResponseMessage"]["content"] =
+                            if label == "multi-first-empty-second-text" {
+                                ""
+                            } else {
+                                "First arithmetic exercise recorded."
+                            }
+                            .into();
+                        second["assistantResponseMessage"]["content"] =
+                            if label == "multi-first-text-second-empty" {
+                                ""
+                            } else {
+                                "Second arithmetic exercise recorded."
+                            }
+                            .into();
+                        if label == "multi-nonempty-invalid-first" {
+                            first["assistantResponseMessage"]["reasoningContent"]["reasoningText"]
+                                ["signature"] = "INVALID_SIGNATURE".into();
+                        }
+                        state["history"] =
+                            json!([user("Previous arithmetic exercises."), first, second]);
+                        if label == "multi-phase-tools-between" {
+                            state["history"][1]["assistantResponseMessage"]["toolUses"] = json!([{"toolUseId":"audit-tool-a","name":"probe_echo","input":{"value":"a"}}]);
+                            state["history"][2]["assistantResponseMessage"]["toolUses"] = json!([{"toolUseId":"audit-tool-b","name":"probe_echo","input":{"value":"b"}}]);
+                            state["currentMessage"]["userInputMessage"]["userInputMessageContext"] = json!({"tools":[],"toolResults":[
+                                {"toolUseId":"audit-tool-a","status":"success","content":[{"text":"synthetic a"}]},
+                                {"toolUseId":"audit-tool-b","status":"success","content":[{"text":"synthetic b"}]}]});
+                        }
+                    }
+                    "multi-consecutive-nonempty" => {
+                        state["history"][1]["assistantResponseMessage"]["content"] =
+                            "First arithmetic reasoning recorded.".into();
+                        let mut second = assistant_b.clone();
+                        second["assistantResponseMessage"]["content"] =
+                            "Second arithmetic reasoning recorded.".into();
+                        state["history"].as_array_mut().unwrap().push(second);
+                    }
+                    "multi-three-signed" | "multi-three-invalid-first" => {
+                        state["history"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(assistant_b.clone());
+                        state["history"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(assistant_a.clone());
+                        if label.ends_with("invalid-first") {
+                            state["history"][1]["assistantResponseMessage"]["reasoningContent"]["reasoningText"]
+                                ["signature"] = "INVALID_SIGNATURE".into();
+                        }
+                    }
+                    "multi-two-leading-users" => {
+                        state["history"] = json!([
+                            user("First task."),
+                            user("Second task."),
+                            assistant_a.clone(),
+                            assistant_b.clone()
+                        ]);
+                    }
+                    "multi-array-invalid-control" => {
+                        state["history"][1]["assistantResponseMessage"]["reasoningContent"] = json!([a,{"reasoningText":{"text":"invalid","signature":"INVALID_SIGNATURE"}}]);
+                    }
+                    "multi-plural-invalid-control" => {
+                        state["history"][1]["assistantResponseMessage"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("reasoningContent");
+                        state["history"][1]["assistantResponseMessage"]["reasoningContents"] =
+                            json!("NOT_REASONING");
+                    }
+                    "multi-alternating-real-turns" => {
+                        state["history"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(user("Next arithmetic exercise."));
+                        state["history"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(assistant_b.clone());
+                    }
+                    "multi-content-array" => {
+                        state["history"][1]["assistantResponseMessage"]["content"] = json!([
+                        {"reasoningContent":a},{"text":answer_a},{"reasoningContent":b},{"text":answer_b}])
+                    }
+                    "multi-consecutive-assistants" | "multi-consecutive-assistants-tools" => {
+                        state["history"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(assistant_b.clone());
+                        if label.ends_with("tools") {
+                            state["history"][2]["assistantResponseMessage"]["toolUses"] = json!([{"toolUseId":"audit-tool","name":"probe_echo","input":{"value":"test"}}]);
+                            state["currentMessage"]["userInputMessage"]["userInputMessageContext"] = json!({"tools":[],"toolResults":[{"toolUseId":"audit-tool","status":"success","content":[{"text":"synthetic local result; no tool executed"}]}]});
+                        }
+                    }
+                    "multi-consecutive-mixed-redacted" => {
+                        state["history"].as_array_mut().unwrap().push(json!({"assistantResponseMessage":{"content":"","reasoningContent":{"redactedContent":"c3ludGhldGljLWF1ZGl0"}}}));
+                        state["history"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(assistant_b.clone());
+                    }
+                    _ => unreachable!(),
+                }
+            } else {
+                state["history"] = json!([user("You are a helpful AI assistant tasked with summarizing conversations."),
+                    {"assistantResponseMessage":{"content":"I will follow these instructions."}},
+                    user("Remember ALPHA_71 and BETA_93."),
+                    {"assistantResponseMessage":{"content":"Recorded both markers."}}]);
+                state["currentMessage"] = user(original_prompt);
+                if label == "legacy-rewritten" {
+                    state = serde_json::from_str(include_str!(
+                        "../../testdata/kiro_legacy_summary_rewrite_before_2026-11-15.json"
+                    ))?;
+                    state["conversationId"] = uuid::Uuid::new_v4().to_string().into();
+                } else if label == "legacy-trailing-assistant" || label == "legacy-empty-current" {
+                    state["history"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(user(original_prompt));
+                    if label == "legacy-trailing-assistant" {
+                        state["currentMessage"] = json!({"assistantResponseMessage":{"content":"Latest work: ALPHA_71 and BETA_93 confirmed."}});
+                    } else {
+                        state["history"].as_array_mut().unwrap().push(json!({"assistantResponseMessage":{"content":"Latest work: ALPHA_71 and BETA_93 confirmed."}}));
+                        state["currentMessage"] = user("");
+                    }
+                }
+            }
+            outgoing["conversationState"] = state;
         }
         if deep_audit && label.contains("captured") {
             let Some(reasoning) = captured_reasoning.clone() else {
@@ -1911,7 +2234,7 @@ async fn raw_tool_controls_probe(
             rewrite_probe || wire_description == description,
             "Description was modified"
         );
-        if rewrite_probe && actual.pointer(context_pointer).is_some() {
+        if rewrite_probe && !multi_audit && actual.pointer(context_pointer).is_some() {
             ensure!(
                 actual.pointer(context_pointer).unwrap()["tools"] == rewrite_tools[&label],
                 "Audit tools were rewritten"
@@ -1999,6 +2322,31 @@ async fn raw_tool_controls_probe(
             call["input"] = serde_json::from_str(call["rawInput"].as_str().unwrap_or_default())
                 .unwrap_or(Value::Null);
         }
+        if multi_audit && label.starts_with("multi-capture") {
+            let mut phase_text = String::new();
+            let mut phase_signature = String::new();
+            let mut phases = Vec::new();
+            for event in &reasoning_events {
+                if let Some(fragment) = event["text"].as_str() {
+                    if !phase_signature.is_empty() {
+                        phases.push(json!({"reasoningText":{"text":phase_text,"signature":phase_signature}}));
+                        phase_text = String::new();
+                        phase_signature = String::new();
+                    }
+                    phase_text.push_str(fragment);
+                }
+                if let Some(fragment) = event["signature"].as_str() {
+                    phase_signature.push_str(fragment);
+                }
+            }
+            if !phase_text.is_empty() && !phase_signature.is_empty() {
+                phases
+                    .push(json!({"reasoningText":{"text":phase_text,"signature":phase_signature}}));
+            }
+            if status.is_success() && errors.is_empty() && phases.len() == 1 {
+                captured_phases.push((phases.remove(0), text.clone()));
+            }
+        }
         if deep_audit && captured_reasoning.is_none() {
             let reasoning_text: String = reasoning_events
                 .iter()
@@ -2046,8 +2394,37 @@ async fn raw_tool_controls_probe(
             json!({"expectedChars":expected.chars().count(),"expectedLines":expected.lines().count(),
                 "expectedSha256":hex::encode(Sha256::digest(expected.as_bytes())),"calls":observations})
         });
+        let wire_observation = if multi_audit {
+            let mut sanitized = actual["conversationState"].clone();
+            fn sanitize(value: &mut Value) {
+                match value {
+                    Value::Array(items) => {
+                        for item in items {
+                            sanitize(item);
+                        }
+                    }
+                    Value::Object(map) => {
+                        if let Some(Value::String(signature)) = map.remove("signature") {
+                            map.insert("signatureChars".into(), json!(signature.len()));
+                            map.insert(
+                                "signatureSha256".into(),
+                                json!(hex::encode(Sha256::digest(signature.as_bytes()))),
+                            );
+                        }
+                        for value in map.values_mut() {
+                            sanitize(value);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            sanitize(&mut sanitized);
+            Some(sanitized)
+        } else {
+            None
+        };
         let result = json!({"case":label,"endpoint":account.endpoint,"region":account.region,"model":actual.pointer("/conversationState/currentMessage/userInputMessage/modelId"),
-            "wireUnchanged":true,"patchPointer":pointer,"patch":patch,"prompt":prompt,
+            "wireUnchanged":true,"wireObservation":wire_observation,"patchPointer":pointer,"patch":patch,"prompt":prompt,
             "system":system,"metadata":metadata,"outputObservation":output_observation,
             "actualUserContent":if recovery_probe { actual.pointer("/conversationState/currentMessage/userInputMessage/content") } else { None },
             "recoveryVariant":recovery_variants.get(&label),

@@ -858,7 +858,6 @@ pub async fn post_messages(
     if payload.compaction.is_some() || payload.context_management.is_some() {
         return super::compaction::handle_request(state, payload, false).await;
     }
-    super::compaction::prepare_legacy_request(&mut payload);
     post_messages_inner(State(state), JsonExtractor(payload)).await
 }
 
@@ -1469,7 +1468,6 @@ pub async fn post_messages_cc(
     if payload.compaction.is_some() || payload.context_management.is_some() {
         return super::compaction::handle_request(state, payload, true).await;
     }
-    super::compaction::prepare_legacy_request(&mut payload);
     post_messages_cc_inner(State(state), JsonExtractor(payload)).await
 }
 

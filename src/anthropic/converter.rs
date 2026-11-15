@@ -640,10 +640,14 @@ fn normalize_tool_use_ids(
     );
     let mut seen = std::collections::HashSet::new();
     let mut remap = HashMap::new();
+    let mut previous_assistant = false;
     for (index, message) in history.iter_mut().enumerate() {
         match message {
             Message::Assistant(message) => {
-                remap.clear();
+                if !previous_assistant {
+                    remap.clear();
+                }
+                previous_assistant = true;
                 let Some(calls) = &mut message.assistant_response_message.tool_uses else {
                     continue;
                 };
@@ -683,6 +687,7 @@ fn normalize_tool_use_ids(
                 *calls = unique;
             }
             Message::User(message) => {
+                previous_assistant = false;
                 for result in &mut message
                     .user_input_message
                     .user_input_message_context
@@ -710,7 +715,6 @@ fn sanitize_history_tool_results(history: &mut [Message]) {
     for message in history {
         match message {
             Message::Assistant(message) => {
-                pending.clear();
                 if let Some(uses) = &message.assistant_response_message.tool_uses {
                     pending.extend(uses.iter().map(|call| call.tool_use_id.clone()));
                 }
@@ -788,16 +792,21 @@ fn validate_tool_pairing(
 
     // 4. 过滤并验证当前消息的 tool_results
     let mut filtered_results = Vec::new();
-    let current_tool_use_ids: HashSet<&str> = match history.last() {
-        Some(Message::Assistant(message)) => message
-            .assistant_response_message
-            .tool_uses
-            .iter()
-            .flatten()
-            .map(|call| call.tool_use_id.as_str())
-            .collect(),
-        _ => HashSet::new(),
-    };
+    let current_tool_use_ids: HashSet<&str> = history
+        .iter()
+        .rev()
+        .take_while(|message| matches!(message, Message::Assistant(_)))
+        .flat_map(|message| match message {
+            Message::Assistant(message) => message
+                .assistant_response_message
+                .tool_uses
+                .iter()
+                .flatten()
+                .map(|call| call.tool_use_id.as_str())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect();
 
     for result in tool_results {
         if unpaired_tool_use_ids.contains(&result.tool_use_id)
@@ -1019,8 +1028,11 @@ fn build_history(
         if msg.role == "user" {
             // 先处理累积的 assistant 消息
             if !assistant_buffer.is_empty() {
-                let merged = merge_assistant_messages(&assistant_buffer, tool_name_map)?;
-                history.push(Message::Assistant(merged));
+                history.extend(
+                    convert_assistant_turn(&assistant_buffer, tool_name_map)?
+                        .into_iter()
+                        .map(Message::Assistant),
+                );
                 assistant_buffer.clear();
             }
             user_buffer.push(msg);
@@ -1038,8 +1050,11 @@ fn build_history(
 
     // 处理末尾累积的 assistant 消息
     if !assistant_buffer.is_empty() {
-        let merged = merge_assistant_messages(&assistant_buffer, tool_name_map)?;
-        history.push(Message::Assistant(merged));
+        history.extend(
+            convert_assistant_turn(&assistant_buffer, tool_name_map)?
+                .into_iter()
+                .map(Message::Assistant),
+        );
     }
 
     // 处理结尾的孤立 user 消息
@@ -1092,6 +1107,76 @@ fn merge_user_messages(
     })
 }
 
+/// Preserve phase boundaries using consecutive native assistant entries. Live
+/// probes validate each signature; unsupported combinations must fail upstream,
+/// rather than discard phases or inject text to make them acceptable.
+fn convert_assistant_turn(
+    messages: &[&super::types::Message],
+    tool_name_map: &mut HashMap<String, String>,
+) -> Result<Vec<HistoryAssistantMessage>, ConversionError> {
+    let mut phases = Vec::new();
+    for message in messages {
+        let Some(blocks) = message.content.as_array() else {
+            phases.push((*message).clone());
+            continue;
+        };
+        let mut phase = Vec::new();
+        let mut has_reasoning = false;
+        for block in blocks {
+            let valid_reasoning = match block["type"].as_str() {
+                Some("thinking") => {
+                    block["thinking"].as_str().is_some_and(|s| !s.is_empty())
+                        && block["signature"]
+                            .as_str()
+                            .is_some_and(|s| !s.trim().is_empty())
+                }
+                Some("redacted_thinking") => {
+                    block["data"].as_str().is_some_and(|s| !s.trim().is_empty())
+                }
+                _ => false,
+            };
+            if valid_reasoning && has_reasoning {
+                phases.push(super::types::Message {
+                    role: "assistant".into(),
+                    content: serde_json::json!(std::mem::take(&mut phase)),
+                });
+                has_reasoning = false;
+            }
+            has_reasoning |= valid_reasoning;
+            phase.push(block.clone());
+        }
+        if !phase.is_empty() {
+            phases.push(super::types::Message {
+                role: "assistant".into(),
+                content: serde_json::json!(phase),
+            });
+        }
+    }
+    let converted: Vec<_> = phases
+        .iter()
+        .map(|message| convert_assistant_message(message, tool_name_map))
+        .collect::<Result<_, _>>()?;
+    if converted
+        .iter()
+        .filter(|message| {
+            message
+                .assistant_response_message
+                .reasoning_content
+                .is_some()
+        })
+        .count()
+        > 1
+    {
+        return Ok(converted);
+    }
+    // Keep existing text/tool merging when no reasoning boundary can be lost.
+    let refs: Vec<_> = phases.iter().collect();
+    if refs.is_empty() {
+        return Ok(vec![HistoryAssistantMessage::new("")]);
+    }
+    Ok(vec![merge_assistant_messages(&refs, tool_name_map)?])
+}
+
 /// 转换 assistant 消息
 fn convert_assistant_message(
     msg: &super::types::Message,
@@ -1115,9 +1200,14 @@ fn convert_assistant_message(
                                 && let Some(signature) =
                                     block.signature.filter(|s| !s.trim().is_empty())
                             {
-                                // Kiro can carry one reasoning block. Keep its
-                                // text and signature together, as when merging
-                                // consecutive assistant messages below.
+                                // Each phase was split by convert_assistant_turn;
+                                // preserve this exact text/signature pair.
+                                if reasoning_content.is_some() {
+                                    return Err(ConversionError::InvalidMessageFormat(
+                                        "Multiple reasoning phases must be converted separately"
+                                            .into(),
+                                    ));
+                                }
                                 reasoning_content = Some(serde_json::json!({
                                     "reasoningText": {"text": text, "signature": signature}
                                 }));
@@ -1125,6 +1215,12 @@ fn convert_assistant_message(
                         }
                         "redacted_thinking" => {
                             if let Some(data) = block.data.filter(|s| !s.trim().is_empty()) {
+                                if reasoning_content.is_some() {
+                                    return Err(ConversionError::InvalidMessageFormat(
+                                        "Multiple reasoning phases must be converted separately"
+                                            .into(),
+                                    ));
+                                }
                                 reasoning_content =
                                     Some(serde_json::json!({"redactedContent": data}));
                             }
@@ -1199,7 +1295,11 @@ fn merge_assistant_messages(
             all_tool_uses.extend(tus);
         }
         if am.reasoning_content.is_some() {
-            // A signature authenticates one reasoning block; never join signed blocks.
+            if reasoning_content.is_some() {
+                return Err(ConversionError::InvalidMessageFormat(
+                    "Multiple reasoning phases must be converted separately".into(),
+                ));
+            }
             reasoning_content = am.reasoning_content;
         }
     }
@@ -2419,39 +2519,96 @@ mod tests {
     }
 
     #[test]
-    fn assistant_reasoning_keeps_one_complete_block_with_its_own_signature() {
-        let first = serde_json::json!({"type":"thinking","thinking":"first thought","signature":"first-signature"});
+    fn assistant_reasoning_preserves_every_phase_and_signature_in_order() {
+        let first = serde_json::json!({"type":"thinking","thinking":" first thought\n","signature":"first-signature"});
         let second = serde_json::json!({"type":"thinking","thinking":"second thought","signature":"second-signature"});
         let redacted = serde_json::json!({"type":"redacted_thinking","data":"encrypted-thought"});
-        for (blocks, expected) in [
-            (
-                vec![first.clone(), second.clone()],
-                serde_json::json!({"reasoningText":{"text":"second thought","signature":"second-signature"}}),
-            ),
-            (
-                vec![first.clone(), redacted.clone()],
-                serde_json::json!({"redactedContent":"encrypted-thought"}),
-            ),
-            (
-                vec![redacted, second],
-                serde_json::json!({"reasoningText":{"text":"second thought","signature":"second-signature"}}),
-            ),
-        ] {
-            // A Kiro assistant message has one reasoning union. Match the existing
-            // merged-assistant policy: retain the last complete block, never join
-            // text authenticated by different signatures or combine union arms.
-            let req = tool_validation_request(serde_json::json!([
-                {"role":"user","content":"Inspect src/main.rs"},
-                {"role":"assistant","content":blocks},
-                {"role":"user","content":"Continue"}
-            ]));
+        for separate_messages in [false, true] {
+            let mut messages = vec![serde_json::json!({"role":"user","content":"inspect"})];
+            let blocks = vec![
+                first.clone(),
+                serde_json::json!({"type":"text","text":"First answer."}),
+                redacted.clone(),
+                second.clone(),
+                serde_json::json!({"type":"text","text":"Second answer."}),
+            ];
+            if separate_messages {
+                messages.extend(
+                    blocks
+                        .iter()
+                        .map(|block| serde_json::json!({"role":"assistant","content":[block]})),
+                );
+            } else {
+                messages.push(serde_json::json!({"role":"assistant","content":blocks}));
+            }
+            messages.push(serde_json::json!({"role":"user","content":"continue"}));
+            let req = tool_validation_request(serde_json::json!(messages));
             let wire =
                 serde_json::to_value(convert_request(&req).unwrap().conversation_state).unwrap();
+            let history = wire["history"].as_array().unwrap();
+            let phases: Vec<_> = history
+                .iter()
+                .filter_map(|m| m["assistantResponseMessage"].get("reasoningContent"))
+                .collect();
             assert_eq!(
-                wire["history"][1]["assistantResponseMessage"]["reasoningContent"],
-                expected
+                phases,
+                vec![
+                    &serde_json::json!({"reasoningText":{"text":" first thought\n","signature":"first-signature"}}),
+                    &serde_json::json!({"redactedContent":"encrypted-thought"}),
+                    &serde_json::json!({"reasoningText":{"text":"second thought","signature":"second-signature"}})
+                ]
             );
+            let text: String = history
+                .iter()
+                .filter_map(|m| m["assistantResponseMessage"]["content"].as_str())
+                .collect();
+            assert_eq!(text, "First answer.Second answer.");
+            assert!(!text.contains("thought"));
         }
+    }
+
+    #[test]
+    fn reasoning_phase_tools_keep_results_and_id_remapping_across_turns() {
+        let mut messages = Vec::new();
+        for turn in 0..2 {
+            messages.extend([
+                serde_json::json!({"role":"user","content":"inspect"}),
+                serde_json::json!({"role":"assistant","content":[
+                    {"type":"thinking","thinking":"first","signature":"signature-a"},
+                    {"type":"tool_use","id":"a","name":"read","input":{"turn":turn}},
+                    {"type":"thinking","thinking":"second","signature":"signature-b"},
+                    {"type":"tool_use","id":"b","name":"read","input":{"turn":turn}}]}),
+                serde_json::json!({"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"a","content":"first result"},
+                    {"type":"tool_result","tool_use_id":"b","content":"second result"}]}),
+                serde_json::json!({"role":"assistant","content":"done"}),
+            ]);
+        }
+        messages.push(serde_json::json!({"role":"user","content":"continue"}));
+        let req = tool_validation_request(serde_json::json!(messages));
+        let wire = serde_json::to_value(convert_request(&req).unwrap().conversation_state).unwrap();
+        let mut calls = Vec::new();
+        let mut result_ids = Vec::new();
+        for message in wire["history"].as_array().unwrap() {
+            for call in message["assistantResponseMessage"]["toolUses"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                calls.push(call["toolUseId"].clone());
+            }
+            for result in message["userInputMessage"]["userInputMessageContext"]["toolResults"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                result_ids.push(result["toolUseId"].clone());
+            }
+        }
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls, result_ids);
+        assert_ne!(calls[0], calls[2]);
+        assert_ne!(calls[1], calls[3]);
     }
 
     #[test]
@@ -3034,34 +3191,38 @@ mod tests {
         };
 
         let messages: Vec<&AnthropicMessage> = vec![&msg1, &msg2];
-        let result = merge_assistant_messages(&messages, &mut HashMap::new()).expect("合并应成功");
-
-        let content = &result.assistant_response_message.content;
-        assert!(
-            !content.contains("<thinking>"),
-            "推理应与 assistant 文本分开保存"
-        );
-        assert!(
-            result
+        let result = convert_assistant_turn(&messages, &mut HashMap::new()).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result[0]
                 .assistant_response_message
                 .reasoning_content
                 .as_ref()
-                .and_then(|value| value.pointer("/reasoningText/text"))
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|text| text.contains("I should read")),
-            "签名不能对应拼接后的推理文本；保留最后一个原生推理块"
+                .unwrap()["reasoningText"]["signature"],
+            "first-signature"
         );
-        assert!(
-            content.contains("Let me read that file"),
-            "应包含第二条消息的 text 内容"
+        assert_eq!(
+            result[1]
+                .assistant_response_message
+                .reasoning_content
+                .as_ref()
+                .unwrap()["reasoningText"]["signature"],
+            "second-signature"
         );
-
-        let tool_uses = result
-            .assistant_response_message
-            .tool_uses
-            .expect("应有 tool_uses");
-        assert_eq!(tool_uses.len(), 1);
-        assert_eq!(tool_uses[0].tool_use_id, "toolu_01ABC");
+        assert_eq!(result[0].assistant_response_message.content, " ");
+        assert_eq!(
+            result[1].assistant_response_message.content,
+            "Let me read that file."
+        );
+        assert_eq!(
+            result[1]
+                .assistant_response_message
+                .tool_uses
+                .as_ref()
+                .unwrap()[0]
+                .tool_use_id,
+            "toolu_01ABC"
+        );
     }
 
     #[test]

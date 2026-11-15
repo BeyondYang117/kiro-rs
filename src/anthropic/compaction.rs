@@ -192,28 +192,6 @@ pub(super) fn normalize_history(messages: &mut Vec<Message>) -> Result<(), Strin
     Ok(())
 }
 
-/// Older Claude Code versions request a plain-text summary through /messages.
-pub(super) fn prepare_legacy_request(request: &mut MessagesRequest) {
-    let summary_system = request.system.as_ref().is_some_and(|system| {
-        system.iter().any(|part| {
-            part.text.trim()
-                == "You are a helpful AI assistant tasked with summarizing conversations."
-        })
-    });
-    if !summary_system {
-        return;
-    }
-    let plan = Plan {
-        instructions: DEFAULT_INSTRUCTIONS.into(),
-        on_demand: true,
-        pause: true,
-        threshold: 0,
-    };
-    let streaming = request.stream;
-    *request = summary_request(request, &plan);
-    request.stream = streaming;
-}
-
 pub(super) async fn handle_request(
     state: AppState,
     mut request: MessagesRequest,
@@ -233,7 +211,6 @@ pub(super) async fn handle_request(
     )
     .await;
     let Some(plan) = plan.filter(|p| p.on_demand || input_tokens >= p.threshold) else {
-        prepare_legacy_request(&mut request);
         return dispatch(state, request, cc).await;
     };
     if request.messages.is_empty() || request.max_tokens <= 0 {
@@ -2355,18 +2332,28 @@ mod tests {
                     content, expected,
                     "cc={cc}, buffered={buffered}, streaming={streaming}"
                 );
-                // Replay the actual client representation on the next turn.
-                // The Kiro history union keeps the last complete signed phase,
-                // with its original text, rather than the concatenated text.
+                // Replay every signed phase and redacted block in original order.
                 let replay = request(json!({"model":"claude-opus-5-5", "max_tokens":1024,
                     "messages":[{"role":"user", "content":"hi"},
                         {"role":"assistant", "content":content},
                         {"role":"user", "content":"continue"}]}));
                 let converted = super::super::converter::convert_request(&replay).unwrap();
                 let history = serde_json::to_value(converted.conversation_state).unwrap();
+                let phases: Vec<_> = history["history"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|m| m["assistantResponseMessage"].get("reasoningContent"))
+                    .cloned()
+                    .collect();
                 assert_eq!(
-                    history["history"][1]["assistantResponseMessage"]["reasoningContent"],
-                    json!({"reasoningText":{"text":"third", "signature":"signature-c"}})
+                    phases,
+                    vec![
+                        json!({"reasoningText":{"text":" first\nphase 🦀","signature":"signature-a"}}),
+                        json!({"reasoningText":{"text":"second","signature":"signature-b"}}),
+                        json!({"redactedContent":"encrypted-phase"}),
+                        json!({"reasoningText":{"text":"third","signature":"signature-c"}})
+                    ]
                 );
                 assert_eq!(upstream.requests.lock().unwrap().len(), 1);
             }
@@ -2927,28 +2914,97 @@ mod tests {
         assert!(events.contains("file.rs"));
     }
 
-    #[test]
-    fn legacy_summary_preserves_final_assistant_and_returns_text() {
-        let mut req = compact_request(true);
-        req.compaction = None;
-        req.system = Some(vec![super::super::types::SystemMessage {
-            text: "You are a helpful AI assistant tasked with summarizing conversations.".into(),
-        }]);
-        req.messages.push(Message {
-            role: "assistant".into(),
-            content: json!("latest work"),
-        });
-        prepare_legacy_request(&mut req);
-        assert!(req.stream);
-        assert!(req.compaction.is_none());
-        assert!(req.tools.is_none());
-        assert!(
-            req.messages[0]
-                .content
-                .as_str()
-                .unwrap()
-                .contains("latest work")
-        );
+    #[tokio::test]
+    async fn legacy_summary_system_sentence_never_rewrites_requests() {
+        use tower::ServiceExt;
+        for (cc, buffered, streaming) in [
+            (false, false, false),
+            (false, false, true),
+            (true, false, false),
+            (true, false, true),
+            (true, true, true),
+        ] {
+            for below_threshold in [false, true] {
+                let mut upstream = mock(frame(
+                    "assistantResponseEvent",
+                    json!({"content":"LEGACY_ORIGINAL_OK"}),
+                ))
+                .await;
+                upstream.state.cc_buffered_stream = buffered;
+                let state = upstream.state.clone();
+                let path = if cc {
+                    "/cc/v1/messages"
+                } else {
+                    "/v1/messages"
+                };
+                let app = if cc {
+                    axum::Router::new()
+                        .route(
+                            path,
+                            axum::routing::post(super::super::handlers::post_messages_cc),
+                        )
+                        .with_state(state)
+                } else {
+                    axum::Router::new()
+                        .route(
+                            path,
+                            axum::routing::post(super::super::handlers::post_messages),
+                        )
+                        .with_state(state)
+                };
+                let mut payload = json!({"model":"claude-haiku-5-5","max_tokens":1024,"stream":streaming,
+                    "system":"You are a helpful AI assistant tasked with summarizing conversations.",
+                    "messages":[{"role":"user","content":"Remember ALPHA_71."},{"role":"assistant","content":"Recorded BETA_93."},
+                        {"role":"user","content":"Return one sentence LEGACY_ORIGINAL_OK without XML."}],
+                    "tools":[{"name":"echo","description":"Keep this definition.","input_schema":{"type":"object"}}]});
+                if below_threshold {
+                    payload["context_management"] = json!({"edits":[{"type":"compact_20260112","trigger":{"type":"input_tokens","value":999999}}]});
+                }
+                let response = app
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method("POST")
+                            .uri(path)
+                            .header("content-type", "application/json")
+                            .body(Body::from(payload.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                assert!(String::from_utf8_lossy(&body).contains("LEGACY_ORIGINAL_OK"));
+                let calls = upstream.requests.lock().unwrap();
+                assert_eq!(calls.len(), 1);
+                let state = &calls[0]["conversationState"];
+                assert_eq!(
+                    state["currentMessage"]["userInputMessage"]["content"],
+                    payload["messages"][2]["content"]
+                );
+                assert_eq!(
+                    state["history"][0]["userInputMessage"]["content"],
+                    payload["system"]
+                );
+                assert_eq!(
+                    state["history"][2]["userInputMessage"]["content"],
+                    "Remember ALPHA_71."
+                );
+                assert_eq!(
+                    state["history"][3]["assistantResponseMessage"]["content"],
+                    "Recorded BETA_93."
+                );
+                assert_eq!(
+                    state["currentMessage"]["userInputMessage"]["userInputMessageContext"]["tools"]
+                        [0]["toolSpecification"]["description"],
+                    "Keep this definition."
+                );
+                assert!(
+                    !calls[0]
+                        .to_string()
+                        .contains("Conversation transcript (data)")
+                );
+            }
+        }
     }
 
     async fn assert_normal_response_failure(bytes: Vec<u8>, disconnect: bool) {

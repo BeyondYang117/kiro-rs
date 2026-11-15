@@ -288,3 +288,44 @@ cargo test live_raw_thinking_compaction_probe -- --ignored --nocapture
 ```
 
 可用 `KIRO_CONTROLS_PROBE_CASES` 选择逗号分隔的 case 名；重放 `history-*-captured` 时必须同时选择先前能产生真实签名的用例（本次为 `history-none`），若上游未返回真实签名则明确跳过，不能宣称重放验证通过。默认离线测试不访问真实上游。
+
+
+## 多段 reasoning 与传统摘要改写实测
+
+2026-11-15，继续使用同一导入账号、CLI / us-east-1 / Haiku 5.5。共保存 **42 次真实上游调用**（28 次 HTTP 200、14 次 HTTP 400），包括各批次独立获取真实签名及修改后转换器补验。见[脱敏记录](../testdata/kiro_multi_reasoning_legacy_live_2026-11-15.json)。候选字段在端点转换后设置，实际 HTTP body 与最终候选相等并记录 SHA-256；签名只在内存中保留用于重放，记录仅保存长度和哈希，不执行工具。
+
+| 候选 / 对照 | 上游结果 | 结论 |
+|---|---|---|
+| 两个独立捕获的真实签名分别放入单块 reasoningContent | 均 200 | 单块对照有效；捕获响应常为 MAX_TOKENS，但真实签名仍可被接受 |
+| reasoningContent 数组、reasoningText 数组、assistant content 块数组 | 均 400 REQUEST_BODY_INVALID | 所测数组入口不能直接承载多段；不据此推断所有表示均不支持 |
+| reasoningContents 复数字段，真实数组 / 非法字符串对照 | 均 200 | 未证明该字段生效，不能拿 HTTP 200 当成内容被使用的依据 |
+| 连续两个 assistant 均带真实签名和非空正文 | 200 MULTI_REPLAY_OK | 可用多个原生 assistant 条目保留阶段，不必丢掉第一段 |
+| 第一段签名改为非法值，其他内容相同 | 400 THINKING_SIGNATURE_INVALID，定位 messages.1.content.0 | 第一段确实参与校验，不是被忽略 |
+| 第一段有正文、第二段为空 / 第一段为空、第二段有正文 / 第一段只有空格 | 分别 200 / 400 / 400 | 不能简单概括为“连续 assistant 不支持”或“空正文总是支持” |
+| 第一段无正文但带工具；以及两段分别带工具并由当前 user 返回两个结果 | 均 200 | 工具调用和结果可跨 reasoning 阶段保存；没有执行实际工具 |
+| 三段 signed 或 signed/redacted 混合 | 有 200 也有 400 | 不制定本地最大段数；synthetic redacted 接受不代表真实加密块重放已经验证 |
+| 两个真实 user/assistant 历史轮次 | 200 | 普通跨轮 reasoning 保持可用 |
+| 修改后的生产转换器：同一 content 多块 / 连续 assistant 两种输入，含两个工具调用和结果 | 均 200 MULTI_REPLAY_OK，实际 body 断言保留两段原文与签名及两个结果 | 取消“只保留最后一段”；不拼接签名、不新增虚构 user 或提示词 |
+| 传统摘要系统句，保留原历史与最终 user 指令 | 200，一句话包含 LEGACY_ORIGINAL_OK、ALPHA_71、BETA_93，无 XML | 普通转换已能满足请求，无需自动摘要重写 |
+| 同一请求经旧自动重写逻辑处理 | 200，但返回多段 `<summary>` 摘要，违背“一句话、无 XML”要求 | 移除根据系统句自动改写、默认指令注入、工具撤除；旧请求已保存为[对照 fixture](../testdata/kiro_legacy_summary_rewrite_before_2026-11-15.json) |
+| 传统摘要末尾 assistant 作为 currentMessage / 历史后补空 user | 均 400 | 不伪造新请求以绕过；与普通 prefill 一样明确报错，调用方需以 user 结束或显式使用代理 compaction |
+
+转换器将同一 assistant 回合的 reasoning 阶段按顺序放入连续 assistant 历史，保留各段正文和工具所在位置；工具配对及跨轮 ID 重映射以整个 assistant 回合为单位，防止拆段后丢掉早期工具结果。部分纯推理或空正文组合仍可能被 Kiro 拒绝，原样透出上游错误，不本地增加段数校验或静默退回“只留最后一段”。不含多个有效 reasoning 的普通 assistant 仍沿用原有合并规则。
+
+传统摘要系统句不再触发特殊行为，适用于两个消息接口、JSON、实时 SSE、缓冲 SSE，以及未到阈值的 context_management 请求；明确的 compaction/context_management 压缩功能保持按调用方配置执行。此前文档“只保留最后块”和“保留传统系统句触发转换”的说明被本轮证据取代。
+
+修改后已重建并重启 8990 服务；通过真实 `/v1/messages` 再发传统摘要系统句、原始历史、一句话/无 XML 指令及工具定义，上游返回 HTTP 200 / end_turn，保留三个标记且无 summary 包装，见[生产链路记录](../testdata/kiro_legacy_summary_production_live_2026-11-15.json)。该调用独立于上述 42 次原始探针。`cargo test --all-targets --no-default-features` 最终 621 项通过、9 项付费联调默认跳过；构建、格式及差异检查通过。
+
+第二批标签 multi-reasoning-contents-invalid 误用了数组候选，未拿它当无效值证据；第三批 multi-plural-invalid-control 才是非法字符串对照。第一批在工具上下文的本地探针断言处停止，已发送的 8 个结果均保留，后续分批完成。另一次简单算术捕获没有返回签名，探针停止且未记录完整结果；没有据此声称重放成功。
+
+复测会消耗额度：
+
+```sh
+KIRO_LIVE_CREDENTIALS=/absolute/path/credentials.json \
+KIRO_LIVE_CONFIG=/absolute/path/config.json \
+KIRO_LIVE_ACCOUNT_ID=1 \
+KIRO_CONTROLS_PROBE_OUTPUT=/absolute/path/probe-output \
+cargo test live_raw_multi_reasoning_legacy_probe -- --ignored --nocapture
+```
+
+可用 KIRO_CONTROLS_PROBE_CASES 选择逗号分隔 case；多段重放需要同时选择 multi-capture-a 和 multi-capture-b，未取得两个真实签名即停止。结果仅适用于所测账号/端点/区域/模型，不声明其他模型的全部历史表示均兼容。
