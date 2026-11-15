@@ -1,0 +1,1703 @@
+{
+  "date": "2026-11-15",
+  "endpoint": "cli",
+  "region": "us-east-1",
+  "model": "claude-haiku-5.5",
+  "methodology": [
+    "24 direct real upstream requests with explicitly imported account, one sample per candidate, no tools executed or automatic retries.",
+    "Candidate fields, tools and history patched after endpoint/account shaping; literal reqwest body checked and SHA-256 recorded.",
+    "One local pre-send assertion failed during supplementary probe setup; no HTTP call occurred for that case. Corrected expected injected tools then ran the three history cases. Failed compilation of legacy probe made no HTTP requests.",
+    "No statistical testing or exact token budget measurement; HTTP acceptance alone is not claimed as support."
+  ],
+  "findings": [
+    "Probe and probe accepted simultaneously and returned as distinct exact tool names with distinct marker arguments.",
+    "63 and 64-character names accepted; 65 and 128 rejected. Two varied 64-character names returned exactly. A repetitive 64-character n name returned 100 n characters, an upstream output mismatch recorded without local schema filtering.",
+    "Dot, colon and Chinese tool names rejected with Invalid tool use format. Exact duplicate tool definitions rejected with Improperly formed request.",
+    "Completed history tool results readable with or without current definitions, including a result in currentMessage. With a current definition the recalled tool was invoked; without a definition no tool call was returned.",
+    "Native enabled/budget_tokens and adaptive/budget_tokens rejected on Haiku 5.5; native display full rejected with supported enum in error.",
+    "Legacy max_thinking_length tags 24576, 30000 and NOT_A_NUMBER all returned LEGACY_OK. This does not establish tag or budget enforcement.",
+    "currentMessage.assistantResponseMessage rejected explicitly; assistant history prefix plus empty current user also rejected. These candidates provide no verified prefill mapping."
+  ],
+  "decision": [
+    "Preserve exact-case tool identities; deduplicate identical exact names only. Retain rejection of conflicting exact duplicate names.",
+    "Allow 64-character ASCII tool names unchanged. Preserve reversible aliasing for longer/invalid names on measured upstream rejection.",
+    "Remove history-only tool placeholder injection; do not re-enable tools absent from caller definitions, including tool_choice none.",
+    "Remove local 24576 legacy budget clamp, preserve caller value in existing opt-in legacy controls; no claim that prompt budget is native or enforced.",
+    "Reject nonempty trailing assistant content explicitly instead of silently discarding it. Continue ignoring empty placeholders.",
+    "Retain native Haiku schema normalization and unknown display omission based on direct 400 evidence."
+  ],
+  "limits": "One account/model/endpoint/region/date; one sample per candidate. No proof of universal name boundary, native prefill impossibility, or legacy prompt budget effectiveness. IDE and cross-provider reasoning replay not newly tested.",
+  "results": [
+    {
+      "actualUserContent": null,
+      "assistantText": "",
+      "auditTools": [
+        {
+          "toolSpecification": {
+            "description": "Echo probe; set value to NAME_OK. No action will execute.",
+            "inputSchema": {
+              "json": {
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              }
+            },
+            "name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+          }
+        }
+      ],
+      "bodySha256": "9a2839cb3c0d71b466b24cc2f3f08b4462eaa701b4bc2f165b169e67371e670f",
+      "case": "name-63",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 2268,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "metadata": [
+        {
+          "stopReason": "TOOL_USE"
+        }
+      ],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "additionalModelRequestFields": {
+          "max_tokens": 1024,
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Call the tool named nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn exactly once with value NAME_OK. Do not answer in text.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "06cfa11d-2bc0-4255-9212-eff8065ee38c",
+      "system": "",
+      "toolCalls": {
+        "toolu_bdrk_012Az3RX5k8eRtcDzBjyfugS": {
+          "complete": true,
+          "input": {
+            "value": "NAME_OK"
+          },
+          "name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+          "rawInput": "{\"value\": \"NAME_OK\"}"
+        }
+      },
+      "wireUnchanged": true,
+      "returnedNamesDeclared": [
+        true
+      ]
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "",
+      "auditTools": [
+        {
+          "toolSpecification": {
+            "description": "Echo probe; set value to NAME_OK. No action will execute.",
+            "inputSchema": {
+              "json": {
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              }
+            },
+            "name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+          }
+        }
+      ],
+      "bodySha256": "b5b0f49d9c0d7abd13aac828e66c2234f4fb066504584adcc1ad3413a6f5b007",
+      "case": "name-64",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1753,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "metadata": [
+        {
+          "stopReason": "TOOL_USE"
+        }
+      ],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "additionalModelRequestFields": {
+          "max_tokens": 1024,
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Call the tool named nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn exactly once with value NAME_OK. Do not answer in text.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "952f3cf3-a514-4239-8dbb-cfe62df01938",
+      "system": "",
+      "toolCalls": {
+        "toolu_bdrk_01QnXpd7vwJFYB64khY8VU6c": {
+          "complete": true,
+          "input": {
+            "value": "NAME_OK"
+          },
+          "name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+          "rawInput": "{\"value\": \"NAME_OK\"}"
+        }
+      },
+      "wireUnchanged": true,
+      "returnedNamesDeclared": [
+        false
+      ]
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "",
+      "auditTools": [
+        {
+          "toolSpecification": {
+            "description": "Echo probe; set value to NAME_OK. No action will execute.",
+            "inputSchema": {
+              "json": {
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              }
+            },
+            "name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+          }
+        }
+      ],
+      "bodySha256": "654807fe2d59239e1fb3a9988afbcd7548193d0c4688cc455a0ca6f648ce03c0",
+      "case": "name-65",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 253,
+      "endpoint": "cli",
+      "errors": [
+        {
+          "__type": "com.amazon.kiro.runtimeservice#ValidationException",
+          "message": "Invalid tool use format.",
+          "reason": "REQUEST_BODY_INVALID"
+        }
+      ],
+      "events": [],
+      "httpStatus": 400,
+      "metadata": [],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "additionalModelRequestFields": {
+          "max_tokens": 1024,
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Call the tool named nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn exactly once with value NAME_OK. Do not answer in text.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "cf933986-3616-4610-bbdb-f4783e9af96e",
+      "system": "",
+      "toolCalls": {},
+      "wireUnchanged": true,
+      "returnedNamesDeclared": []
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "",
+      "auditTools": [
+        {
+          "toolSpecification": {
+            "description": "Echo probe; set value to NAME_OK. No action will execute.",
+            "inputSchema": {
+              "json": {
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              }
+            },
+            "name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+          }
+        }
+      ],
+      "bodySha256": "160155d75272ba24601f519af3615137525d62e1ac485b6fe4f2877f632aab3f",
+      "case": "name-128",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 259,
+      "endpoint": "cli",
+      "errors": [
+        {
+          "__type": "com.amazon.kiro.runtimeservice#ValidationException",
+          "message": "Invalid tool use format.",
+          "reason": "REQUEST_BODY_INVALID"
+        }
+      ],
+      "events": [],
+      "httpStatus": 400,
+      "metadata": [],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "additionalModelRequestFields": {
+          "max_tokens": 1024,
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Call the tool named nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn exactly once with value NAME_OK. Do not answer in text.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "9ce10bcf-7e70-4f80-8a2d-2bd870762157",
+      "system": "",
+      "toolCalls": {},
+      "wireUnchanged": true,
+      "returnedNamesDeclared": []
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "",
+      "auditTools": [
+        {
+          "toolSpecification": {
+            "description": "Echo probe; set value to NAME_OK. No action will execute.",
+            "inputSchema": {
+              "json": {
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              }
+            },
+            "name": "probe.echo"
+          }
+        }
+      ],
+      "bodySha256": "80f093fd1437ebae5e49fdef3af283894d8bd723f8e705282e6c4c8802346065",
+      "case": "name-dot",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 340,
+      "endpoint": "cli",
+      "errors": [
+        {
+          "__type": "com.amazon.kiro.runtimeservice#ValidationException",
+          "message": "Invalid tool use format.",
+          "reason": "REQUEST_BODY_INVALID"
+        }
+      ],
+      "events": [],
+      "httpStatus": 400,
+      "metadata": [],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "additionalModelRequestFields": {
+          "max_tokens": 1024,
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Call the tool named probe.echo exactly once with value NAME_OK. Do not answer in text.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "a25133dd-ca9e-4768-ae29-62b19e1d77a7",
+      "system": "",
+      "toolCalls": {},
+      "wireUnchanged": true,
+      "returnedNamesDeclared": []
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "",
+      "auditTools": [
+        {
+          "toolSpecification": {
+            "description": "Echo probe; set value to NAME_OK. No action will execute.",
+            "inputSchema": {
+              "json": {
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              }
+            },
+            "name": "probe:echo"
+          }
+        }
+      ],
+      "bodySha256": "51de2e73c643202c8710cde10e5eeb4a92b30adae24d6e05bbefdf1054c1fe79",
+      "case": "name-colon",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 251,
+      "endpoint": "cli",
+      "errors": [
+        {
+          "__type": "com.amazon.kiro.runtimeservice#ValidationException",
+          "message": "Invalid tool use format.",
+          "reason": "REQUEST_BODY_INVALID"
+        }
+      ],
+      "events": [],
+      "httpStatus": 400,
+      "metadata": [],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "additionalModelRequestFields": {
+          "max_tokens": 1024,
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Call the tool named probe:echo exactly once with value NAME_OK. Do not answer in text.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "a43cd396-0b5f-4cde-8cfd-a4e3100968d3",
+      "system": "",
+      "toolCalls": {},
+      "wireUnchanged": true,
+      "returnedNamesDeclared": []
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "",
+      "auditTools": [
+        {
+          "toolSpecification": {
+            "description": "Echo probe; set value to NAME_OK. No action will execute.",
+            "inputSchema": {
+              "json": {
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              }
+            },
+            "name": "工具回声"
+          }
+        }
+      ],
+      "bodySha256": "0441cd44f5c3622e9073ac6d2cb525c459b865476a1c79db6de1eea35c3ae1e5",
+      "case": "name-unicode",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 247,
+      "endpoint": "cli",
+      "errors": [
+        {
+          "__type": "com.amazon.kiro.runtimeservice#ValidationException",
+          "message": "Invalid tool use format.",
+          "reason": "REQUEST_BODY_INVALID"
+        }
+      ],
+      "events": [],
+      "httpStatus": 400,
+      "metadata": [],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "additionalModelRequestFields": {
+          "max_tokens": 1024,
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Call the tool named 工具回声 exactly once with value NAME_OK. Do not answer in text.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "72835e9d-6231-44b7-bee8-a90564d8f8eb",
+      "system": "",
+      "toolCalls": {},
+      "wireUnchanged": true,
+      "returnedNamesDeclared": []
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "",
+      "auditTools": [
+        {
+          "toolSpecification": {
+            "description": "Echo probe; set value to UPPER_OK. No action will execute.",
+            "inputSchema": {
+              "json": {
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              }
+            },
+            "name": "Probe"
+          }
+        },
+        {
+          "toolSpecification": {
+            "description": "Echo probe; set value to LOWER_OK. No action will execute.",
+            "inputSchema": {
+              "json": {
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              }
+            },
+            "name": "probe"
+          }
+        }
+      ],
+      "bodySha256": "c1f5233ab6662eb67fc99cb2f45ce95c5cb1db0449af0a585a35208ca8996866",
+      "case": "case-distinct",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1821,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "metadata": [
+        {
+          "stopReason": "TOOL_USE"
+        }
+      ],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "additionalModelRequestFields": {
+          "max_tokens": 1024,
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Call Probe with value UPPER_OK and probe with value LOWER_OK. Use both exact names, once each.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "4814da38-8135-4544-ac9b-851ad35184ee",
+      "system": "",
+      "toolCalls": {
+        "toolu_bdrk_01LQ5bA5KKrHTYZvEkyMGt64": {
+          "complete": true,
+          "input": {
+            "value": "UPPER_OK"
+          },
+          "name": "Probe",
+          "rawInput": "{\"value\": \"UPPER_OK\"}"
+        },
+        "toolu_bdrk_01VHmtUT8t9aHGsGY9xwvhZW": {
+          "complete": true,
+          "input": {
+            "value": "LOWER_OK"
+          },
+          "name": "probe",
+          "rawInput": "{\"value\": \"LOWER_OK\"}"
+        }
+      },
+      "wireUnchanged": true,
+      "returnedNamesDeclared": [
+        true,
+        true
+      ]
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "",
+      "auditTools": [
+        {
+          "toolSpecification": {
+            "description": "Echo probe; set value to NAME_OK. No action will execute.",
+            "inputSchema": {
+              "json": {
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              }
+            },
+            "name": "probe_echo"
+          }
+        },
+        {
+          "toolSpecification": {
+            "description": "Echo probe; set value to NAME_OK. No action will execute.",
+            "inputSchema": {
+              "json": {
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              }
+            },
+            "name": "probe_echo"
+          }
+        }
+      ],
+      "bodySha256": "a02bc8ec5d3a9a7cc328ecdef645973e53846e15d038ee12b2e697f047518e02",
+      "case": "duplicate-exact",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 617,
+      "endpoint": "cli",
+      "errors": [
+        {
+          "__type": "com.amazon.kiro.runtimeservice#ValidationException",
+          "message": "Improperly formed request.",
+          "reason": "REQUEST_BODY_INVALID"
+        }
+      ],
+      "events": [],
+      "httpStatus": 400,
+      "metadata": [],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "additionalModelRequestFields": {
+          "max_tokens": 1024,
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Call probe_echo once with value NAME_OK.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "9b49c63d-5e6a-418d-8765-de6baa57cf2a",
+      "system": "",
+      "toolCalls": {},
+      "wireUnchanged": true,
+      "returnedNamesDeclared": []
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "HISTORY_OK",
+      "auditTools": [
+        {
+          "toolSpecification": {
+            "description": "Echo probe; set value to HISTORY_OK. No action will execute.",
+            "inputSchema": {
+              "json": {
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              }
+            },
+            "name": "old_probe"
+          }
+        }
+      ],
+      "bodySha256": "3688d3e0e0696b85e6bbef4e881646abd01f1df0df26c4a7b292ccc2089fd223",
+      "case": "history-with-definition",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1518,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "metadata": [
+        {
+          "stopReason": "END_TURN"
+        }
+      ],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "history": [
+          {
+            "userInputMessage": {
+              "content": "Call old_probe with value HISTORY_OK.",
+              "modelId": "claude-haiku-5.5",
+              "origin": "KIRO_CLI"
+            }
+          },
+          {
+            "assistantResponseMessage": {
+              "content": " ",
+              "toolUses": [
+                {
+                  "input": {
+                    "value": "HISTORY_OK"
+                  },
+                  "name": "old_probe",
+                  "toolUseId": "history-probe-id"
+                }
+              ]
+            }
+          },
+          {
+            "userInputMessage": {
+              "content": "",
+              "modelId": "claude-haiku-5.5",
+              "origin": "KIRO_CLI",
+              "userInputMessageContext": {
+                "toolResults": [
+                  {
+                    "content": [
+                      {
+                        "text": "HISTORY_OK"
+                      }
+                    ],
+                    "status": "success",
+                    "toolUseId": "history-probe-id"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "assistantResponseMessage": {
+              "content": "The recorded tool result was HISTORY_OK."
+            }
+          }
+        ]
+      },
+      "patchPointer": "/conversationState",
+      "prompt": "Do not call tools. Reply with exactly the previous tool result.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "6a0b6b6d-4482-474b-93b1-634056e2ba16",
+      "system": "",
+      "toolCalls": {},
+      "wireUnchanged": true,
+      "returnedNamesDeclared": []
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "HISTORY_OK",
+      "auditTools": [],
+      "bodySha256": "ad790ff7b893d4667f052f280d22d5cc396ad991bc9d6f2e6e4beda2dc19129c",
+      "case": "history-without-definition",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1527,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "metadata": [
+        {
+          "stopReason": "END_TURN"
+        }
+      ],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "history": [
+          {
+            "userInputMessage": {
+              "content": "Call old_probe with value HISTORY_OK.",
+              "modelId": "claude-haiku-5.5",
+              "origin": "KIRO_CLI"
+            }
+          },
+          {
+            "assistantResponseMessage": {
+              "content": " ",
+              "toolUses": [
+                {
+                  "input": {
+                    "value": "HISTORY_OK"
+                  },
+                  "name": "old_probe",
+                  "toolUseId": "history-probe-id"
+                }
+              ]
+            }
+          },
+          {
+            "userInputMessage": {
+              "content": "",
+              "modelId": "claude-haiku-5.5",
+              "origin": "KIRO_CLI",
+              "userInputMessageContext": {
+                "toolResults": [
+                  {
+                    "content": [
+                      {
+                        "text": "HISTORY_OK"
+                      }
+                    ],
+                    "status": "success",
+                    "toolUseId": "history-probe-id"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "assistantResponseMessage": {
+              "content": "The recorded tool result was HISTORY_OK."
+            }
+          }
+        ]
+      },
+      "patchPointer": "/conversationState",
+      "prompt": "Do not call tools. Reply with exactly the previous tool result.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "abf99067-82e2-4643-9b28-9be5b0542acd",
+      "system": "",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "",
+      "auditTools": [],
+      "bodySha256": "02ee67dd4c2dc926d59f7b193d2e8cf3f6e1a98d08c9506f68918b1c0c77ad81",
+      "case": "native-thinking-enabled-budget-30000",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 456,
+      "endpoint": "cli",
+      "errors": [
+        {
+          "__type": "com.amazon.kiro.runtimeservice#ValidationException",
+          "message": "Invalid additionalModelRequestFields: does not have a value in the enumeration [\"adaptive\", \"disabled\"]",
+          "reason": "REQUEST_BODY_INVALID"
+        }
+      ],
+      "events": [],
+      "httpStatus": 400,
+      "metadata": [],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "additionalModelRequestFields": {
+          "max_tokens": 1024,
+          "thinking": {
+            "budget_tokens": 30000,
+            "type": "enabled"
+          }
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Reply with exactly AUDIT_OK.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "65570fa6-2b4e-4797-a821-4d813504e26e",
+      "system": "",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "",
+      "auditTools": [],
+      "bodySha256": "5691895c2448f9a05552c738e4ec9225e8cf151c924460bcf86e409fa90cfe79",
+      "case": "native-thinking-adaptive-budget-30000",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 385,
+      "endpoint": "cli",
+      "errors": [
+        {
+          "__type": "com.amazon.kiro.runtimeservice#ValidationException",
+          "message": "Invalid additionalModelRequestFields: property 'budget_tokens' is not defined in the schema and the schema does not allow additional properties",
+          "reason": "REQUEST_BODY_INVALID"
+        }
+      ],
+      "events": [],
+      "httpStatus": 400,
+      "metadata": [],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "additionalModelRequestFields": {
+          "max_tokens": 1024,
+          "thinking": {
+            "budget_tokens": 30000,
+            "type": "adaptive"
+          }
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Reply with exactly AUDIT_OK.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "d8b45ac6-e2ea-4dbc-b9c6-a057ed0ef981",
+      "system": "",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "",
+      "auditTools": [],
+      "bodySha256": "f466248943104efcf1908115c5ffcb7c382e52230f7052862c8372b07edbe679",
+      "case": "native-thinking-display-full",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 424,
+      "endpoint": "cli",
+      "errors": [
+        {
+          "__type": "com.amazon.kiro.runtimeservice#ValidationException",
+          "message": "Invalid additionalModelRequestFields: does not have a value in the enumeration [\"summarized\", \"omitted\"]",
+          "reason": "REQUEST_BODY_INVALID"
+        }
+      ],
+      "events": [],
+      "httpStatus": 400,
+      "metadata": [],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "additionalModelRequestFields": {
+          "max_tokens": 1024,
+          "thinking": {
+            "display": "full",
+            "type": "disabled"
+          }
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Reply with exactly AUDIT_OK.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "477c3dcb-2615-441b-bd65-ca8c43a2b7c0",
+      "system": "",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "",
+      "auditTools": [],
+      "bodySha256": "2b053e400fe8d468d09cf2f915e716fe945516be30816b1f7e82e18a30090530",
+      "case": "assistant-current",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 357,
+      "endpoint": "cli",
+      "errors": [
+        {
+          "__type": "com.amazon.kiro.runtimeservice#ValidationException",
+          "message": "conversationState.currentMessage must carry a userInputMessage",
+          "reason": "REQUEST_BODY_INVALID"
+        }
+      ],
+      "events": [],
+      "httpStatus": 400,
+      "metadata": [],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "currentMessage": {
+          "assistantResponseMessage": {
+            "content": "PREFIX_"
+          }
+        },
+        "history": [
+          {
+            "userInputMessage": {
+              "content": "Reply with exactly PREFIX_SUFFIX_OK.",
+              "modelId": "claude-haiku-5.5",
+              "origin": "KIRO_CLI"
+            }
+          }
+        ]
+      },
+      "patchPointer": "/conversationState",
+      "prompt": "Reply with exactly PREFIX_SUFFIX_OK.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "b4eef3f0-1ca9-411e-aa5e-66e3c624a99c",
+      "system": "",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "",
+      "auditTools": [],
+      "bodySha256": "8887bd283f0f0199d051ba8d033d5d6f8e74401fd14f761070143bb976affd00",
+      "case": "assistant-history-prefill",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 646,
+      "endpoint": "cli",
+      "errors": [
+        {
+          "__type": "com.amazon.kiro.runtimeservice#ValidationException",
+          "message": "Improperly formed request.",
+          "reason": "REQUEST_BODY_INVALID"
+        }
+      ],
+      "events": [],
+      "httpStatus": 400,
+      "metadata": [],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "currentMessage": {
+          "userInputMessage": {
+            "content": "",
+            "modelId": "claude-haiku-5.5",
+            "origin": "KIRO_CLI"
+          }
+        },
+        "history": [
+          {
+            "userInputMessage": {
+              "content": "Reply with exactly PREFIX_SUFFIX_OK.",
+              "modelId": "claude-haiku-5.5",
+              "origin": "KIRO_CLI"
+            }
+          },
+          {
+            "assistantResponseMessage": {
+              "content": "PREFIX_"
+            }
+          }
+        ]
+      },
+      "patchPointer": "/conversationState",
+      "prompt": "Reply with exactly PREFIX_SUFFIX_OK.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "23049ae5-f11b-4c87-9543-7aea1acc1ad9",
+      "system": "",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "",
+      "auditTools": [
+        {
+          "toolSpecification": {
+            "description": "Echo probe; set value to NAME_OK. No action will execute.",
+            "inputSchema": {
+              "json": {
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              }
+            },
+            "name": "probe_abcdefghijabcdefghijabcdefghijabcdefghijabcdefghij12345678"
+          }
+        }
+      ],
+      "bodySha256": "941976bf2e80abbc05f36f5b77a7502c5749f0891448a693439c266276c88984",
+      "case": "name-64-distinct",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 2046,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "metadata": [
+        {
+          "stopReason": "TOOL_USE"
+        }
+      ],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "additionalModelRequestFields": {
+          "max_tokens": 1024,
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Call the tool named probe_abcdefghijabcdefghijabcdefghijabcdefghijabcdefghij12345678 exactly once with value NAME_OK. Do not answer in text.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "db3c480c-d41b-4ace-a411-936a48cdd496",
+      "system": "",
+      "toolCalls": {
+        "toolu_bdrk_01LZySpgsXXjtwpXYsHKVJnM": {
+          "complete": true,
+          "input": {
+            "value": "NAME_OK"
+          },
+          "name": "probe_abcdefghijabcdefghijabcdefghijabcdefghijabcdefghij12345678",
+          "rawInput": "{\"value\": \"NAME_OK\"}"
+        }
+      },
+      "wireUnchanged": true,
+      "returnedNamesDeclared": [
+        true
+      ]
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "",
+      "auditTools": [
+        {
+          "toolSpecification": {
+            "description": "Echo probe; set value to NAME_OK. No action will execute.",
+            "inputSchema": {
+              "json": {
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              }
+            },
+            "name": "mcp__files__xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          }
+        }
+      ],
+      "bodySha256": "3591504d91908b46a4af3f84a4325a8ee0d8c1e0e150336041c1923161c41318",
+      "case": "name-64-mcp",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1769,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "metadata": [
+        {
+          "stopReason": "TOOL_USE"
+        }
+      ],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "additionalModelRequestFields": {
+          "max_tokens": 1024,
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      "patchPointer": "",
+      "prompt": "Call the tool named mcp__files__xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx exactly once with value NAME_OK. Do not answer in text.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "0b52ee1e-341b-4832-bf81-cd5f725358cd",
+      "system": "",
+      "toolCalls": {
+        "toolu_bdrk_01NgfJ5xUnd18ucPvi7e4RV8": {
+          "complete": true,
+          "input": {
+            "value": "NAME_OK"
+          },
+          "name": "mcp__files__xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "rawInput": "{\"value\": \"NAME_OK\"}"
+        }
+      },
+      "wireUnchanged": true,
+      "returnedNamesDeclared": [
+        true
+      ]
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "HISTORY_OK",
+      "auditTools": [],
+      "bodySha256": "0dcd57d133cbd90925cb8d653752a64c4aed59a0d5e6a5e6fba331248f28c8bd",
+      "case": "current-result-no-definition",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 2115,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "metadata": [
+        {
+          "stopReason": "END_TURN"
+        }
+      ],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "currentMessage": {
+          "userInputMessage": {
+            "content": "Do not call tools. Reply with exactly the tool result.",
+            "modelId": "claude-haiku-5.5",
+            "origin": "KIRO_CLI",
+            "userInputMessageContext": {
+              "toolResults": [
+                {
+                  "content": [
+                    {
+                      "text": "HISTORY_OK"
+                    }
+                  ],
+                  "status": "success",
+                  "toolUseId": "history-probe-id"
+                }
+              ]
+            }
+          }
+        },
+        "history": [
+          {
+            "userInputMessage": {
+              "content": "Call old_probe with value HISTORY_OK.",
+              "modelId": "claude-haiku-5.5",
+              "origin": "KIRO_CLI"
+            }
+          },
+          {
+            "assistantResponseMessage": {
+              "content": " ",
+              "toolUses": [
+                {
+                  "input": {
+                    "value": "HISTORY_OK"
+                  },
+                  "name": "old_probe",
+                  "toolUseId": "history-probe-id"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "patchPointer": "/conversationState",
+      "prompt": "Do not call tools. Reply with exactly the tool result.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "ef796d38-1f94-4875-845a-caf6b7d20720",
+      "system": "",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "",
+      "auditTools": [
+        {
+          "toolSpecification": {
+            "description": "Echo probe; set value to HISTORY_OK. No action will execute.",
+            "inputSchema": {
+              "json": {
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              }
+            },
+            "name": "old_probe"
+          }
+        }
+      ],
+      "bodySha256": "593b257f122ab71654c189565b0c65edee55310f8ea2e2f73c8644f11e1d0a26",
+      "case": "history-recall-with-definition",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1447,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "metadata": [
+        {
+          "stopReason": "TOOL_USE"
+        }
+      ],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "currentMessage": {
+          "userInputMessage": {
+            "content": "Call old_probe once with value RECALL_OK.",
+            "modelId": "claude-haiku-5.5",
+            "origin": "KIRO_CLI",
+            "userInputMessageContext": {
+              "toolResults": [
+                {
+                  "content": [
+                    {
+                      "text": "HISTORY_OK"
+                    }
+                  ],
+                  "status": "success",
+                  "toolUseId": "history-probe-id"
+                }
+              ]
+            }
+          }
+        },
+        "history": [
+          {
+            "userInputMessage": {
+              "content": "Call old_probe with value HISTORY_OK.",
+              "modelId": "claude-haiku-5.5",
+              "origin": "KIRO_CLI"
+            }
+          },
+          {
+            "assistantResponseMessage": {
+              "content": " ",
+              "toolUses": [
+                {
+                  "input": {
+                    "value": "HISTORY_OK"
+                  },
+                  "name": "old_probe",
+                  "toolUseId": "history-probe-id"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "patchPointer": "/conversationState",
+      "prompt": "Call old_probe once with value RECALL_OK.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "a8b2fad3-8cbc-4906-a0de-9dfa615d78d9",
+      "system": "",
+      "toolCalls": {
+        "toolu_bdrk_01Rqpr9YRvmvRZGepbAHY7GV": {
+          "complete": true,
+          "input": {
+            "value": "RECALL_OK"
+          },
+          "name": "old_probe",
+          "rawInput": "{\"value\": \"RECALL_OK\"}"
+        }
+      },
+      "wireUnchanged": true,
+      "returnedNamesDeclared": [
+        true
+      ]
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "",
+      "auditTools": [],
+      "bodySha256": "7f92069bfdb8993074a0865c4f65f47e3f5eda8607c0b5fe8e504dff27ea5c1a",
+      "case": "history-recall-no-definition",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1363,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "metadata": [
+        {
+          "stopReason": "END_TURN"
+        }
+      ],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "currentMessage": {
+          "userInputMessage": {
+            "content": "Call old_probe once with value RECALL_OK.",
+            "modelId": "claude-haiku-5.5",
+            "origin": "KIRO_CLI",
+            "userInputMessageContext": {
+              "toolResults": [
+                {
+                  "content": [
+                    {
+                      "text": "HISTORY_OK"
+                    }
+                  ],
+                  "status": "success",
+                  "toolUseId": "history-probe-id"
+                }
+              ]
+            }
+          }
+        },
+        "history": [
+          {
+            "userInputMessage": {
+              "content": "Call old_probe with value HISTORY_OK.",
+              "modelId": "claude-haiku-5.5",
+              "origin": "KIRO_CLI"
+            }
+          },
+          {
+            "assistantResponseMessage": {
+              "content": " ",
+              "toolUses": [
+                {
+                  "input": {
+                    "value": "HISTORY_OK"
+                  },
+                  "name": "old_probe",
+                  "toolUseId": "history-probe-id"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "patchPointer": "/conversationState",
+      "prompt": "Call old_probe once with value RECALL_OK.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "d079d99b-240f-4fcb-9ff0-715fc7215980",
+      "system": "",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "LEGACY_OK",
+      "auditTools": [],
+      "bodySha256": "645734c825838055f537705c4768d264238e06e8e5a363a0378fccd87b893277",
+      "case": "legacy-budget-24576",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 2112,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "metadata": [
+        {
+          "stopReason": "END_TURN"
+        }
+      ],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "history": [
+          {
+            "userInputMessage": {
+              "content": "<thinking_mode>enabled</thinking_mode><max_thinking_length>24576</max_thinking_length>",
+              "modelId": "claude-haiku-5.5",
+              "origin": "KIRO_CLI"
+            }
+          },
+          {
+            "assistantResponseMessage": {
+              "content": "I will follow these instructions."
+            }
+          }
+        ]
+      },
+      "patchPointer": "/conversationState",
+      "prompt": "Reply with exactly LEGACY_OK.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "d6144f7e-d3d5-4286-905f-157c9aaea0e4",
+      "system": "",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "LEGACY_OK",
+      "auditTools": [],
+      "bodySha256": "5ad65b614e099fe2719db70b496f47e392ef629e489f0cf1d1fb7e22f7cc7f92",
+      "case": "legacy-budget-30000",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1547,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "metadata": [
+        {
+          "stopReason": "END_TURN"
+        }
+      ],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "history": [
+          {
+            "userInputMessage": {
+              "content": "<thinking_mode>enabled</thinking_mode><max_thinking_length>30000</max_thinking_length>",
+              "modelId": "claude-haiku-5.5",
+              "origin": "KIRO_CLI"
+            }
+          },
+          {
+            "assistantResponseMessage": {
+              "content": "I will follow these instructions."
+            }
+          }
+        ]
+      },
+      "patchPointer": "/conversationState",
+      "prompt": "Reply with exactly LEGACY_OK.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "2055dead-802a-4261-8a7b-f560ed6185da",
+      "system": "",
+      "toolCalls": {},
+      "wireUnchanged": true
+    },
+    {
+      "actualUserContent": null,
+      "assistantText": "LEGACY_OK",
+      "auditTools": [],
+      "bodySha256": "90bb0bf71b59c991a13bd6c7171000019457caac187283f6d9036a7a298533a5",
+      "case": "legacy-budget-invalid",
+      "descriptionChars": 46,
+      "descriptionSha256": "af01876d02e76c6d1225dc0e6540b02967f7d676a4c573259fd015d9ba2812c1",
+      "descriptionTail": "Harmless echo probe. No tool will be executed.",
+      "durationMs": 1400,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "assistantResponseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "metadata": [
+        {
+          "stopReason": "END_TURN"
+        }
+      ],
+      "model": "claude-haiku-5.5",
+      "outputObservation": null,
+      "patch": {
+        "history": [
+          {
+            "userInputMessage": {
+              "content": "<thinking_mode>enabled</thinking_mode><max_thinking_length>NOT_A_NUMBER</max_thinking_length>",
+              "modelId": "claude-haiku-5.5",
+              "origin": "KIRO_CLI"
+            }
+          },
+          {
+            "assistantResponseMessage": {
+              "content": "I will follow these instructions."
+            }
+          }
+        ]
+      },
+      "patchPointer": "/conversationState",
+      "prompt": "Reply with exactly LEGACY_OK.",
+      "recoveryVariant": null,
+      "region": "us-east-1",
+      "requestId": "6be3d326-4713-4cf0-8b6a-130e3e9ef791",
+      "system": "",
+      "toolCalls": {},
+      "wireUnchanged": true
+    }
+  ]
+}

@@ -80,10 +80,33 @@ fn context(body: &Value) -> &Value {
 fn tools(body: &Value) -> Vec<&Value> {
     context(body)["tools"]
         .as_array()
-        .unwrap()
-        .iter()
+        .into_iter()
+        .flatten()
         .map(|t| &t["toolSpecification"])
         .collect()
+}
+
+#[test]
+fn case_distinct_and_64_character_tools_reach_the_final_wire_unchanged() {
+    let name64 = format!("mcp__files__{}", "x".repeat(52));
+    assert_eq!(name64.len(), 64);
+    let mut request = fixture("lookup");
+    request["tools"] = json!([
+        {"name":"Probe","description":"upper","input_schema":{"type":"object"}},
+        {"name":"probe","description":"lower","input_schema":{"type":"object"}},
+        {"name":name64,"description":"64 characters","input_schema":{"type":"object"}}
+    ]);
+    for native in [false, true] {
+        let (body, mapping) = wire(&request, native);
+        let names: Vec<_> = tools(&body)
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["Probe", "probe", name64.as_str()]);
+        assert!(!mapping.contains_key("Probe"));
+        assert!(!mapping.contains_key("probe"));
+        assert!(!mapping.values().any(|name| name == &name64));
+    }
 }
 
 fn calls(body: &Value) -> Vec<&Value> {
@@ -230,23 +253,26 @@ fn compatibility_invalid_tool_names_are_reversible_and_legal() {
 
 #[test]
 fn compatibility_shortening_collision_keeps_names_and_reverse_map_distinct() {
-    let request = fixture("shortening collision");
-    let long = request["tools"][0]["name"].as_str().unwrap();
-    let alias = request["tools"][1]["name"].as_str().unwrap();
+    let mut request = fixture("shortening collision");
+    let long = request["tools"][0]["name"].as_str().unwrap().to_owned();
     let digest = hex::encode(Sha256::digest(long.as_bytes()));
-    assert_eq!(alias, format!("{}_{}", &long[..54], &digest[..8]));
+    let alias = format!("{}_{}", &long[..55], &digest[..8]);
+    request["tools"][1]["name"] = alias.clone().into();
     for native in [false, true] {
         let (body, mapping) = wire(&request, native);
         let definitions = tools(&body);
         assert_eq!(definitions.len(), 2);
         let shortened = definitions[0]["name"].as_str().unwrap();
-        assert_ne!(shortened, alias);
+        assert_ne!(shortened, alias.as_str());
         assert_eq!(definitions[1]["name"], alias);
         assert_eq!(calls(&body)[0]["name"], shortened);
-        assert_eq!(mapping.get(shortened).map(String::as_str), Some(long));
-        assert!(!mapping.contains_key(alias));
-        assert_response_name(&mapping, shortened, long);
-        assert_response_name(&mapping, alias, alias);
+        assert_eq!(
+            mapping.get(shortened).map(String::as_str),
+            Some(long.as_str())
+        );
+        assert!(!mapping.contains_key(&alias));
+        assert_response_name(&mapping, shortened, &long);
+        assert_response_name(&mapping, &alias, &alias);
     }
 }
 
@@ -369,7 +395,7 @@ fn compatibility_schema_constraints_are_forwarded_without_local_rejection() {
 }
 
 #[test]
-fn compatibility_name_collisions_include_history_only_and_case_insensitive_names() {
+fn compatibility_name_collisions_preserve_case_and_history_without_definitions() {
     for reverse in [false, true] {
         let mut request = fixture("functions.exec_command");
         let mut legal = fixture("lookup")["tools"][0].clone();
@@ -385,7 +411,7 @@ fn compatibility_name_collisions_include_history_only_and_case_insensitive_names
             let (body, mapping) = wire(&request, native);
             let names: Vec<_> = tools(&body)
                 .iter()
-                .map(|tool| tool["name"].as_str().unwrap().to_ascii_lowercase())
+                .map(|tool| tool["name"].as_str().unwrap().to_owned())
                 .collect();
             let unique: std::collections::HashSet<_> = names.iter().collect();
             assert_eq!(unique.len(), 3);
@@ -397,7 +423,7 @@ fn compatibility_name_collisions_include_history_only_and_case_insensitive_names
     let mut request = fixture("functions.exec_command");
     request["tools"] = json!([]);
     let (body, mapping) = wire(&request, false);
-    assert_eq!(tools(&body)[0]["name"], calls(&body)[0]["name"]);
+    assert!(tools(&body).is_empty());
     assert_response_name(
         &mapping,
         calls(&body)[0]["name"].as_str().unwrap(),

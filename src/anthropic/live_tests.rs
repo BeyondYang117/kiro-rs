@@ -1145,22 +1145,32 @@ fn enforcement_evidence_contains_complete_upstream_counterexamples() {
 #[tokio::test]
 #[ignore = "Live tool description and generation controls probe consumes credits"]
 async fn live_raw_tool_controls_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(false, false).await
+    raw_tool_controls_probe(false, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live tool output budget comparison consumes credits"]
 async fn live_raw_tool_output_budget_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(true, false).await
+    raw_tool_controls_probe(true, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live truncation recovery comparison consumes credits"]
 async fn live_raw_tool_recovery_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(true, true).await
+    raw_tool_controls_probe(true, true, false).await
 }
 
-async fn raw_tool_controls_probe(output_budget: bool, recovery_probe: bool) -> anyhow::Result<()> {
+#[tokio::test]
+#[ignore = "Live request rewrite audit consumes credits"]
+async fn live_raw_request_rewrite_probe() -> anyhow::Result<()> {
+    raw_tool_controls_probe(false, false, true).await
+}
+
+async fn raw_tool_controls_probe(
+    output_budget: bool,
+    recovery_probe: bool,
+    rewrite_probe: bool,
+) -> anyhow::Result<()> {
     use crate::kiro::{machine_id, parser::decoder::EventStreamDecoder};
     use futures::StreamExt;
     use sha2::{Digest, Sha256};
@@ -1411,6 +1421,153 @@ async fn raw_tool_controls_probe(output_budget: bool, recovery_probe: bool) -> a
             ));
         }
     }
+    let mut rewrite_tools = HashMap::new();
+    if rewrite_probe {
+        cases.clear();
+        let spec = |name: &str, marker: &str| json!({"toolSpecification":{"name":name,"description":format!("Echo probe; set value to {marker}. No action will execute."),"inputSchema":{"json":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}}}});
+        for (label, name) in [
+            ("name-63", "n".repeat(63)),
+            ("name-64", "n".repeat(64)),
+            ("name-65", "n".repeat(65)),
+            ("name-128", "n".repeat(128)),
+            ("name-dot", "probe.echo".into()),
+            ("name-colon", "probe:echo".into()),
+            ("name-unicode", "工具回声".into()),
+            (
+                "name-64-distinct",
+                format!("probe_{}", "abcdefghij".repeat(5) + "12345678"),
+            ),
+            ("name-64-mcp", format!("mcp__files__{}", "x".repeat(52))),
+        ] {
+            rewrite_tools.insert(label.to_owned(), json!([spec(&name, "NAME_OK")]));
+            cases.push((label.into(), "".into(), json!({"additionalModelRequestFields":{"max_tokens":1024,"thinking":{"type":"disabled"}}}), format!("Call the tool named {name} exactly once with value NAME_OK. Do not answer in text."), None));
+        }
+        for (label, tools, prompt) in [
+            (
+                "case-distinct",
+                json!([spec("Probe", "UPPER_OK"), spec("probe", "LOWER_OK")]),
+                "Call Probe with value UPPER_OK and probe with value LOWER_OK. Use both exact names, once each.",
+            ),
+            (
+                "duplicate-exact",
+                json!([spec("probe_echo", "NAME_OK"), spec("probe_echo", "NAME_OK")]),
+                "Call probe_echo once with value NAME_OK.",
+            ),
+        ] {
+            rewrite_tools.insert(label.into(), tools);
+            cases.push((label.into(), "".into(), json!({"additionalModelRequestFields":{"max_tokens":1024,"thinking":{"type":"disabled"}}}), prompt.into(), None));
+        }
+        let history = json!([
+            {"userInputMessage":{"content":"Call old_probe with value HISTORY_OK.","modelId":"claude-haiku-5.5","origin":"KIRO_CLI"}},
+            {"assistantResponseMessage":{"content":" ","toolUses":[{"toolUseId":"history-probe-id","name":"old_probe","input":{"value":"HISTORY_OK"}}]}},
+            {"userInputMessage":{"content":"","modelId":"claude-haiku-5.5","origin":"KIRO_CLI","userInputMessageContext":{"toolResults":[{"toolUseId":"history-probe-id","status":"success","content":[{"text":"HISTORY_OK"}]}]}}},
+            {"assistantResponseMessage":{"content":"The recorded tool result was HISTORY_OK."}}
+        ]);
+        for (label, tools) in [
+            (
+                "history-with-definition",
+                json!([spec("old_probe", "HISTORY_OK")]),
+            ),
+            ("history-without-definition", json!([])),
+        ] {
+            rewrite_tools.insert(label.into(), tools);
+            cases.push((
+                label.into(),
+                "/conversationState".into(),
+                json!({"history":history}),
+                "Do not call tools. Reply with exactly the previous tool result.".into(),
+                None,
+            ));
+        }
+        let history = history.as_array().unwrap()[..2].to_vec();
+        let current = json!({"userInputMessage":{"content":"Do not call tools. Reply with exactly the tool result.","modelId":"claude-haiku-5.5","origin":"KIRO_CLI","userInputMessageContext":{"toolResults":[{"toolUseId":"history-probe-id","status":"success","content":[{"text":"HISTORY_OK"}]}]}}});
+        for (label, tools, prompt) in [
+            (
+                "current-result-no-definition",
+                json!([]),
+                "Do not call tools. Reply with exactly the tool result.",
+            ),
+            (
+                "history-recall-with-definition",
+                json!([spec("old_probe", "HISTORY_OK")]),
+                "Call old_probe once with value RECALL_OK.",
+            ),
+            (
+                "history-recall-no-definition",
+                json!([]),
+                "Call old_probe once with value RECALL_OK.",
+            ),
+        ] {
+            rewrite_tools.insert(label.into(), tools);
+            let mut current = current.clone();
+            current["userInputMessage"]["content"] = prompt.into();
+            cases.push((
+                label.into(),
+                "/conversationState".into(),
+                json!({"history":history,"currentMessage":current}),
+                prompt.into(),
+                None,
+            ));
+        }
+        for (label, fields) in [
+            (
+                "native-thinking-enabled-budget-30000",
+                json!({"max_tokens":1024,"thinking":{"type":"enabled","budget_tokens":30000}}),
+            ),
+            (
+                "native-thinking-adaptive-budget-30000",
+                json!({"max_tokens":1024,"thinking":{"type":"adaptive","budget_tokens":30000}}),
+            ),
+            (
+                "native-thinking-display-full",
+                json!({"max_tokens":1024,"thinking":{"type":"disabled","display":"full"}}),
+            ),
+        ] {
+            rewrite_tools.insert(label.into(), json!([]));
+            cases.push((
+                label.into(),
+                "".into(),
+                json!({"additionalModelRequestFields":fields}),
+                "Reply with exactly AUDIT_OK.".into(),
+                None,
+            ));
+        }
+        for (label, budget) in [
+            ("legacy-budget-24576", "24576"),
+            ("legacy-budget-30000", "30000"),
+            ("legacy-budget-invalid", "NOT_A_NUMBER"),
+        ] {
+            rewrite_tools.insert(label.into(), json!([]));
+            cases.push((label.into(), "/conversationState".into(), json!({"history":[
+                {"userInputMessage":{"content":format!("<thinking_mode>enabled</thinking_mode><max_thinking_length>{budget}</max_thinking_length>"),"modelId":"claude-haiku-5.5","origin":"KIRO_CLI"}},
+                {"assistantResponseMessage":{"content":"I will follow these instructions."}}
+            ]}), "Reply with exactly LEGACY_OK.".into(), None));
+        }
+        for (label, current) in [
+            (
+                "assistant-current",
+                json!({"assistantResponseMessage":{"content":"PREFIX_"}}),
+            ),
+            (
+                "assistant-history-prefill",
+                json!({"userInputMessage":{"content":"","modelId":"claude-haiku-5.5","origin":"KIRO_CLI"}}),
+            ),
+        ] {
+            rewrite_tools.insert(label.into(), json!([]));
+            let history = if label == "assistant-current" {
+                json!([{ "userInputMessage":{"content":"Reply with exactly PREFIX_SUFFIX_OK.","modelId":"claude-haiku-5.5","origin":"KIRO_CLI"}}])
+            } else {
+                json!([{ "userInputMessage":{"content":"Reply with exactly PREFIX_SUFFIX_OK.","modelId":"claude-haiku-5.5","origin":"KIRO_CLI"}}, {"assistantResponseMessage":{"content":"PREFIX_"}}])
+            };
+            cases.push((
+                label.into(),
+                "/conversationState".into(),
+                json!({"history":history,"currentMessage":current}),
+                "Reply with exactly PREFIX_SUFFIX_OK.".into(),
+                None,
+            ));
+        }
+    }
     let mut failed_recovery_body: Option<Value> = None;
     let selected = std::env::var("KIRO_CONTROLS_PROBE_CASES").ok();
     let mut results = Vec::new();
@@ -1464,6 +1621,9 @@ async fn raw_tool_controls_probe(output_budget: bool, recovery_probe: bool) -> a
             .context("Not object")?;
         for (key, value) in patch.as_object().unwrap() {
             target.insert(key.clone(), value.clone());
+        }
+        if rewrite_probe && outgoing.pointer(context_pointer).is_some() {
+            outgoing.pointer_mut(context_pointer).unwrap()["tools"] = rewrite_tools[&label].clone();
         }
         if recovery_probe && label != "recovery-baseline" {
             let baseline = failed_recovery_body
@@ -1527,16 +1687,26 @@ async fn raw_tool_controls_probe(output_budget: bool, recovery_probe: bool) -> a
             .pointer("/conversationState/history")
             .and_then(Value::as_array);
         ensure!(
-            if system.is_empty() {
-                history.is_none_or(|history| history.is_empty())
-            } else {
-                history.is_some_and(|history| history[0]["userInputMessage"]["content"] == system)
-            },
+            rewrite_probe
+                || if system.is_empty() {
+                    history.is_none_or(|history| history.is_empty())
+                } else {
+                    history
+                        .is_some_and(|history| history[0]["userInputMessage"]["content"] == system)
+                },
             "Unexpected injected history policy"
         );
         for (key, value) in patch.as_object().unwrap() {
+            let mut expected = value.clone();
+            if rewrite_probe
+                && key == "currentMessage"
+                && expected.get("userInputMessage").is_some()
+            {
+                expected["userInputMessage"]["userInputMessageContext"]["tools"] =
+                    rewrite_tools[&label].clone();
+            }
             ensure!(
-                actual.pointer(&pointer).unwrap().get(key) == Some(value),
+                actual.pointer(&pointer).unwrap().get(key) == Some(&expected),
                 "Control was modified"
             );
         }
@@ -1545,8 +1715,17 @@ async fn raw_tool_controls_probe(output_budget: bool, recovery_probe: bool) -> a
                 "{context_pointer}/tools/0/toolSpecification/description"
             ))
             .and_then(Value::as_str)
-            .unwrap();
-        ensure!(wire_description == description, "Description was modified");
+            .unwrap_or_default();
+        ensure!(
+            rewrite_probe || wire_description == description,
+            "Description was modified"
+        );
+        if rewrite_probe && actual.pointer(context_pointer).is_some() {
+            ensure!(
+                actual.pointer(context_pointer).unwrap()["tools"] == rewrite_tools[&label],
+                "Audit tools were rewritten"
+            );
+        }
         let digest = hex::encode(Sha256::digest(bytes));
         eprintln!("RAW_CONTROLS sending {label}: wire_unchanged=true sha256={digest}");
         let start = std::time::Instant::now();
@@ -1655,6 +1834,7 @@ async fn raw_tool_controls_probe(output_budget: bool, recovery_probe: bool) -> a
             "system":system,"metadata":metadata,"outputObservation":output_observation,
             "actualUserContent":if recovery_probe { actual.pointer("/conversationState/currentMessage/userInputMessage/content") } else { None },
             "recoveryVariant":recovery_variants.get(&label),
+            "auditTools":rewrite_tools.get(&label),
             "descriptionChars":description.chars().count(),"descriptionSha256":hex::encode(Sha256::digest(description.as_bytes())),
             "descriptionTail":description.chars().rev().take(65).collect::<String>().chars().rev().collect::<String>(),
             "bodySha256":digest,"httpStatus":status.as_u16(),"requestId":request_id,"durationMs":start.elapsed().as_millis(),

@@ -212,6 +212,7 @@ pub enum ConversionError {
     UnsupportedModel(String),
     EmptyMessages,
     InvalidToolFormat(String),
+    InvalidMessageFormat(String),
 }
 
 impl std::fmt::Display for ConversionError {
@@ -220,6 +221,7 @@ impl std::fmt::Display for ConversionError {
             ConversionError::UnsupportedModel(model) => write!(f, "模型不支持: {}", model),
             ConversionError::EmptyMessages => write!(f, "消息列表为空"),
             ConversionError::InvalidToolFormat(message) => write!(f, "工具格式错误: {message}"),
+            ConversionError::InvalidMessageFormat(message) => write!(f, "消息格式错误: {message}"),
         }
     }
 }
@@ -257,41 +259,6 @@ fn extract_session_id(user_id: &str) -> Option<String> {
 /// 仅接受标准的 36 字节 UUID 格式，并验证十六进制字符与分隔符位置。
 fn is_valid_uuid(s: &str) -> bool {
     s.len() == 36 && Uuid::parse_str(s).is_ok()
-}
-
-/// 收集历史消息中使用的所有工具名称
-fn collect_history_tool_names(history: &[Message]) -> Vec<String> {
-    let mut tool_names = Vec::new();
-
-    for msg in history {
-        if let Message::Assistant(assistant_msg) = msg
-            && let Some(ref tool_uses) = assistant_msg.assistant_response_message.tool_uses
-        {
-            for tool_use in tool_uses {
-                if !tool_names.contains(&tool_use.name) {
-                    tool_names.push(tool_use.name.clone());
-                }
-            }
-        }
-    }
-
-    tool_names
-}
-
-/// 为历史中使用但不在 tools 列表中的工具创建占位符定义
-/// Kiro API 要求：历史消息中引用的工具必须在 currentMessage.tools 中有定义
-fn create_placeholder_tool(name: &str) -> Tool {
-    Tool {
-        tool_specification: ToolSpecification {
-            name: name.to_string(),
-            description: "Tool used in conversation history".to_string(),
-            input_schema: InputSchema::from_json(serde_json::json!({
-                "$schema": "http://json-schema.org/draft-07/schema#",
-                "type": "object",
-                "properties": {}
-            })),
-        },
-    }
 }
 
 /// Validate raw blocks before permissive ContentBlock decoding can silently discard them.
@@ -362,15 +329,26 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
         return Err(ConversionError::EmptyMessages);
     }
 
-    // 2.5. 预处理 prefill：如果末尾是 assistant，静默丢弃并截断到最后一条 user
-    // Claude 4.x 已弃用 assistant prefill，Kiro API 也不支持
+    // Kiro currentMessage requires userInputMessage in real CLI probes. There is
+    // no verified prefill mapping; do not silently discard caller content.
     let messages: &[_] = if req.messages.last().is_some_and(|m| m.role != "user") {
-        tracing::info!("检测到末尾 assistant 消息（prefill），静默丢弃");
         let last_user_idx = req
             .messages
             .iter()
             .rposition(|m| m.role == "user")
             .ok_or(ConversionError::EmptyMessages)?;
+        for message in &req.messages[last_user_idx + 1..] {
+            let empty = message.content.as_str().is_some_and(str::is_empty)
+                || message.content.as_array().is_some_and(|blocks| {
+                    blocks
+                        .iter()
+                        .all(|block| block["type"] == "text" && block["text"] == "")
+                });
+            if !empty {
+                return Err(ConversionError::InvalidMessageFormat(
+                    "Non-empty trailing assistant content (prefill) has no verified Kiro mapping in this proxy; end the request with a user message".into()));
+            }
+        }
         &req.messages[..=last_user_idx]
     } else {
         &req.messages
@@ -389,14 +367,13 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
         }
         let mut names = HashMap::new();
         for (index, tool) in tools.iter().enumerate() {
-            let mut definition = serde_json::to_value(tool).expect("tool definition is JSON");
-            definition["name"] = serde_json::json!(tool.name.to_lowercase());
+            let definition = serde_json::to_value(tool).expect("tool definition is JSON");
             let conflict = names
-                .insert(tool.name.to_lowercase(), definition.clone())
+                .insert(tool.name.clone(), definition.clone())
                 .is_some_and(|previous| previous != definition);
             if tool.name.trim().is_empty() || conflict {
                 return Err(ConversionError::InvalidToolFormat(format!(
-                    "tools[{index}].name is empty or has conflicting definitions (case-insensitive)"
+                    "tools[{index}].name is empty or has conflicting definitions"
                 )));
             }
         }
@@ -431,11 +408,7 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
     // Reserve every existing legal name before allocating aliases, including
     // history-only tools, so a shortened/sanitized alias cannot steal one.
     let mut reserve = |name: &str| {
-        if valid_tool_name(name)
-            && !tool_name_map
-                .keys()
-                .any(|key: &String| key.eq_ignore_ascii_case(name))
-        {
+        if valid_tool_name(name) && !tool_name_map.keys().any(|key: &String| key == name) {
             tool_name_map.insert(name.to_owned(), name.to_owned());
         }
     };
@@ -453,7 +426,7 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
             }
         }
     }
-    let mut tools = convert_tools(&req.tools, &mut tool_name_map);
+    let tools = convert_tools(&req.tools, &mut tool_name_map);
 
     // 7. 构建历史消息（需要先构建，以便收集历史中使用的工具）
     let mut history = build_history(
@@ -473,21 +446,6 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
 
     // 9. 从历史中移除孤立的 tool_use（Kiro API 要求 tool_use 必须有对应的 tool_result）
     remove_orphaned_tool_uses(&mut history, &orphaned_tool_use_ids);
-
-    // 10. 收集历史中使用的工具名称，为缺失的工具生成占位符定义
-    // Kiro API 要求：历史消息中引用的工具必须在 tools 列表中有定义
-    // 注意：Kiro 匹配工具名称时忽略大小写，所以这里也需要忽略大小写比较
-    let history_tool_names = collect_history_tool_names(&history);
-    let mut existing_tool_names: std::collections::HashSet<_> = tools
-        .iter()
-        .map(|t| t.tool_specification.name.to_lowercase())
-        .collect();
-
-    for tool_name in history_tool_names {
-        if existing_tool_names.insert(tool_name.to_lowercase()) {
-            tools.push(create_placeholder_tool(&tool_name));
-        }
-    }
 
     // 11. 构建 UserInputMessageContext
     let mut context = UserInputMessageContext::new();
@@ -911,7 +869,8 @@ fn remove_orphaned_tool_uses(
 }
 
 /// Kiro API 工具名称最大长度限制
-const TOOL_NAME_MAX_LEN: usize = 63;
+// Live CLI/Haiku 5.5 probes accept distinct 64-character names and reject 65.
+const TOOL_NAME_MAX_LEN: usize = 64;
 
 /// 生成确定性短名称：截断前缀 + "_" + 8 位 SHA256 hex
 fn shorten_tool_name(name: &str) -> String {
@@ -919,7 +878,7 @@ fn shorten_tool_name(name: &str) -> String {
     hasher.update(name.as_bytes());
     let hash_hex = format!("{:x}", hasher.finalize());
     let hash_suffix = &hash_hex[..8];
-    // 54 prefix + 1 underscore + 8 hash = 63
+    // 55 prefix + 1 underscore + 8 hash = 64
     let prefix_max = TOOL_NAME_MAX_LEN - 1 - 8;
     let mut prefix_end = name.len().min(prefix_max);
     while !name.is_char_boundary(prefix_end) {
@@ -942,7 +901,7 @@ fn valid_tool_name(name: &str) -> bool {
 fn map_tool_name(name: &str, tool_name_map: &mut HashMap<String, String>) -> String {
     if let Some((alias, _)) = tool_name_map
         .iter()
-        .find(|(_, original)| original.eq_ignore_ascii_case(name))
+        .find(|(_, original)| original.as_str() == name)
     {
         return alias.clone();
     }
@@ -966,10 +925,7 @@ fn map_tool_name(name: &str, tool_name_map: &mut HashMap<String, String>) -> Str
     }
     let base = alias.clone();
     let mut attempt = 0u64;
-    while tool_name_map
-        .keys()
-        .any(|key| key.eq_ignore_ascii_case(&alias))
-    {
+    while tool_name_map.contains_key(&alias) {
         let digest = format!("{:x}", Sha256::digest(name.as_bytes()));
         let suffix = format!("_{}_{attempt}", &digest[..8]);
         alias = format!(
@@ -997,7 +953,7 @@ fn convert_tools(
     let mut names = std::collections::HashSet::new();
     tools
         .iter()
-        .filter(|tool| names.insert(tool.name.to_lowercase()))
+        .filter(|tool| names.insert(tool.name.clone()))
         .map(|t| {
             let schema = serde_json::json!(t.input_schema);
 
@@ -1621,47 +1577,6 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_history_tool_names() {
-        use crate::kiro::model::requests::tool::ToolUseEntry;
-
-        // 创建包含工具使用的历史消息
-        let mut assistant_msg = AssistantMessage::new("I'll read the file.");
-        assistant_msg = assistant_msg.with_tool_uses(vec![
-            ToolUseEntry::new("tool-1", "read")
-                .with_input(serde_json::json!({"path": "/test.txt"})),
-            ToolUseEntry::new("tool-2", "write")
-                .with_input(serde_json::json!({"path": "/out.txt"})),
-        ]);
-
-        let history = vec![
-            Message::User(HistoryUserMessage::new(
-                "Read the file",
-                "claude-sonnet-4.5",
-            )),
-            Message::Assistant(HistoryAssistantMessage {
-                assistant_response_message: assistant_msg,
-            }),
-        ];
-
-        let tool_names = collect_history_tool_names(&history);
-        assert_eq!(tool_names.len(), 2);
-        assert!(tool_names.contains(&"read".to_string()));
-        assert!(tool_names.contains(&"write".to_string()));
-    }
-
-    #[test]
-    fn test_create_placeholder_tool() {
-        let tool = create_placeholder_tool("my_custom_tool");
-
-        assert_eq!(tool.tool_specification.name, "my_custom_tool");
-        assert!(!tool.tool_specification.description.is_empty());
-
-        // 验证 JSON 序列化正确
-        let json = serde_json::to_string(&tool).unwrap();
-        assert!(json.contains("\"name\":\"my_custom_tool\""));
-    }
-
-    #[test]
     fn test_shorten_tool_name_deterministic() {
         let long_name =
             "mcp__some_very_long_server_name__some_very_long_tool_name_that_exceeds_limit";
@@ -1672,7 +1587,7 @@ mod tests {
         assert_eq!(short1, short2, "相同输入应产生相同的短名称");
         assert!(
             short1.len() <= TOOL_NAME_MAX_LEN,
-            "短名称长度应 <= 63，实际 {}",
+            "短名称长度应 <= 64，实际 {}",
             short1.len()
         );
     }
@@ -1835,7 +1750,7 @@ mod tests {
     }
 
     #[test]
-    fn test_history_tools_added_to_tools_list() {
+    fn history_tools_do_not_add_callable_definitions() {
         use super::super::types::Message as AnthropicMessage;
 
         // 创建一个请求，历史中有工具使用，但 tools 列表为空
@@ -1875,18 +1790,17 @@ mod tests {
 
         let result = convert_request(&req).unwrap();
 
-        // 验证 tools 列表中包含了历史中使用的工具的占位符定义
         let tools = &result
             .conversation_state
             .current_message
             .user_input_message
             .user_input_message_context
             .tools;
-
-        assert!(!tools.is_empty(), "tools 列表不应为空");
-        assert!(
-            tools.iter().any(|t| t.tool_specification.name == "read"),
-            "tools 列表应包含 'read' 工具的占位符定义"
+        assert!(tools.is_empty());
+        let wire = serde_json::to_value(result.conversation_state).unwrap();
+        assert_eq!(
+            wire["history"][1]["assistantResponseMessage"]["toolUses"][0]["name"],
+            "read"
         );
     }
 
@@ -2190,7 +2104,7 @@ mod tests {
     }
 
     #[test]
-    fn history_placeholder_names_are_unique_ignoring_case() {
+    fn history_tool_names_preserve_case_without_new_definitions() {
         let req = tool_validation_request(serde_json::json!([
             {"role":"assistant", "content":[
                 {"type":"tool_use", "id":"a", "name":"Read", "input":{}},
@@ -2204,15 +2118,7 @@ mod tests {
         let state = convert_request(&req).unwrap().conversation_state;
         let wire = serde_json::to_value(state).unwrap();
         let context = &wire["currentMessage"]["userInputMessage"]["userInputMessageContext"];
-        assert_eq!(context["tools"].as_array().unwrap().len(), 1);
-        assert_eq!(
-            context["tools"][0]["toolSpecification"]["inputSchema"]["json"],
-            serde_json::json!({
-                "$schema":"http://json-schema.org/draft-07/schema#",
-                "type":"object",
-                "properties":{}
-            })
-        );
+        assert!(context.get("tools").is_none());
         assert_eq!(context["toolResults"].as_array().unwrap().len(), 2);
         let calls = wire["history"][0]["assistantResponseMessage"]["toolUses"]
             .as_array()
@@ -2224,7 +2130,7 @@ mod tests {
 
     #[test]
     fn explicit_tool_definitions_reject_empty_and_conflicting_names() {
-        for names in [vec![""], vec!["Read", "read"]] {
+        for names in [vec![""], vec!["Read", "Read"]] {
             let mut req =
                 tool_validation_request(serde_json::json!([{"role":"user","content":"hi"}]));
             req.tools = Some(
@@ -2250,7 +2156,7 @@ mod tests {
     fn identical_tool_definitions_are_deduplicated() {
         let mut req = tool_validation_request(serde_json::json!([{"role":"user","content":"hi"}]));
         req.tools = Some(
-            ["Read", "read"]
+            ["Read", "Read"]
                 .into_iter()
                 .map(|name| {
                     serde_json::from_value(serde_json::json!({

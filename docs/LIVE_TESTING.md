@@ -218,3 +218,36 @@ cargo test live_raw_tool_recovery_probe --no-default-features -- --ignored --noc
 ```
 
 该测试要求基线确实发生工具截断，否则停止，不把普通请求宣称为真实恢复实测。测试通过表示实验被记录，包含任务未完成的结果。
+
+## 请求改写继续审查
+
+2026-11-15，在 CLI / us-east-1 / `claude-haiku-5.5`，用明确导入的同一账号发送 **24 次**原始请求（13 次 200、11 次 400）。工具、历史与模型参数均在端点/账号转换后注入，再核对实际请求体和 SHA-256，避免被待审查逻辑提前改写。每个用例一次，不自动重试，不执行工具。
+
+| 候选逻辑 | 真实上游结果 | 决定 |
+|----------|--------------|------|
+| 工具名大小写不敏感合并 | `Probe` 与 `probe` 同时被接受，分别返回精确名称和不同标记参数 | 改为精确名称，保留两个定义及调用；仅完全相同名称的相同定义去重 |
+| 工具名上限 63 | 63、64 被接受，65、128 被 400 拒绝；两个不同的 64 字符名字返回精确名称 | 合法名称上限改为 64，更长仍可逆缩名 |
+| 非字母数字/下划线/连字符名称清理 | 点号、冒号、中文均 400 `Invalid tool use format` | 保留可逆别名适配 |
+| 相同工具名重复定义 | 两个完全相同定义也被 400 拒绝 | 保留精确重复去重，冲突精确同名定义仍报错 |
+| 自动补历史工具定义 | 无当前定义时历史结果仍能读取，结果放在 currentMessage 也成功；有定义时可再次调用，无定义时未返回调用 | 移除自动补定义，保留历史及结果，避免擅自扩大当前可用工具，修复 `tool_choice:none` 重新启用历史工具的问题 |
+| Haiku 5.5 原生 thinking 改写及 display 过滤 | `enabled` 不在上游枚举；`adaptive+budget_tokens` 明确拒绝额外字段；`display:full` 不在枚举 | 保留已验证的 native 类型/预算整形和 display 兼容省略，不因这些 400 外推到全部模型 |
+| 旧协议预算压到 24576 | 24576、30000 及 `NOT_A_NUMBER` 标签均返回 `LEGACY_OK` | 移除本地 clamp，保留显式值；接受不证明标签预算严格生效，未宣称新原生能力 |
+| 静默删除末尾 assistant prefill | currentMessage 为 assistant 被明确拒绝；assistant 历史前缀加空 current user 也被拒绝 | 没有有效映射；非空内容明确 400，空占位仍兼容，不再静默丢失调用方内容 |
+
+名称测试还有反例：全为 `n` 的 64 字符工具声明被接受，但模型回了 100 个 `n` 的工具名；随后补测的两个不同 64 字符名称均精确返回。没有把 HTTP 200 当成名字一定正确的保证，也没有新增返回参数 schema 校验。64 字符边界只在本次模型/账号上验证。
+
+离线回归覆盖最终 CLI 原生/旧协议请求、JSON、实时及缓冲 SSE、精确大小写名称、64 字符名、`tool_choice:none` 携带历史工具、非空 prefill 明确报错及空占位兼容。历史名称映射继续保留，单纯历史引用不生成当前可调用工具。
+
+[脱敏原始记录](../testdata/kiro_request_rewrite_audit_live_2026-11-15.json)包含全部注入定义、历史、提示、上游错误、request ID、请求体哈希与原始工具调用。未新增 IDE、跨提供商 reasoning 历史回放、全部模型枚举或压缩边界的真实验证；这些逻辑没有因本轮猜测而改动。旧协议 thinking 标签仅在调用方显式请求 thinking/effort 时沿用，未证明严格生效，也未擅自改成默认原生模式。系统指令转 user/assistant 历史配对属于当前 Kiro 协议映射，本轮未证明存在更优的原生 system 入口。
+
+复测（默认 24 次请求，会消耗额度，单请求 90 秒/1 MiB，无工具执行）：
+
+```sh
+KIRO_LIVE_CREDENTIALS=/absolute/path/credentials.json \
+KIRO_LIVE_CONFIG=/absolute/path/config.json \
+KIRO_LIVE_ACCOUNT_ID=1 \
+KIRO_CONTROLS_PROBE_OUTPUT=/absolute/path/request-rewrite-audit \
+cargo test live_raw_request_rewrite_probe --no-default-features -- --ignored --nocapture
+```
+
+可通过 `KIRO_CONTROLS_PROBE_CASES` 选择记录中的 `case`。测试通过表示记录完成，不代表所有候选被支持或所有返回都符合调用方意图。

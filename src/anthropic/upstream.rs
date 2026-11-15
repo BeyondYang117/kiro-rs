@@ -176,11 +176,11 @@ pub(super) fn response_events(
                 || self.decoder.context_full
                 || self.recoveries >= provider.tool_output_recovery_attempts()
                 || self.decoder.pending_tools.is_empty()
-                || !self.decoder.pending_tools.values().all(|tool| {
-                    self.decoder
-                        .declared_tools
-                        .contains(&tool.name.to_ascii_lowercase())
-                })
+                || !self
+                    .decoder
+                    .pending_tools
+                    .values()
+                    .all(|tool| self.decoder.declared_tools.contains(&tool.name))
             {
                 return Ok(false);
             }
@@ -501,7 +501,7 @@ fn declared_tool_names(request_body: &str) -> HashSet<String> {
         .user_input_message_context
         .tools
         .into_iter()
-        .map(|tool| tool.tool_specification.name.to_ascii_lowercase())
+        .map(|tool| tool.tool_specification.name)
         .collect()
 }
 

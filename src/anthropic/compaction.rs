@@ -3335,6 +3335,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_audit_changes_preserve_names_and_do_not_reenable_history_tools() {
+        let name64 = format!("mcp__files__{}", "x".repeat(52));
+        for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+            for streaming in [false, true] {
+                for choice in [None, Some("none")] {
+                    let mut upstream = mock(frame(
+                        "assistantResponseEvent",
+                        json!({"content":"AUDIT_OK"}),
+                    ))
+                    .await;
+                    upstream.state.cc_buffered_stream = buffered;
+                    let mut payload = json!({"model":"claude-haiku-5-5","max_tokens":1024,"stream":streaming,
+                        "tools":[
+                            {"name":"Probe","description":"upper","input_schema":{"type":"object"}},
+                            {"name":"probe","description":"lower","input_schema":{"type":"object"}},
+                            {"name":name64,"input_schema":{"type":"object"}}
+                        ],
+                        "messages":[{"role":"user","content":"call old_probe"},
+                            {"role":"assistant","content":[{"type":"tool_use","id":"old-call","name":"old_probe","input":{}}]},
+                            {"role":"user","content":[{"type":"tool_result","tool_use_id":"old-call","content":"OLD_OK"}]}]});
+                    if let Some(choice) = choice {
+                        payload["tool_choice"] = json!({"type":choice});
+                    }
+                    let response = dispatch(upstream.state.clone(), request(payload), cc).await;
+                    assert_eq!(response.status(), StatusCode::OK);
+                    let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                    assert!(!String::from_utf8_lossy(&bytes).contains("event: error"));
+                    let requests = upstream.requests.lock().unwrap();
+                    assert_eq!(requests.len(), 1);
+                    let context = requests[0].pointer("/conversationState/currentMessage/userInputMessage/userInputMessageContext").unwrap();
+                    if choice.is_some() {
+                        assert!(context.get("tools").is_none());
+                    } else {
+                        let names: Vec<_> = context["tools"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|tool| tool["toolSpecification"]["name"].as_str().unwrap())
+                            .collect();
+                        assert_eq!(names, ["Probe", "probe", name64.as_str()]);
+                    }
+                    assert_eq!(requests[0].pointer("/conversationState/history/1/assistantResponseMessage/toolUses/0/name").and_then(Value::as_str), Some("old_probe"));
+                    assert_eq!(context["toolResults"][0]["content"][0]["text"], "OLD_OK");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn nonempty_assistant_prefill_is_reported_before_upstream() {
+        for cc in [false, true] {
+            for content in [
+                json!("PREFIX_"),
+                json!([{"type":"text","text":"PREFIX_"}]),
+                json!([{"type":"thinking","thinking":"retain this","signature":"sig"}]),
+            ] {
+                let upstream = mock(frame(
+                    "assistantResponseEvent",
+                    json!({"content":"unexpected"}),
+                ))
+                .await;
+                let response = dispatch(upstream.state.clone(), request(json!({"model":"claude-haiku-5-5","max_tokens":1024,
+                    "messages":[{"role":"user","content":"continue"},{"role":"assistant","content":content}]})), cc).await;
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                assert!(String::from_utf8_lossy(&bytes).contains("prefill"));
+                assert!(upstream.requests.lock().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn tool_schemas_reach_upstream_without_normalization_or_rejection() {
         let description = format!("{} END_MARKER", "长".repeat(20000));
         for schema in [

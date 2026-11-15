@@ -196,7 +196,7 @@ pub(super) fn legacy_thinking_body(body: &str) -> String {
             Some("enabled") => format!(
                 "<thinking_mode>enabled</thinking_mode><max_thinking_length>{}</max_thinking_length>",
                 fields.pointer("/thinking/budget_tokens").and_then(Value::as_i64)
-                    .unwrap_or(20_000).min(24_576)
+                    .unwrap_or(20_000)
             ),
             Some("adaptive") => "<thinking_mode>adaptive</thinking_mode>".to_owned(),
             Some("between_tools") => "<thinking_mode>between_tools</thinking_mode>".to_owned(),
@@ -360,6 +360,17 @@ mod tests {
         let result = transform(body, false);
         assert!(result.get("additionalModelRequestFields").is_none());
         assert!(result["conversationState"].get("history").is_none());
+    }
+
+    #[test]
+    fn legacy_explicit_thinking_budget_is_not_capped_by_proxy() {
+        let body = json!({"conversationState":{"currentMessage":{"userInputMessage":{"content":"question","modelId":"claude-haiku-5.5"}}},
+            "additionalModelRequestFields":{"thinking":{"type":"enabled","budget_tokens":30000}}});
+        let wire = transform(body, false);
+        assert_eq!(
+            wire["conversationState"]["history"][0]["userInputMessage"]["content"],
+            "<thinking_mode>enabled</thinking_mode><max_thinking_length>30000</max_thinking_length>"
+        );
     }
 
     #[test]
