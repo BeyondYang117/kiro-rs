@@ -1,0 +1,471 @@
+{
+  "testedAt": "2026-11-15",
+  "transport": "Direct reqwest Request via production endpoint headers and body shaping; provider schema adaptation deliberately bypassed. Entire tool schema compared against literal HTTP body bytes before executing that same Request.",
+  "scope": "One imported account; cli; us-east-1; claude-haiku-5.5. Acceptance and completed tool calls only; strict schema enforcement not tested.",
+  "cases": [
+    {
+      "bodySha256": "df09b3c8473775b78b4cc2da028535cfeb1759a2fa3bbf06e19bfdc64891c26a",
+      "case": "root-absent",
+      "contentType": "application/vnd.amazon.eventstream",
+      "durationMs": 3680,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "region": "us-east-1",
+      "requestId": "9413a8e7-e656-4718-a863-c2aa839a5b96",
+      "schemaUnchanged": true,
+      "toolComplete": true,
+      "toolInput": "{\"capabilities\": {\"read\":\"KIRO_SCHEMA_OK\"}}",
+      "schema": {
+        "properties": {
+          "capabilities": {
+            "properties": {
+              "read": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "read"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "bodySha256": "f6a906b711febc09ae93f52dbc9232ab16ab4f713a6c940a67c1430b111ef3c8",
+      "case": "root-true",
+      "contentType": "application/vnd.amazon.eventstream",
+      "durationMs": 1247,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "region": "us-east-1",
+      "requestId": "5ba1686a-7045-4197-a1cd-a26a8dea0473",
+      "schemaUnchanged": true,
+      "toolComplete": true,
+      "toolInput": "{\"capabilities\": {\"read\":\"KIRO_SCHEMA_OK\"}}",
+      "schema": {
+        "additionalProperties": true,
+        "properties": {
+          "capabilities": {
+            "properties": {
+              "read": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "read"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "bodySha256": "442aea4ee24d54252ad160489705863356a3f3cbdec6ed6af7a982fcdcea96ac",
+      "case": "root-false",
+      "contentType": "application/vnd.amazon.eventstream",
+      "durationMs": 1658,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "region": "us-east-1",
+      "requestId": "b2551375-d720-4e04-9f4d-8eed7112e21e",
+      "schemaUnchanged": true,
+      "toolComplete": true,
+      "toolInput": "{\"capabilities\": {\"read\":\"KIRO_SCHEMA_OK\"}}",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "capabilities": {
+            "properties": {
+              "read": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "read"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "bodySha256": "f580ced1bbbf73920be3da48b70a47f376f6d4822c5e398d3392744c2db024c6",
+      "case": "root-schema",
+      "contentType": "application/vnd.amazon.eventstream",
+      "durationMs": 1319,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "region": "us-east-1",
+      "requestId": "f4b072e2-300b-457b-88ea-7a7e1b03e3c0",
+      "schemaUnchanged": true,
+      "toolComplete": true,
+      "toolInput": "{\"capabilities\": {\"read\":\"KIRO_SCHEMA_OK\"}}",
+      "schema": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "properties": {
+          "capabilities": {
+            "properties": {
+              "read": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "read"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "bodySha256": "52fe13617b9bb720a9b2c0b7d8d9f6e787010ad42ed973c4d5512d4b9aa698e0",
+      "case": "nested-absent",
+      "contentType": "application/vnd.amazon.eventstream",
+      "durationMs": 1637,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "region": "us-east-1",
+      "requestId": "1c820d87-1637-489c-b780-bc1028c4a4a1",
+      "schemaUnchanged": true,
+      "toolComplete": true,
+      "toolInput": "{\"capabilities\": {\"read\":\"KIRO_SCHEMA_OK\"}}",
+      "schema": {
+        "properties": {
+          "capabilities": {
+            "properties": {
+              "read": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "read"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "bodySha256": "6589834dee63303ba1ff59b63355f07fbb11588032da37a99d72458c40fd6796",
+      "case": "nested-true",
+      "contentType": "application/vnd.amazon.eventstream",
+      "durationMs": 1531,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "region": "us-east-1",
+      "requestId": "180ded58-794b-45a2-a104-ff049a85c096",
+      "schemaUnchanged": true,
+      "toolComplete": true,
+      "toolInput": "{\"capabilities\": {\"read\":\"KIRO_SCHEMA_OK\"}}",
+      "schema": {
+        "properties": {
+          "capabilities": {
+            "additionalProperties": true,
+            "properties": {
+              "read": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "read"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "bodySha256": "1a02cfce6f602e670dd1ef52579e7ac8e604ae61c15cedf9f706d87553c0ef28",
+      "case": "nested-false",
+      "contentType": "application/vnd.amazon.eventstream",
+      "durationMs": 1624,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "region": "us-east-1",
+      "requestId": "16d092de-36ad-44d6-8a58-5f2059634b7e",
+      "schemaUnchanged": true,
+      "toolComplete": true,
+      "toolInput": "{\"capabilities\": {\"read\":\"KIRO_SCHEMA_OK\"}}",
+      "schema": {
+        "properties": {
+          "capabilities": {
+            "additionalProperties": false,
+            "properties": {
+              "read": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "read"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "bodySha256": "ad049b66abbd262859df7af11f897d4e39e173871d3ef32533e558b2989e69e1",
+      "case": "nested-schema",
+      "contentType": "application/vnd.amazon.eventstream",
+      "durationMs": 1680,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "region": "us-east-1",
+      "requestId": "dc45bd94-956f-4001-9e34-36bd564fb04d",
+      "schemaUnchanged": true,
+      "toolComplete": true,
+      "toolInput": "{\"capabilities\": {\"read\":\"KIRO_SCHEMA_OK\"}}",
+      "schema": {
+        "properties": {
+          "capabilities": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "properties": {
+              "read": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "read"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "bodySha256": "d63cea228caff90bee7a8d53adaa9d686dfa83cd002211a032acdd4b53788768",
+      "case": "dictionary-schema",
+      "contentType": "application/vnd.amazon.eventstream",
+      "durationMs": 2237,
+      "endpoint": "cli",
+      "errors": [],
+      "events": [
+        "initial-response",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "toolUseEvent",
+        "metadataEvent",
+        "contextUsageEvent",
+        "meteringEvent"
+      ],
+      "httpStatus": 200,
+      "model": "claude-haiku-5.5",
+      "region": "us-east-1",
+      "requestId": "16c1a7bc-b21d-49cf-a2be-06e9e9218a2a",
+      "schemaUnchanged": true,
+      "toolComplete": true,
+      "toolInput": "{\"capabilities\": {\"read\":\"KIRO_SCHEMA_OK\"}}",
+      "schema": {
+        "properties": {
+          "capabilities": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "required": [
+              "read"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "type": "object"
+      }
+    }
+  ],
+  "productionRouteSmoke": {
+    "path": "/v1/messages",
+    "httpStatus": 200,
+    "stopReason": "tool_use",
+    "schema": {
+      "type": "object",
+      "required": [
+        "capabilities"
+      ],
+      "properties": {
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "toolInput": {
+      "capabilities": {
+        "read": "KIRO_SCHEMA_OK"
+      }
+    }
+  }
+}

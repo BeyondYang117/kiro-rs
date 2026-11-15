@@ -32,13 +32,7 @@ fn fixture(name: &str) -> Value {
 
 // Exercise production methods; no HTTP calls, refreshes, credential files or real keys.
 fn wire(request: &Value, native: bool) -> (Value, std::collections::HashMap<String, String>) {
-    let mut request = request.clone();
-    for tool in request["tools"].as_array_mut().into_iter().flatten() {
-        if let Some(schema) = tool.get_mut("input_schema") {
-            drop_unsupported_additional_properties(schema);
-        }
-    }
-    let request: MessagesRequest = serde_json::from_value(request).unwrap();
+    let request: MessagesRequest = serde_json::from_value(request.clone()).unwrap();
     let converted = converter::convert_request(&request).unwrap();
     let mut body = json!({"conversationState": converted.conversation_state});
     if let Some(fields) = converter::additional_model_request_fields(&request) {
@@ -282,8 +276,6 @@ fn compatibility_omitted_type_preserves_schema_and_unsupported_native_is_rejecte
 }
 
 fn normalized_tool_schema(schema: &Value) -> Value {
-    let mut schema = schema.clone();
-    drop_unsupported_additional_properties(&mut schema);
     let request: MessagesRequest = serde_json::from_value(json!({
         "model":"claude-sonnet-5.5", "max_tokens":16,
         "messages":[{"role":"user","content":"test"}],
@@ -306,65 +298,8 @@ fn normalized_tool_schema(schema: &Value) -> Value {
     .unwrap()
 }
 
-fn drop_unsupported_additional_properties(schema: &mut Value) {
-    let Some(object) = schema.as_object_mut() else {
-        return;
-    };
-    object.remove("additionalProperties");
-    for key in [
-        "properties",
-        "$defs",
-        "definitions",
-        "patternProperties",
-        "dependentSchemas",
-    ] {
-        if let Some(children) = object.get_mut(key).and_then(Value::as_object_mut) {
-            for child in children.values_mut() {
-                drop_unsupported_additional_properties(child);
-            }
-        }
-    }
-    if let Some(dependencies) = object
-        .get_mut("dependencies")
-        .and_then(Value::as_object_mut)
-    {
-        for child in dependencies.values_mut().filter(|value| value.is_object()) {
-            drop_unsupported_additional_properties(child);
-        }
-    }
-    for key in [
-        "items",
-        "additionalItems",
-        "contains",
-        "not",
-        "if",
-        "then",
-        "else",
-        "propertyNames",
-        "unevaluatedProperties",
-        "unevaluatedItems",
-    ] {
-        if let Some(child) = object.get_mut(key) {
-            if let Some(children) = child.as_array_mut().filter(|_| key == "items") {
-                for child in children {
-                    drop_unsupported_additional_properties(child);
-                }
-            } else {
-                drop_unsupported_additional_properties(child);
-            }
-        }
-    }
-    for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
-        if let Some(children) = object.get_mut(key).and_then(Value::as_array_mut) {
-            for child in children {
-                drop_unsupported_additional_properties(child);
-            }
-        }
-    }
-}
-
 #[test]
-fn kiro_tool_schema_removes_unsupported_keywords_recursively() {
+fn kiro_tool_schema_removes_empty_required_and_preserves_additional_properties() {
     let schema = json!({
         "type":"object",
         "properties": {
@@ -379,41 +314,36 @@ fn kiro_tool_schema_removes_unsupported_keywords_recursively() {
     });
     let normalized = normalized_tool_schema(&schema);
     assert_eq!(normalized["required"], json!(["nested"]));
-    assert!(normalized.get("additionalProperties").is_none());
+    assert_eq!(normalized["additionalProperties"], true);
     assert!(normalized["properties"]["nested"].get("required").is_none());
-    assert!(
-        normalized["properties"]["nested"]
-            .get("additionalProperties")
-            .is_none()
+    assert_eq!(
+        normalized["properties"]["nested"]["additionalProperties"],
+        true
     );
     assert_eq!(
         normalized["properties"]["nested"]["properties"]["value"]["required"],
         json!(["kept"])
     );
-    assert!(
-        normalized["properties"]["nested"]["properties"]["value"]
-            .get("additionalProperties")
-            .is_none()
+    assert_eq!(
+        normalized["properties"]["nested"]["properties"]["value"]["additionalProperties"],
+        true
     );
-    assert!(
-        normalized["properties"]["items"]["items"][0]
-            .get("additionalProperties")
-            .is_none()
+    assert_eq!(
+        normalized["properties"]["items"]["items"][0]["additionalProperties"],
+        true
     );
-    assert!(
-        normalized["properties"]["union"]["oneOf"][0]
-            .get("additionalProperties")
-            .is_none()
+    assert_eq!(
+        normalized["properties"]["union"]["oneOf"][0]["additionalProperties"],
+        true
     );
     assert!(
         normalized["properties"]["union"]["oneOf"][1]
             .get("required")
             .is_none()
     );
-    assert!(
-        normalized["properties"]["dependency"]["dependencies"]["other"]
-            .get("additionalProperties")
-            .is_none()
+    assert_eq!(
+        normalized["properties"]["dependency"]["dependencies"]["other"]["additionalProperties"],
+        true
     );
     assert_eq!(
         normalized["properties"]["example"]["enum"][0]["additionalProperties"],
@@ -426,25 +356,24 @@ fn kiro_tool_schema_removes_unsupported_keywords_recursively() {
 }
 
 #[test]
-fn kiro_tool_schema_rejects_restrictions_it_cannot_preserve() {
-    for schema in [
-        json!({"type":"object", "properties":{"nested":{"type":"object", "additionalProperties":{"type":"string"}}}}),
-    ] {
-        let request: MessagesRequest = serde_json::from_value(json!({
-            "model":"claude-sonnet-5.5", "max_tokens":16,
-            "messages":[{"role":"user","content":"test"}],
-            "tools":[{"name":"test","description":"test","input_schema":schema}]
-        }))
-        .unwrap();
-        let error = converter::convert_request(&request)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("additionalProperties"), "{error}");
+fn kiro_tool_schema_preserves_dictionary_value_constraints_on_the_wire() {
+    let schema = json!({"type":"object", "additionalProperties":false,
+    "properties":{"capabilities":{"type":"object", "additionalProperties":{
+        "anyOf":[{"type":"string"}, {"type":"object", "additionalProperties":false,
+            "properties":{"enabled":{"type":"boolean"}}, "required":["enabled"]}]
+    }}}});
+    let mut request = fixture("lookup");
+    request["tools"][0]["input_schema"] = schema.clone();
+    for native in [false, true] {
+        let (body, _) = wire(&request, native);
+        let mut actual = tools(&body)[0]["inputSchema"]["json"].clone();
+        converter::normalize_kiro_wire_tool_schema(&mut actual);
+        assert_eq!(actual, schema);
     }
 }
 
 #[test]
-fn internal_tool_schema_retains_false_and_omits_true_additional_properties() {
+fn internal_tool_schema_retains_boolean_additional_properties() {
     let schema = json!({
         "type":"object",
         "additionalProperties":false,
@@ -474,10 +403,9 @@ fn internal_tool_schema_retains_false_and_omits_true_additional_properties() {
         normalized["properties"]["nested"]["additionalProperties"],
         false
     );
-    assert!(
-        normalized["properties"]["items"]["items"]
-            .get("additionalProperties")
-            .is_none()
+    assert_eq!(
+        normalized["properties"]["items"]["items"]["additionalProperties"],
+        true
     );
 }
 

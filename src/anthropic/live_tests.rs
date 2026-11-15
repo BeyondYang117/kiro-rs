@@ -737,3 +737,215 @@ fn model_selection_uses_exact_catalog_authorization_and_bounds_the_matrix() {
     };
     assert!(choose_models(&empty, None).is_err());
 }
+
+/// Probe the runtime directly: deliberately bypass the provider's schema adapter.
+/// The built reqwest body is checked before the exact Request is executed.
+#[tokio::test]
+#[ignore = "Live raw-schema probe consumes credits; explicitly select one account"]
+async fn live_raw_additional_properties_probe() -> anyhow::Result<()> {
+    use crate::kiro::{machine_id, parser::decoder::EventStreamDecoder};
+    use sha2::{Digest, Sha256};
+    let account = settings()?;
+    let config = account.manager.config();
+    let ctx = account
+        .manager
+        .acquire_context(Some("claude-haiku-5.5"))
+        .await?;
+    let machine = machine_id::generate_from_credentials(&ctx.credentials, config);
+    let rctx = crate::kiro::endpoint::RequestContext {
+        credentials: &ctx.credentials,
+        token: &ctx.token,
+        machine_id: &machine,
+        config,
+    };
+    let endpoint: Box<dyn KiroEndpoint> = match account.endpoint.as_str() {
+        "cli" => Box::new(CliEndpoint::new()),
+        "ide" => Box::new(IdeEndpoint::new()),
+        _ => anyhow::bail!("Unsupported endpoint"),
+    };
+    let mut proxy = config.proxy_url.as_ref().map(ProxyConfig::new);
+    if let (Some(proxy), Some(user), Some(password)) =
+        (&mut proxy, &config.proxy_username, &config.proxy_password)
+    {
+        *proxy = proxy.clone().with_auth(user, password);
+    }
+    let proxy = ctx.credentials.effective_proxy(proxy.as_ref());
+    let client = crate::http_client::build_client(proxy.as_ref(), 90, config.tls_backend)?;
+    let output = std::path::PathBuf::from(std::env::var("KIRO_SCHEMA_PROBE_OUTPUT")?);
+    std::fs::create_dir_all(&output)?;
+    let mut results = Vec::new();
+    let mut all_passed = true;
+    let selected = std::env::var("KIRO_SCHEMA_PROBE_CASES").ok();
+    for position in ["root", "nested", "dictionary"] {
+        for (variant, additional) in [
+            ("absent", None),
+            ("true", Some(json!(true))),
+            ("false", Some(json!(false))),
+            ("schema", Some(json!({"type":"string"}))),
+        ] {
+            let label = format!("{position}-{variant}");
+            if position == "dictionary" && variant != "schema" {
+                continue;
+            }
+            if selected
+                .as_ref()
+                .is_some_and(|cases| !cases.split(',').any(|case| case == label))
+            {
+                continue;
+            }
+            let mut schema = json!({
+                "type":"object", "required":["capabilities"],
+                "properties":{"capabilities":{"type":"object", "required":["read"],
+                    "properties":{"read":{"type":"string"}}}}
+            });
+            if position == "dictionary" {
+                schema["properties"]["capabilities"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("properties");
+            }
+            let target = if position == "root" {
+                &mut schema
+            } else {
+                &mut schema["properties"]["capabilities"]
+            };
+            if let Some(value) = &additional {
+                target["additionalProperties"] = value.clone();
+            }
+            let input: super::types::MessagesRequest = serde_json::from_value(json!({
+                "model":"claude-haiku-5-5", "max_tokens":512,
+                "messages":[{"role":"user","content":"Call kiro_schema_probe exactly once with capabilities {\"read\":\"KIRO_SCHEMA_OK\"}. This is a harmless schema compatibility test. Do not explain."}]
+            }))?;
+            let converted = super::converter::convert_request(&input)?;
+            let mut body = json!({"conversationState":converted.conversation_state});
+            body["conversationState"]["currentMessage"]["userInputMessage"]["userInputMessageContext"]
+                ["tools"] = json!([
+                {"toolSpecification":{"name":"unused_echo", "description":"Unused harmless echo tool.",
+                    "inputSchema":{"json":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}}}},
+                {"toolSpecification":{"name":"kiro_schema_probe", "description":"Return a fixed schema test marker. No external effects.",
+                    "inputSchema":{"json":schema}}}
+            ]);
+            if let Some(fields) = super::converter::additional_model_request_fields(&input) {
+                body["additionalModelRequestFields"] = fields;
+            }
+            let transformed = endpoint.transform_api_body(&body.to_string(), &rctx);
+            let outgoing = account.manager.model_request_body(ctx.id, transformed);
+            // NO normalize_kiro_tool_schemas / normalize_kiro_wire_tool_schema here.
+            let request = endpoint
+                .decorate_api(
+                    client
+                        .post(endpoint.api_url(&rctx))
+                        .header("content-type", "application/json")
+                        .body(outgoing),
+                    &rctx,
+                )
+                .build()?;
+            let bytes = request
+                .body()
+                .and_then(reqwest::Body::as_bytes)
+                .context("Expected literal request bytes")?;
+            let actual: Value = serde_json::from_slice(bytes)?;
+            let actual_schema = actual.pointer("/conversationState/currentMessage/userInputMessage/userInputMessageContext/tools/1/toolSpecification/inputSchema/json").context("Missing wire schema")?;
+            ensure!(actual_schema == &schema, "Wire schema was modified");
+            let digest = hex::encode(Sha256::digest(bytes));
+            // Store only the synthetic schema, never auth headers or profile ARN.
+            std::fs::write(
+                output.join(format!("{label}.schema.json")),
+                serde_json::to_vec_pretty(actual_schema)?,
+            )?;
+            eprintln!(
+                "RAW_SCHEMA sending {label}: endpoint={}, model=claude-haiku-5.5, schema_unchanged=true, body_sha256={digest}",
+                account.endpoint
+            );
+            let start = std::time::Instant::now();
+            let response = client.execute(request).await?;
+            let status = response.status();
+            let request_id = response
+                .headers()
+                .get("x-amzn-requestid")
+                .or_else(|| response.headers().get("x-amz-request-id"))
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            let content_type = response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_owned();
+            use futures::StreamExt;
+            let mut stream = response.bytes_stream();
+            let mut bytes = Vec::new();
+            tokio::time::timeout(Duration::from_secs(90), async {
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk?;
+                    ensure!(
+                        chunk.len() <= BODY_LIMIT.saturating_sub(bytes.len()),
+                        "Response too large"
+                    );
+                    bytes.extend_from_slice(&chunk);
+                }
+                Ok::<(), anyhow::Error>(())
+            })
+            .await
+            .context("Raw schema response timeout")??;
+            let mut frames = Vec::new();
+            let mut errors = Vec::new();
+            let mut tool_input = String::new();
+            let mut tool_complete = false;
+            if status.is_success() {
+                let mut decoder = EventStreamDecoder::new();
+                decoder.feed(&bytes)?;
+                for frame in decoder.decode_iter() {
+                    let frame = frame?;
+                    let kind = frame.event_type().unwrap_or_default().to_owned();
+                    if matches!(frame.message_type(), Some("exception" | "error")) {
+                        errors.push(frame.payload_as_json::<Value>()?);
+                    }
+                    if kind == "toolUseEvent" {
+                        let payload: Value = frame.payload_as_json()?;
+                        if payload["name"] == "kiro_schema_probe" {
+                            tool_input.push_str(payload["input"].as_str().unwrap_or_default());
+                            tool_complete |= payload["stop"] == true;
+                        }
+                    }
+                    frames.push(kind);
+                }
+                ensure!(
+                    decoder.pending_bytes() == 0,
+                    "Incomplete event-stream frame"
+                );
+            } else {
+                errors.push(
+                    serde_json::from_slice::<Value>(&bytes)
+                        .unwrap_or_else(|_| json!({"message":String::from_utf8_lossy(&bytes)})),
+                );
+            }
+            all_passed &= status.is_success()
+                && errors.is_empty()
+                && tool_complete
+                && serde_json::from_str::<Value>(&tool_input).ok()
+                    == Some(json!({"capabilities":{"read":"KIRO_SCHEMA_OK"}}));
+            let result = json!({"case":label,"endpoint":account.endpoint,"region":account.region,
+                "model":"claude-haiku-5.5","schemaUnchanged":true,"bodySha256":digest,
+                "httpStatus":status.as_u16(),"requestId":request_id,"contentType":content_type,
+                "durationMs":start.elapsed().as_millis(),"events":frames,"errors":errors,
+                "toolComplete":tool_complete,"toolInput":tool_input});
+            let result = crate::request_log::redact(&serde_json::to_string(&result)?);
+            eprintln!("RAW_SCHEMA result {result}");
+            results.push(serde_json::from_str::<Value>(&result)?);
+            std::fs::write(
+                output.join("results.json"),
+                serde_json::to_vec_pretty(&results)?,
+            )?;
+            if matches!(status.as_u16(), 401 | 402 | 403 | 429) {
+                break;
+            }
+        }
+    }
+    ensure!(!results.is_empty(), "No probe cases selected");
+    ensure!(
+        all_passed,
+        "One or more raw schema cases failed; inspect saved results"
+    );
+    Ok(())
+}

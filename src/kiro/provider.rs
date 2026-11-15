@@ -916,23 +916,20 @@ mod response_tests {
     use futures::{StreamExt, stream};
 
     #[test]
-    fn upstream_tool_schemas_omit_boolean_additional_properties() {
-        let body = r#"{"conversationState":{"currentMessage":{"userInputMessage":{"userInputMessageContext":{"tools":[{"toolSpecification":{"inputSchema":{"json":{"type":"object","additionalProperties":false,"properties":{"nested":{"type":"object","additionalProperties":false},"items":{"type":"array","items":{"additionalProperties":true}}}}}}}]}}}}}"#;
-        let normalized: serde_json::Value =
-            serde_json::from_str(&normalize_kiro_tool_schemas(body)).unwrap();
-        let schema = &normalized["conversationState"]["currentMessage"]["userInputMessage"]["userInputMessageContext"]
-            ["tools"][0]["toolSpecification"]["inputSchema"]["json"];
-        assert!(schema.get("additionalProperties").is_none());
-        assert!(
-            schema["properties"]["nested"]
-                .get("additionalProperties")
-                .is_none()
-        );
-        assert!(
-            schema["properties"]["items"]["items"]
-                .get("additionalProperties")
-                .is_none()
-        );
+    fn upstream_tool_schemas_preserve_additional_properties() {
+        use serde_json::json;
+        for additional in [json!(true), json!(false), json!({"type":"string"})] {
+            let schema = json!({"type":"object", "additionalProperties":additional,
+                "properties":{"capabilities":{"type":"object", "additionalProperties":additional}},
+                "$defs":{"dictionary":{"type":"object", "additionalProperties":additional}},
+                "examples":[{"additionalProperties":{"type":"literal"}}]});
+            let body = json!({"conversationState":{"currentMessage":{"userInputMessage":{
+                "userInputMessageContext":{"tools":[{"toolSpecification":{"inputSchema":{"json":schema}}}]}
+            }}}}).to_string();
+            let wire: serde_json::Value =
+                serde_json::from_str(&normalize_kiro_tool_schemas(&body)).unwrap();
+            assert_eq!(wire.pointer("/conversationState/currentMessage/userInputMessage/userInputMessageContext/tools/0/toolSpecification/inputSchema/json"), Some(&schema));
+        }
     }
 
     #[test]
@@ -969,12 +966,7 @@ mod response_tests {
             assert_eq!(adapted["type"], "object");
             let reference = adapted["$ref"].as_str().unwrap();
             let nested = adapted.pointer(&reference[1..]).unwrap();
-            let mut expected = schema.clone();
-            expected
-                .as_object_mut()
-                .unwrap()
-                .remove("additionalProperties");
-            assert_eq!(nested, &expected);
+            assert_eq!(nested, &schema);
             assert_eq!(wire_tools.as_array().unwrap().len(), 158);
             assert_eq!(wire_tools[58], tools[58]);
             assert_eq!(wire_tools[60], tools[60]);

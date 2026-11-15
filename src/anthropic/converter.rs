@@ -79,87 +79,12 @@ fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
     serde_json::Value::Object(obj)
 }
 
-/// Kiro rejects `additionalProperties` in tool schemas. Boolean values can be
-/// removed from the wire schema; `false` is enforced against returned tool
-/// inputs locally. Schema-valued restrictions still cannot be represented.
-fn validate_kiro_tool_schema(
-    schema: &serde_json::Value,
-    path: &str,
-) -> Result<(), ConversionError> {
-    use serde_json::Value;
-    let Some(object) = schema.as_object() else {
-        return Ok(());
-    };
-    if object
-        .get("additionalProperties")
-        .is_some_and(Value::is_object)
-    {
-        return Err(ConversionError::InvalidToolFormat(format!(
-            "{path}.additionalProperties cannot be represented by Kiro without weakening the schema"
-        )));
-    }
-
-    for key in [
-        "properties",
-        "$defs",
-        "definitions",
-        "patternProperties",
-        "dependentSchemas",
-    ] {
-        if let Some(children) = object.get(key).and_then(Value::as_object) {
-            for (name, child) in children {
-                validate_kiro_tool_schema(child, &format!("{path}.{key}.{name}"))?;
-            }
-        }
-    }
-    if let Some(dependencies) = object.get("dependencies").and_then(Value::as_object) {
-        for (name, child) in dependencies {
-            if child.is_object() {
-                validate_kiro_tool_schema(child, &format!("{path}.dependencies.{name}"))?;
-            }
-        }
-    }
-    for key in [
-        "items",
-        "additionalItems",
-        "contains",
-        "not",
-        "if",
-        "then",
-        "else",
-        "propertyNames",
-        "unevaluatedProperties",
-        "unevaluatedItems",
-    ] {
-        match object.get(key) {
-            Some(Value::Array(children)) if key == "items" => {
-                for (index, child) in children.iter().enumerate() {
-                    validate_kiro_tool_schema(child, &format!("{path}.{key}[{index}]"))?;
-                }
-            }
-            Some(child) => validate_kiro_tool_schema(child, &format!("{path}.{key}"))?,
-            None => {}
-        }
-    }
-    for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
-        if let Some(children) = object.get(key).and_then(Value::as_array) {
-            for (index, child) in children.iter().enumerate() {
-                validate_kiro_tool_schema(child, &format!("{path}.{key}[{index}]"))?;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Remove only no-op schema keywords. `enum`, defaults, examples and other
 /// object-valued data are deliberately outside the schema traversal.
 fn normalize_kiro_tool_schema(schema: &mut serde_json::Value) {
     let Some(object) = schema.as_object_mut() else {
         return;
     };
-    if object.get("additionalProperties") == Some(&serde_json::Value::Bool(true)) {
-        object.remove("additionalProperties");
-    }
     if object
         .get("required")
         .and_then(serde_json::Value::as_array)
@@ -194,6 +119,7 @@ fn normalize_kiro_tool_schema(schema: &mut serde_json::Value) {
     }
     for key in [
         "items",
+        "additionalProperties",
         "additionalItems",
         "contains",
         "not",
@@ -226,78 +152,9 @@ fn normalize_kiro_tool_schema(schema: &mut serde_json::Value) {
     }
 }
 
-pub(crate) fn strip_kiro_boolean_additional_properties(schema: &mut serde_json::Value) {
-    let Some(object) = schema.as_object_mut() else {
-        return;
-    };
-    if object
-        .get("additionalProperties")
-        .is_some_and(serde_json::Value::is_boolean)
-    {
-        object.remove("additionalProperties");
-    }
-    for key in [
-        "properties",
-        "$defs",
-        "definitions",
-        "patternProperties",
-        "dependentSchemas",
-    ] {
-        if let Some(children) = object
-            .get_mut(key)
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            for child in children.values_mut() {
-                strip_kiro_boolean_additional_properties(child);
-            }
-        }
-    }
-    if let Some(dependencies) = object
-        .get_mut("dependencies")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        for child in dependencies.values_mut().filter(|child| child.is_object()) {
-            strip_kiro_boolean_additional_properties(child);
-        }
-    }
-    for key in [
-        "items",
-        "additionalItems",
-        "contains",
-        "not",
-        "if",
-        "then",
-        "else",
-        "propertyNames",
-        "unevaluatedProperties",
-        "unevaluatedItems",
-    ] {
-        if let Some(child) = object.get_mut(key) {
-            if let Some(children) = child.as_array_mut().filter(|_| key == "items") {
-                for child in children {
-                    strip_kiro_boolean_additional_properties(child);
-                }
-            } else {
-                strip_kiro_boolean_additional_properties(child);
-            }
-        }
-    }
-    for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
-        if let Some(children) = object
-            .get_mut(key)
-            .and_then(serde_json::Value::as_array_mut)
-        {
-            for child in children {
-                strip_kiro_boolean_additional_properties(child);
-            }
-        }
-    }
-}
-
 /// Keep the original schema for local response checks; adapt only the wire copy.
 /// Kiro forbids composition keywords at the root, but accepts nested schemas.
 pub(crate) fn normalize_kiro_wire_tool_schema(schema: &mut serde_json::Value) {
-    strip_kiro_boolean_additional_properties(schema);
     if !["oneOf", "allOf", "anyOf"]
         .iter()
         .any(|key| schema.get(key).is_some())
@@ -880,10 +737,6 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
         let mut names = HashMap::new();
         for (index, tool) in tools.iter().enumerate() {
             validate_schema_constraints(
-                &serde_json::json!(tool.input_schema),
-                &format!("tools[{index}].input_schema"),
-            )?;
-            validate_kiro_tool_schema(
                 &serde_json::json!(tool.input_schema),
                 &format!("tools[{index}].input_schema"),
             )?;

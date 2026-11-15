@@ -498,8 +498,8 @@ struct ToolInputConstraints {
     schema: serde_json::Value,
 }
 
-/// Use upstream tool names and schemas. Keep the schema because Kiro cannot
-/// enforce `additionalProperties: false` itself.
+/// Use upstream tool names and schemas. Keep the existing local undeclared-key
+/// check as well; upstream schema acceptance does not guarantee strict output.
 fn required_tool_fields(request_body: &str) -> HashMap<String, ToolInputConstraints> {
     let Ok(request) =
         serde_json::from_str::<crate::kiro::model::requests::kiro::KiroRequest>(request_body)
