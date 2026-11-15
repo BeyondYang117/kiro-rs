@@ -1,0 +1,42 @@
+{
+  "date": "2026-11-15",
+  "route": "/v1/messages",
+  "httpStatus": 200,
+  "threshold": 1,
+  "instructionsChars": 22978,
+  "image": "red64 RGB PNG",
+  "requestBodySha256": "74b31a6f3e6ab82dcd89d37c87795ab63bc41023c742cf3cbd06c783b64fddd3",
+  "durationMs": 5315,
+  "response": {
+    "content": [
+      {
+        "content": "PRODUCTION_COMPACTION_OK: The user asked me to remember a colored square, a solid red image.",
+        "type": "compaction"
+      }
+    ],
+    "id": "msg_22fb37832e0049b6aaa1089ab210c197",
+    "model": "claude-haiku-5-5",
+    "role": "assistant",
+    "stop_reason": "compaction",
+    "stop_sequence": null,
+    "type": "message",
+    "usage": {
+      "input_tokens": 0,
+      "iterations": [
+        {
+          "input_tokens": 17398,
+          "output_tokens": 34,
+          "type": "compaction"
+        }
+      ],
+      "output_tokens": 0
+    }
+  },
+  "attempts": 1,
+  "priorColdStartAttempt": {
+    "httpStatus": 503,
+    "attempts": 0,
+    "durationMs": 1076,
+    "error": "Request upstream attempt budget or total deadline exceeded"
+  }
+}

@@ -251,3 +251,40 @@ cargo test live_raw_request_rewrite_probe --no-default-features -- --ignored --n
 ```
 
 可通过 `KIRO_CONTROLS_PROBE_CASES` 选择记录中的 `case`。测试通过表示记录完成，不代表所有候选被支持或所有返回都符合调用方意图。
+
+
+## thinking 历史与压缩实测
+
+2026-11-15，使用同一导入账号，在 CLI / us-east-1 对 Haiku 5.5 及 GPT 历史对照执行 **24 次真实上游调用**（21 次 HTTP 200、3 次 HTTP 400）。[脱敏记录](../testdata/kiro_thinking_compaction_live_2026-11-15.json)保留全部结果、候选 patch、请求体 SHA-256、request ID、上游停止事件和错误。字段在端点/模型转换后加入，并断言实际发送的 HTTP body 与候选相同；每例单次尝试，不执行工具。真实 reasoning 签名只留在内存用于原样重放，记录仅保存签名长度和哈希。
+
+| 对照 | 真实结果 | 调整 |
+|---|---|---|
+| 无 thinking 标签、enabled 30000、adaptive/high、非法标签及原生 adaptive | 简单算术均返回 391，均无 reasoning 事件；非法标签也 200 | 标签没有验证出原生控制语义，移除旧协议提示注入并记录显式设置未映射警告，不默认开启 nativeThinking |
+| Haiku 无签名 / 伪造签名 reasoning 历史 | 均 400 `THINKING_SIGNATURE_INVALID` | 不制造签名或改写推理文本 |
+| 从真实响应捕获的完整 reasoning 文本与签名，原样重放至旧协议 / native adaptive / GPT | 均 200，回答 391 | 移除按旧协议或非 Claude 类别删除 reasoning 的逻辑 |
+| 合成 redacted / GPT 合成签名历史 | 200，但隐藏标记没有被复述 | 不据此声称认证成功或模型使用了该历史；未取得真实 redacted 重放证据 |
+| 短对话摘要，disabled / native adaptive | 均 200，正确摘要标记 | 取消 50000 最小调度阈值，允许正整数；摘要不再强制 disabled 或删除 effort / 模型别名 |
+| 约 31k 字符的正常多段参考指令，disabled / adaptive | 均 200，正确保留 LONG_SUMMARY_OK | 取消自定义摘要指令的 16384 字符限制 |
+| 约 20k 重复参考文本 | HTTP 200，但模型拒绝照做 | 仅证明请求被接受，不当成指令遵从证据 |
+| 64×64 RGB PNG 原图 / 无图占位对照 | 原图正确描述红色方块，无图回答 IMAGE_UNAVAILABLE | 摘要传真实图像附件，保留正文位置标记，含嵌套工具结果中的图片 |
+| 旧协议未发送原生 max_tokens，要求完整复制 150 行摘要 | 200、END_TURN，9325 字符，本地估算 2331，超过测试输入 max_tokens=1024 | 不再把本地估算超限改成 max_tokens 停止原因 |
+
+初次图片使用 1×1 灰度 PNG，收到 `IMAGE_FORMAT_UNSUPPORTED`；随后换成有效 RGB PNG 重测成功。保留该失败记录，不把格式失败解释成上游不支持图片。输出 token 数未由上游精确报告，本地估算 2331 不是实测计费 token 数。
+
+重建并重启服务后，另经本地 `/v1/messages` 完整生产链路发送阈值 1、22978 字符自定义指令、adaptive/low 设置及标准 PNG。返回 HTTP 200、单次生成、`stop_reason=compaction`，摘要包含 PRODUCTION_COMPACTION_OK 并正确识别红色图片，见[生产链路记录](../testdata/kiro_thinking_compaction_production_live_2026-11-15.json)。默认旧协议设置产生未映射警告，没有注入 thinking 标签。冷启动的第一次补验因配置的总尝试预算为 1，在发起生成前耗尽预算而返回 503（生成 attempts=0）；随后独立请求成功，未修改或提高预算。离线验证 `cargo test --all-targets --no-default-features`：620 项通过、8 项付费联调默认跳过。
+
+触发阈值是代理调度选项，不是透传的 Kiro 原生字段；短对话摘要成功说明不需要 50000 的上游边界，生产链路的低阈值由离线测试覆盖。以上结果仅适用于所测账号/模型/端点/区域，不代表所有标签永远无效、所有签名可跨模型使用，或所有图片格式均支持。前节旧版标签/历史清理的保留说明已被本轮后续证据与修改取代。
+
+压缩本身仍按调用方请求生成摘要：工具定义作为参考文本而不开放执行；历史被放入 transcript；默认摘要指令只在没有自定义 instructions 时使用。传统 Claude Code 总结系统句触发的兼容转换仍保留，以容纳其末尾 assistant 内容，未把该行为扩展到其他普通请求。以上属于代理压缩协议行为，不声明为 Kiro 的硬性限制。
+
+复测会消耗额度：
+
+```sh
+KIRO_LIVE_CREDENTIALS=/absolute/path/credentials.json \
+KIRO_LIVE_CONFIG=/absolute/path/config.json \
+KIRO_LIVE_ACCOUNT_ID=1 \
+KIRO_CONTROLS_PROBE_OUTPUT=/absolute/path/probe-output \
+cargo test live_raw_thinking_compaction_probe -- --ignored --nocapture
+```
+
+可用 `KIRO_CONTROLS_PROBE_CASES` 选择逗号分隔的 case 名；重放 `history-*-captured` 时必须同时选择先前能产生真实签名的用例（本次为 `history-none`），若上游未返回真实签名则明确跳过，不能宣称重放验证通过。默认离线测试不访问真实上游。

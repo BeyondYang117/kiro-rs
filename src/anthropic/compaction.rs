@@ -19,7 +19,7 @@ use super::converter::{convert_request, get_context_window_size};
 use super::handlers::{post_messages_cc_inner, post_messages_inner};
 use super::middleware::AppState;
 use super::stream::SseEvent;
-use super::types::{ErrorResponse, Message, MessagesRequest, Thinking};
+use super::types::{ErrorResponse, Message, MessagesRequest};
 use super::upstream::{ResponsePolicy, response_events};
 use crate::kiro::model::{events::Event, requests::kiro::KiroRequest};
 use crate::token;
@@ -99,12 +99,12 @@ impl Plan {
             let edit: ThresholdEdit = serde_json::from_value(edit.clone())
                 .map_err(|e| format!("Invalid compaction edit: {e}"))?;
             let threshold = match edit.trigger {
-                Some(trigger) if trigger.kind == "input_tokens" && trigger.value >= 50_000 => {
+                Some(trigger) if trigger.kind == "input_tokens" && trigger.value > 0 => {
                     trigger.value
                 }
                 Some(_) => {
                     return Err(
-                        "Compaction trigger must use input_tokens with value >= 50000".into(),
+                        "Compaction trigger must use input_tokens with a positive value".into(),
                     );
                 }
                 None => 150_000,
@@ -122,8 +122,8 @@ impl Plan {
 
 fn instructions(custom: Option<String>) -> Result<String, String> {
     match custom {
-        Some(text) if text.trim().is_empty() || text.chars().count() > 16_384 => {
-            Err("Compaction instructions must contain 1 to 16384 characters".into())
+        Some(text) if text.trim().is_empty() => {
+            Err("Compaction instructions must not be empty".into())
         }
         Some(text) => Ok(text),
         None => Ok(DEFAULT_INSTRUCTIONS.into()),
@@ -301,29 +301,39 @@ async fn dispatch(state: AppState, request: MessagesRequest, cc: bool) -> Respon
     }
 }
 
-// Image bytes do not help a text summarizer and can exceed Kiro's body limit.
-fn transcript_value(value: &Value) -> Value {
+// Keep actual images available to the summarizer, without duplicating their
+// encoded bytes in the text transcript.
+fn transcript_value(value: &Value, images: &mut Vec<Value>) -> Value {
     match value {
-        Value::Array(items) => Value::Array(items.iter().map(transcript_value).collect()),
-        Value::Object(map) if map.get("type").and_then(Value::as_str) == Some("image") => {
-            json!({"type":"text", "text":"[Image in conversation]"})
-        }
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .map(|(k, v)| (k.clone(), transcript_value(v)))
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| transcript_value(item, images))
                 .collect(),
         ),
+        Value::Object(map) if map.get("type").and_then(Value::as_str) == Some("image") => {
+            images.push(value.clone());
+            json!({"type":"text", "text":format!("[Conversation image {} attached]", images.len())})
+        }
+        Value::Object(map) if map.get("type").and_then(Value::as_str) == Some("tool_result") => {
+            let mut block = value.clone();
+            if let Some(content) = block.get_mut("content") {
+                *content = transcript_value(content, images);
+            }
+            block
+        }
         other => other.clone(),
     }
 }
 
 fn summary_request(request: &MessagesRequest, plan: &Plan) -> MessagesRequest {
+    let mut images = Vec::new();
     let transcript: Vec<Value> = request
         .messages
         .iter()
         .map(|message| {
             json!({
-                "role":message.role, "content":transcript_value(&message.content),
+                "role":message.role, "content":transcript_value(&message.content, &mut images),
             })
         })
         .collect();
@@ -335,24 +345,26 @@ fn summary_request(request: &MessagesRequest, plan: &Plan) -> MessagesRequest {
         json!(transcript),
         plan.instructions
     );
+    let mut content = vec![json!({"type":"text", "text":content})];
+    content.extend(images);
     MessagesRequest {
-        model: request.model.replace("-thinking", ""),
+        model: request.model.clone(),
         max_tokens: request.max_tokens,
         messages: vec![Message {
             role: "user".into(),
-            content: json!(content),
+            content: if content.len() == 1 {
+                content[0]["text"].clone()
+            } else {
+                json!(content)
+            },
         }],
         stream: false,
         system: request.system.clone(),
         tools: None,
         tool_choice: None,
-        extra_controls: Default::default(),
-        thinking: Some(Thinking {
-            thinking_type: "disabled".into(),
-            budget_tokens: 0,
-            display: None,
-        }),
-        output_config: None,
+        extra_controls: request.extra_controls.clone(),
+        thinking: request.thinking.clone(),
+        output_config: request.output_config.clone(),
         metadata: None,
         compaction: None,
         context_management: None,
@@ -466,9 +478,6 @@ async fn summarize(
     let output_tokens = reported_usage
         .output_tokens
         .unwrap_or_else(|| token::count_tokens(&text) as i32);
-    if output_tokens > request.max_tokens {
-        stop_reason = "max_tokens";
-    }
     let mut summary = json!({"content":[{"type":"text", "text":text}], "stop_reason":stop_reason,
         "usage":{"input_tokens":input_tokens, "output_tokens":output_tokens}});
     reported_usage.apply(&mut summary["usage"]);
@@ -669,6 +678,7 @@ pub(super) fn message_events(message: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::anthropic::types::Thinking;
 
     fn request(value: Value) -> MessagesRequest {
         serde_json::from_value(value).unwrap()
@@ -684,11 +694,14 @@ mod tests {
     }
 
     #[test]
-    fn threshold_requires_minimum() {
+    fn threshold_accepts_positive_values() {
         let req = request(json!({"model":"claude-sonnet-5","max_tokens":1024,
             "messages":[{"role":"user","content":"hello"}],
             "context_management":{"edits":[{"type":"compact_20260112",
                 "trigger":{"type":"input_tokens","value":49999}}]}}));
+        assert_eq!(Plan::from_request(&req).unwrap().unwrap().threshold, 49999);
+        let mut req = req;
+        req.context_management.as_mut().unwrap()["edits"][0]["trigger"]["value"] = json!(0);
         assert!(Plan::from_request(&req).is_err());
     }
 
@@ -1042,7 +1055,7 @@ mod tests {
                     }
                     assert!(fields.get("thinking").is_none());
                     assert!(fields.get("output_config").is_none());
-                    if !compact && super::super::converter::is_gpt(model) {
+                    if super::super::converter::is_gpt(model) {
                         assert_eq!(fields["reasoning"]["effort"], "max");
                     }
                     if !compact {
@@ -1051,7 +1064,7 @@ mod tests {
                                 ["toolResults"][0]["toolUseId"],
                             "tool-1"
                         );
-                        assert!(!call.to_string().contains("claude-signature"));
+                        assert!(call.to_string().contains("claude-signature"));
                         assert!(!call.to_string().contains("<thinking_effort>"));
                     }
                 }
@@ -1547,7 +1560,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claude_code_effort_reaches_upstream_across_response_modes() {
+    async fn legacy_controls_never_become_prompts_across_response_modes() {
         for (cc, buffered) in [(false, false), (true, false), (true, true)] {
             for streaming in [false, true] {
                 for effort in ["low", "medium", "high", "xhigh", "max"] {
@@ -1572,19 +1585,7 @@ mod tests {
                         assert_eq!(requests.len(), 1);
                         let sent = &requests[0];
                         assert!(sent.get("additionalModelRequestFields").is_none());
-                        let prefix =
-                            sent["conversationState"]["history"][0]["userInputMessage"]["content"]
-                                .as_str()
-                                .unwrap();
-                        assert!(
-                            prefix
-                                .contains(&format!("<thinking_effort>{effort}</thinking_effort>")),
-                            "{sent}"
-                        );
-                        assert_eq!(
-                            prefix.contains("<thinking_mode>"),
-                            matches!(thinking, Some("enabled" | "adaptive"))
-                        );
+                        assert!(sent["conversationState"].get("history").is_none());
                     }
                 }
             }
@@ -2584,10 +2585,7 @@ mod tests {
                         requests[0]["conversationState"]["currentMessage"]["userInputMessage"]["content"],
                         "hi"
                     );
-                    if thinking {
-                        assert!(requests[0]["conversationState"]["history"][0]["userInputMessage"]["content"]
-                            .as_str().unwrap().contains("<thinking_effort>low</thinking_effort>"));
-                    }
+                    assert!(requests[0]["conversationState"].get("history").is_none());
                 }
             }
         }
@@ -2767,11 +2765,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_preserves_long_instructions_images_and_native_controls() {
+        for cc in [false, true] {
+            let upstream = mock(frame(
+                "assistantResponseEvent",
+                json!({"content":"<summary>red image retained</summary>"}),
+            ))
+            .await;
+            let instructions = format!(
+                "{} INSTRUCTION_TAIL_OK",
+                "Reference instructions. ".repeat(1000)
+            );
+            let png = include_str!("../../testdata/kiro_summary_image_probe_red64.base64");
+            let image = json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":png}});
+            let req = request(
+                json!({"model":"claude-haiku-5-5-thinking","max_tokens":2048,
+                "thinking":{"type":"adaptive","display":"summarized"},"output_config":{"effort":"low"},
+                "messages":[{"role":"user","content":[image.clone(),{"type":"text","text":"describe image"}]},
+                    {"role":"assistant","content":"red square"},
+                    {"role":"user","content":[{"type":"tool_result","tool_use_id":"image-tool","content":[image]}]}],
+                "context_management":{"edits":[{"type":"compact_20260112","trigger":{"type":"input_tokens","value":1},
+                    "pause_after_compaction":true,"instructions":instructions}]}}),
+            );
+            let plan = Plan::from_request(&req).unwrap().unwrap();
+            let summary = summary_request(&req, &plan);
+            assert_eq!(summary.model, req.model);
+            let fields =
+                super::super::converter::additional_model_request_fields(&summary).unwrap();
+            assert_eq!(
+                fields["thinking"],
+                json!({"type":"adaptive","display":"summarized"})
+            );
+            assert_eq!(fields["output_config"]["effort"], "low");
+            let response = response_json(handle_request(upstream.state.clone(), req, cc).await)
+                .await
+                .unwrap();
+            assert_eq!(response["stop_reason"], "compaction");
+            let calls = upstream.requests.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            let current = &calls[0]["conversationState"]["currentMessage"]["userInputMessage"];
+            let text = current["content"].as_str().unwrap();
+            assert!(text.starts_with(&instructions));
+            assert!(text.ends_with(&instructions));
+            assert!(!text.contains(png));
+            assert_eq!(current["images"].as_array().unwrap().len(), 2);
+            assert_eq!(current["images"][0]["source"]["bytes"], png);
+            assert_eq!(current["images"][1]["source"]["bytes"], png);
+            // This mock uses the default legacy endpoint; controls stay out of
+            // the wire and must not be converted into prompt instructions.
+            assert!(calls[0].get("additionalModelRequestFields").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn summary_estimate_above_client_budget_does_not_invent_truncation() {
+        let text = "summary data ".repeat(1500);
+        let mut bytes = frame("assistantResponseEvent", json!({"content":text}));
+        bytes.extend(frame("metadataEvent", json!({"stopReason":"end_turn"})));
+        let upstream = mock(bytes).await;
+        let mut req = compact_request(false);
+        req.max_tokens = 1024;
+        let response = response_json(handle_request(upstream.state.clone(), req, false).await)
+            .await
+            .unwrap();
+        assert_eq!(response["stop_reason"], "compaction");
+        assert_eq!(response["content"][0]["content"], text);
+        assert!(
+            response["usage"]["iterations"][0]["output_tokens"]
+                .as_i64()
+                .unwrap()
+                > 1024
+        );
+    }
+
+    #[tokio::test]
     async fn incomplete_or_tool_summary_never_replaces_history() {
         let mut limited = frame(
             "assistantResponseEvent",
             json!({"content":"x".repeat(20_000)}),
         );
+        limited.extend(frame("metadataEvent", json!({"stopReason":"max_tokens"})));
         let tool = frame(
             "toolUseEvent",
             json!({"name":"Read", "toolUseId":"t1", "input":"{}", "stop":true}),

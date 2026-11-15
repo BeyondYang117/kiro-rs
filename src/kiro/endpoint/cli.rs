@@ -170,7 +170,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn provider_models_keep_native_fields_without_replaying_claude_reasoning() {
+    fn provider_models_keep_native_fields_and_reasoning_history() {
         let credentials = KiroCredentials::default();
         let config = Config::default();
         let ctx = RequestContext {
@@ -202,10 +202,9 @@ mod tests {
                 history[0]["assistantResponseMessage"]["toolUses"],
                 body["conversationState"]["history"][0]["assistantResponseMessage"]["toolUses"]
             );
-            assert!(
-                history[0]["assistantResponseMessage"]
-                    .get("reasoningContent")
-                    .is_none()
+            assert_eq!(
+                history[0]["assistantResponseMessage"]["reasoningContent"],
+                body["conversationState"]["history"][0]["assistantResponseMessage"]["reasoningContent"]
             );
             assert_eq!(
                 transformed["conversationState"]["currentMessage"]["userInputMessage"]["origin"],
@@ -275,11 +274,16 @@ mod tests {
                 assert_eq!(result["additionalModelRequestFields"]["max_tokens"], 4000);
             } else {
                 assert!(result.get("additionalModelRequestFields").is_none());
-                assert!(
-                    history[0]["userInputMessage"]["content"]
-                        .as_str()
+                assert_eq!(
+                    history.len(),
+                    body["conversationState"]["history"]
+                        .as_array()
                         .unwrap()
-                        .contains("<thinking_effort>high")
+                        .len()
+                );
+                assert_eq!(
+                    history[0]["userInputMessage"]["content"],
+                    body["conversationState"]["history"][0]["userInputMessage"]["content"]
                 );
             }
             let client = reqwest::Client::new();

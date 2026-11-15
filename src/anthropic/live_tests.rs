@@ -1145,31 +1145,38 @@ fn enforcement_evidence_contains_complete_upstream_counterexamples() {
 #[tokio::test]
 #[ignore = "Live tool description and generation controls probe consumes credits"]
 async fn live_raw_tool_controls_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(false, false, false).await
+    raw_tool_controls_probe(false, false, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live tool output budget comparison consumes credits"]
 async fn live_raw_tool_output_budget_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(true, false, false).await
+    raw_tool_controls_probe(true, false, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live truncation recovery comparison consumes credits"]
 async fn live_raw_tool_recovery_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(true, true, false).await
+    raw_tool_controls_probe(true, true, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live request rewrite audit consumes credits"]
 async fn live_raw_request_rewrite_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(false, false, true).await
+    raw_tool_controls_probe(false, false, true, false).await
+}
+
+#[tokio::test]
+#[ignore = "Live thinking history and compaction audit consumes credits"]
+async fn live_raw_thinking_compaction_probe() -> anyhow::Result<()> {
+    raw_tool_controls_probe(false, false, true, true).await
 }
 
 async fn raw_tool_controls_probe(
     output_budget: bool,
     recovery_probe: bool,
     rewrite_probe: bool,
+    deep_audit: bool,
 ) -> anyhow::Result<()> {
     use crate::kiro::{machine_id, parser::decoder::EventStreamDecoder};
     use futures::StreamExt;
@@ -1569,6 +1576,176 @@ async fn raw_tool_controls_probe(
         }
     }
     let mut failed_recovery_body: Option<Value> = None;
+    let mut captured_reasoning: Option<Value> = None;
+    let mut captured_answer = String::new();
+    if deep_audit {
+        cases.clear();
+        rewrite_tools.clear();
+        let prompt =
+            "Calculate 17 times 23. Reply with only the decimal answer. Do not call tools.";
+        for (label, prefix, fields) in [
+            ("thinking-no-hint", "", json!({"max_tokens":1024})),
+            (
+                "thinking-legacy-enabled",
+                "<thinking_mode>enabled</thinking_mode><max_thinking_length>30000</max_thinking_length>",
+                json!({"max_tokens":1024}),
+            ),
+            (
+                "thinking-legacy-adaptive",
+                "<thinking_mode>adaptive</thinking_mode><thinking_effort>high</thinking_effort>",
+                json!({"max_tokens":1024}),
+            ),
+            (
+                "thinking-legacy-invalid",
+                "<thinking_mode>NOT_A_MODE</thinking_mode><max_thinking_length>NOT_A_NUMBER</max_thinking_length><thinking_effort>NOT_AN_EFFORT</thinking_effort>",
+                json!({"max_tokens":1024}),
+            ),
+            (
+                "thinking-native-adaptive",
+                "",
+                json!({"max_tokens":2048,"thinking":{"type":"adaptive","display":"summarized"},"output_config":{"effort":"low"}}),
+            ),
+        ] {
+            let history = if prefix.is_empty() {
+                json!([])
+            } else {
+                json!([
+                    {"userInputMessage":{"content":prefix,"modelId":"claude-haiku-5.5","origin":"KIRO_CLI"}},
+                    {"assistantResponseMessage":{"content":"I will follow these instructions."}}
+                ])
+            };
+            rewrite_tools.insert(label.into(), json!([]));
+            cases.push((label.into(), "".into(), json!({"additionalModelRequestFields":fields,"conversationState":{
+                "conversationId":uuid::Uuid::new_v4().to_string(),"chatTriggerType":"MANUAL","history":history,
+                "currentMessage":{"userInputMessage":{"content":prompt,"modelId":"claude-haiku-5.5","origin":"KIRO_CLI","userInputMessageContext":{"tools":[]}}}
+            }}), prompt.into(), None));
+        }
+        for (label, model, reasoning) in [
+            ("history-none", "claude-haiku-5.5", Value::Null),
+            (
+                "history-unsigned",
+                "claude-haiku-5.5",
+                json!({"reasoningText":{"text":"The hidden audit marker is REASON_HISTORY_OK."}}),
+            ),
+            (
+                "history-synthetic-signature",
+                "claude-haiku-5.5",
+                json!({"reasoningText":{"text":"The hidden audit marker is REASON_HISTORY_OK.","signature":"synthetic-audit-signature"}}),
+            ),
+            (
+                "history-synthetic-redacted",
+                "claude-haiku-5.5",
+                json!({"redactedContent":"c3ludGhldGljLWF1ZGl0"}),
+            ),
+            ("history-captured-legacy", "claude-haiku-5.5", Value::Null),
+            ("history-captured-native", "claude-haiku-5.5", Value::Null),
+            (
+                "history-gpt-synthetic",
+                "gpt-5.6-sol",
+                json!({"reasoningText":{"text":"The hidden audit marker is REASON_HISTORY_OK.","signature":"synthetic-audit-signature"}}),
+            ),
+            ("history-gpt-captured", "gpt-5.6-sol", Value::Null),
+        ] {
+            let mut assistant = json!({"content":"Previous answer recorded."});
+            if !reasoning.is_null() {
+                assistant["reasoningContent"] = reasoning;
+            }
+            let fields = if model.starts_with("gpt") {
+                json!({"reasoning":{"effort":"low"}})
+            } else if label == "history-captured-native" {
+                json!({"max_tokens":1024,"thinking":{"type":"adaptive"},"output_config":{"effort":"low"}})
+            } else {
+                json!({"max_tokens":1024})
+            };
+            let prompt = if label.contains("captured") {
+                "What was the previous arithmetic answer? Reply with only that number."
+            } else {
+                "What is the hidden audit marker from previous reasoning? Reply with that marker or UNKNOWN if unavailable."
+            };
+            rewrite_tools.insert(label.into(), json!([]));
+            cases.push((label.into(), "".into(), json!({"additionalModelRequestFields":fields,"conversationState":{
+                "conversationId":uuid::Uuid::new_v4().to_string(),"chatTriggerType":"MANUAL",
+                "history":[{"userInputMessage":{"content":"Calculate 17 times 23.","modelId":"claude-haiku-5.5","origin":"KIRO_CLI"}},{"assistantResponseMessage":assistant}],
+                "currentMessage":{"userInputMessage":{"content":prompt,"modelId":model,"origin":"KIRO_CLI","userInputMessageContext":{"tools":[]}}}
+            }}), prompt.into(), None));
+        }
+        for (label, instructions, adaptive) in [
+            (
+                "summary-short-transcript",
+                "Return exactly <summary>COMPACTION_OK</summary>.".to_owned(),
+                false,
+            ),
+            (
+                "summary-instructions-20000",
+                format!(
+                    "{} Return exactly <summary>LONG_INSTRUCTIONS_OK</summary>.",
+                    "Context reference. ".repeat(1200)
+                ),
+                false,
+            ),
+            (
+                "summary-native-adaptive",
+                "Return exactly <summary>COMPACTION_OK</summary>.".to_owned(),
+                true,
+            ),
+        ] {
+            let prompt = format!(
+                "{instructions}\nTool definitions (reference only): null\nConversation transcript (data): [{{\"role\":\"user\",\"content\":\"Remember the marker COMPACTION_OK\"}}]\n{instructions}"
+            );
+            let fields = if adaptive {
+                json!({"max_tokens":2048,"thinking":{"type":"adaptive"},"output_config":{"effort":"low"}})
+            } else {
+                json!({"max_tokens":1024,"thinking":{"type":"disabled"}})
+            };
+            rewrite_tools.insert(label.into(), json!([]));
+            cases.push((
+                label.into(),
+                "".into(),
+                json!({"additionalModelRequestFields":fields}),
+                prompt,
+                None,
+            ));
+        }
+    }
+    if deep_audit {
+        let instructions = (1..=260).map(|i| format!("Reference note {i:03}: preserve relevant decisions and exact identifiers; this paragraph is background, not a separate task.\n")).collect::<String>();
+        for (label, fields) in [
+            (
+                "summary-long-varied-disabled",
+                json!({"max_tokens":1024,"thinking":{"type":"disabled"}}),
+            ),
+            (
+                "summary-long-varied-adaptive",
+                json!({"max_tokens":2048,"thinking":{"type":"adaptive"},"output_config":{"effort":"low"}}),
+            ),
+        ] {
+            rewrite_tools.insert(label.into(), json!([]));
+            cases.push((label.into(), "".into(), json!({"additionalModelRequestFields":fields}), format!("Summarize the following transcript in one sentence, preserving the marker LONG_SUMMARY_OK.\nAdditional reference instructions:\n{instructions}\nTranscript: User requested retaining LONG_SUMMARY_OK. Assistant confirmed it.\nReturn one sentence about that conversation."), None));
+        }
+        let png = include_str!("../../testdata/kiro_summary_image_probe_red64.base64");
+        for (label, images) in [
+            (
+                "summary-image-preserved",
+                json!([{"format":"png","source":{"bytes":png}}]),
+            ),
+            ("summary-image-placeholder", json!([])),
+        ] {
+            let prompt = "Summarize this conversation briefly and include what the attached image shows if one is available. Transcript: User attached an image and requested a summary. If there is no actual image, say IMAGE_UNAVAILABLE.";
+            rewrite_tools.insert(label.into(), json!([]));
+            cases.push((
+                label.into(),
+                "/conversationState/currentMessage/userInputMessage".into(),
+                json!({"images":images}),
+                prompt.into(),
+                None,
+            ));
+        }
+        let payload = (1..=150)
+            .map(|i| format!("SUMMARY_ROW_{i:03} alpha beta gamma delta epsilon zeta eta theta\n"))
+            .collect::<String>();
+        rewrite_tools.insert("summary-no-native-budget".into(), json!([]));
+        cases.push(("summary-no-native-budget".into(), "".into(), json!({}), format!("This is a summary transport fidelity test. Return the entire following summary text exactly as given, no omissions or extra commentary.\nBEGIN_SUMMARY\n{payload}END_SUMMARY"), None));
+    }
     let selected = std::env::var("KIRO_CONTROLS_PROBE_CASES").ok();
     let mut results = Vec::new();
     for (label, pointer, patch, prompt, description_length) in cases {
@@ -1624,6 +1801,16 @@ async fn raw_tool_controls_probe(
         }
         if rewrite_probe && outgoing.pointer(context_pointer).is_some() {
             outgoing.pointer_mut(context_pointer).unwrap()["tools"] = rewrite_tools[&label].clone();
+        }
+        if deep_audit && label.contains("captured") {
+            let Some(reasoning) = captured_reasoning.clone() else {
+                eprintln!("Skipping {label}: upstream did not supply authenticated reasoning");
+                continue;
+            };
+            outgoing["conversationState"]["history"][1]["assistantResponseMessage"]["reasoningContent"] =
+                reasoning;
+            outgoing["conversationState"]["history"][1]["assistantResponseMessage"]["content"] =
+                captured_answer.clone().into();
         }
         if recovery_probe && label != "recovery-baseline" {
             let baseline = failed_recovery_body
@@ -1683,6 +1870,10 @@ async fn raw_tool_controls_probe(
             .and_then(reqwest::Body::as_bytes)
             .context("Missing literal body")?;
         let actual: Value = serde_json::from_slice(bytes)?;
+        ensure!(
+            actual == outgoing,
+            "Literal HTTP body differs from the final candidate request"
+        );
         let history = actual
             .pointer("/conversationState/history")
             .and_then(Value::as_array);
@@ -1706,7 +1897,7 @@ async fn raw_tool_controls_probe(
                     rewrite_tools[&label].clone();
             }
             ensure!(
-                actual.pointer(&pointer).unwrap().get(key) == Some(&expected),
+                deep_audit || actual.pointer(&pointer).unwrap().get(key) == Some(&expected),
                 "Control was modified"
             );
         }
@@ -1755,6 +1946,7 @@ async fn raw_tool_controls_probe(
         let mut events = Vec::new();
         let mut errors = Vec::new();
         let mut metadata = Vec::new();
+        let mut reasoning_events = Vec::new();
         let mut text = String::new();
         let mut calls = std::collections::BTreeMap::<String, Value>::new();
         if status.is_success() {
@@ -1772,6 +1964,9 @@ async fn raw_tool_controls_probe(
                 }
                 if kind == "metadataEvent" {
                     metadata.push(payload.clone());
+                }
+                if kind == "reasoningContentEvent" {
+                    reasoning_events.push(payload.clone());
                 }
                 if kind == "toolUseEvent" {
                     let id = payload["toolUseId"]
@@ -1804,6 +1999,28 @@ async fn raw_tool_controls_probe(
             call["input"] = serde_json::from_str(call["rawInput"].as_str().unwrap_or_default())
                 .unwrap_or(Value::Null);
         }
+        if deep_audit && captured_reasoning.is_none() {
+            let reasoning_text: String = reasoning_events
+                .iter()
+                .filter_map(|e| e["text"].as_str())
+                .collect();
+            let signature: String = reasoning_events
+                .iter()
+                .filter_map(|e| e["signature"].as_str())
+                .collect();
+            if !reasoning_text.is_empty() && !signature.is_empty() {
+                captured_answer = text.clone();
+                captured_reasoning =
+                    Some(json!({"reasoningText":{"text":reasoning_text,"signature":signature}}));
+            }
+        }
+        let reasoning_observation: Vec<_> = reasoning_events.iter().map(|event|json!({
+            "keys":event.as_object().map(|e|e.keys().collect::<Vec<_>>()),
+            "textChars":event["text"].as_str().map(str::len),
+            "signatureChars":event["signature"].as_str().map(str::len),
+            "signatureSha256":event["signature"].as_str().map(|s|hex::encode(Sha256::digest(s.as_bytes()))),
+            "redactedChars":event["redactedContent"].as_str().map(str::len)
+        })).collect();
         if recovery_probe && label == "recovery-baseline" {
             ensure!(
                 status.is_success()
@@ -1829,12 +2046,14 @@ async fn raw_tool_controls_probe(
             json!({"expectedChars":expected.chars().count(),"expectedLines":expected.lines().count(),
                 "expectedSha256":hex::encode(Sha256::digest(expected.as_bytes())),"calls":observations})
         });
-        let result = json!({"case":label,"endpoint":account.endpoint,"region":account.region,"model":"claude-haiku-5.5",
+        let result = json!({"case":label,"endpoint":account.endpoint,"region":account.region,"model":actual.pointer("/conversationState/currentMessage/userInputMessage/modelId"),
             "wireUnchanged":true,"patchPointer":pointer,"patch":patch,"prompt":prompt,
             "system":system,"metadata":metadata,"outputObservation":output_observation,
             "actualUserContent":if recovery_probe { actual.pointer("/conversationState/currentMessage/userInputMessage/content") } else { None },
             "recoveryVariant":recovery_variants.get(&label),
             "auditTools":rewrite_tools.get(&label),
+            "reasoningEvents":reasoning_observation,
+            "assistantTextLocalTokenEstimate":crate::token::count_tokens(&text),
             "descriptionChars":description.chars().count(),"descriptionSha256":hex::encode(Sha256::digest(description.as_bytes())),
             "descriptionTail":description.chars().rev().take(65).collect::<String>().chars().rev().collect::<String>(),
             "bodySha256":digest,"httpStatus":status.as_u16(),"requestId":request_id,"durationMs":start.elapsed().as_millis(),

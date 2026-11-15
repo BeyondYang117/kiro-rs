@@ -565,22 +565,20 @@ RUST_LOG=debug ./target/release/kiro-rs
 
 - Claude Code 的传统 `/compact` 总结请求仍返回普通文本摘要。
 - 按需压缩：传入 `"compaction": {"type": "summarize"}`，返回单个 `compaction` 内容块，`stop_reason` 为 `compaction`。
-- 阈值压缩：传入 `"context_management": {"edits": [{"type": "compact_20260112", "trigger": {"type": "input_tokens", "value": 150000}, "pause_after_compaction": true}]}`。省略 trigger 时默认 150000，最小值 50000；省略 pause_after_compaction 时会生成摘要后继续回答。
-- 支持自定义 `instructions`、JSON / SSE 响应，以及后续请求中的摘要历史替换。压缩请求不能同时携带 `compaction` 和 `context_management`。
+- 阈值压缩：传入 `"context_management": {"edits": [{"type": "compact_20260112", "trigger": {"type": "input_tokens", "value": 150000}, "pause_after_compaction": true}]}`。省略 trigger 时默认 150000，显式值须为正整数；省略 pause_after_compaction 时会生成摘要后继续回答。
+- 支持自定义 `instructions`（不额外限制字符数）、JSON / SSE 响应，以及后续请求中的摘要历史替换。压缩请求不能同时携带 `compaction` 和 `context_management`。
 
-Kiro 没有原生 Anthropic 压缩接口，摘要由代理额外调用当前模型生成，会消耗额度。阈值依赖 token 估算；应在上下文满之前压缩。图片在摘要输入中用占位文本表示；按需摘要的 `kiro-rs:` 签名是代理内容校验值，不能用于 Anthropic 官方接口。无论是否启用压缩，都不会静默截断历史。
+Kiro 没有原生 Anthropic 压缩接口，摘要由代理额外调用当前模型生成，会消耗额度。阈值依赖 token 估算；应在上下文满之前压缩。图片作为真实图片附件传入摘要请求（正文保留对应位置标记）；按需摘要的 `kiro-rs:` 签名是代理内容校验值，不能用于 Anthropic 官方接口。摘要请求保留模型别名、thinking、effort 及其他生成控制，沿用同一端点的映射规则，不强制关闭思考。摘要截断依据上游停止/长度事件，不用本地 token 估算推断。无论是否启用压缩，都不会静默截断历史。
 
 协议参考：[按需压缩](https://platform.claude.com/docs/en/build-with-claude/compaction-on-demand)、[阈值压缩](https://platform.claude.com/docs/en/build-with-claude/compaction-threshold)。
 
 ### Thinking 模式
 
-默认 `ide` 端点沿用旧版提示词标签实现 thinking，恢复升级前的请求协议；这属于提示词引导，不保证精确的推理强度或预算。用户显式传入的设置优先于模型名中的 `-thinking` 别名。普通请求不会附加原生 thinking/effort 字段。旧版端点无法安全回放 Anthropic 历史中的推理及签名，因此会从 assistant 历史中移除，不会把推理改写成普通正文；CLI 默认沿用同一规则。启用端点原生 thinking 后，只有带非空签名的文本推理块会进入 Kiro 历史；无签名推理不回放。响应中的多个原生推理阶段会保留各自的文本和签名边界。
+默认旧协议模式不再把 thinking / effort 转成 `<thinking_mode>`、`<max_thinking_length>` 或 `<thinking_effort>` 提示词，也不新增虚构的 user/assistant 配对。显式设置会记录未映射警告；需要原生控制时可启用下述 `nativeThinking`。用户显式传入的设置优先于模型名中的 `-thinking` 别名。
 
-支持 Claude Code 的标准强度字段 `output_config.effort`，无需给模型名加 `-thinking`。强度会独立转换为 `<thinking_effort>` 提示词；仅传 effort、使用固定预算 thinking 或显式关闭 thinking 时也会保留强度，不会因为 effort 自动开启思考输出。当前支持的级别按模型校验，不支持的值返回 `400 invalid_request_error`。
+带签名的 reasoning 历史在旧协议、原生模式及跨提供商请求中保留，不再因传输模式或模型类别删除。2026-11-15 已在真实 CLI / us-east-1 验证 Haiku 5.5 的真实签名历史可在旧协议、原生 adaptive 模式和 GPT 请求中被接受；无签名和伪造签名被 Haiku 以 `THINKING_SIGNATURE_INVALID` 拒绝。接受不代表模型一定使用了推理内容。转换层只回放带非空签名的文本推理块；响应中的多个原生推理阶段保留各自文本和签名边界。
 
-当 `thinking.type` 为 `adaptive`（包括 `-thinking` 别名自动启用）且没有传非空 effort 时，默认值为：Haiku 5.5、Sonnet 5.5、Opus 5.5 使用 `medium`，Opus 4.7 使用 `xhigh`，其余使用 `high`。显式 effort 始终优先。完全不传 thinking/effort 且没有使用 `-thinking` 别名时，代理沿用 Kiro 自身的 thinking/effort 默认行为。`enabled` 未传 `budget_tokens` 时默认 20000；旧协议预算标签保留显式值，不再本地压至 24576。旧协议标签不是原生预算保证：实测 24576、30000 及非法字符串标签均被接受，未证明其严格生效。
-
-Claude Code 可直接连接 `/cc` 前缀（客户端会追加 `/v1/messages`），例如：
+支持 Claude Code 的标准强度字段 `output_config.effort`。当 `thinking.type` 为 `adaptive`（包括 `-thinking` 别名自动启用）且没有传非空 effort 时，默认值为：Haiku 5.5、Sonnet 5.5、Opus 5.5 使用 `medium`，Opus 4.7 使用 `xhigh`，其余使用 `high`。显式 effort 始终优先；`enabled` 未传 `budget_tokens` 时默认 20000。这些控制只在原生模式映射为模型参数；默认旧协议使用 Kiro 自身行为，不再通过标签模拟。
 
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:8990/cc"
@@ -590,11 +588,11 @@ claude --model claude-haiku-5-5 --effort high
 
 会话内可用 `/effort` 调整强度，也可通过 `CLAUDE_CODE_EFFORT_LEVEL=high` 设置。客户端需升级到支持所选模型及 effort 的版本；Haiku 5.5 需要 Claude Code v2.1.293 或更高。参数格式与客户端设置参考 [Anthropic effort 文档](https://platform.claude.com/docs/en/build-with-claude/effort)及 [Claude Code 模型配置](https://code.claude.com/docs/en/model-config#adjust-effort-level)。
 
-只有验证过当前 Kiro 账号、区域支持原生参数后，才设置 `"endpoints":{"cli":{"nativeThinking":true}}`（IDE 凭据使用 `ide` 键）。此模式通过 `additionalModelRequestFields` 传递 `max_tokens`、thinking 和 effort。支持 adaptive 的新版 Claude 会把兼容请求中的 `enabled` 转为 `adaptive` 并移除固定预算；旧版 4.5 模型仍传 `enabled` 和 `budget_tokens`。Sonnet 5.5 的 `disabled` 会转为原生 `between_tools`，该模式仅允许 `low` / `medium` / `high` effort；也可直接传 `thinking.type: "between_tools"`。`thinking.display` 支持 `summarized` / `omitted`，原样传给上游；未知字符串（包括空字符串）会忽略并使用默认显示，同时在调用日志中记录脱敏警告及修正建议，不再因此拒绝整次生成。省略或 `null` 同样使用默认显示；非字符串仍按请求格式错误拒绝。此兼容规则同时适用于两个消息接口、流式/非流式及压缩路径，不改变 thinking 类型、预算或 effort。本地参数校验及请求解析失败的日志会记录可读错误与失败阶段。历史签名按 `reasoningContent.reasoningText.{text,signature}` 传递，加密块按 `reasoningContent.redactedContent` 传递；Kiro 单条 assistant 历史只支持一个 reasoning 块，遇到多个 thinking / redacted_thinking 块或合并连续 assistant 消息时，仅保留最后一个有效的完整块，保持文本与其签名配对，不拼接多个签名对应的文本。该模式尚未经过真实 Kiro 调用验证。
+只有验证过当前 Kiro 账号、区域支持原生参数后，才设置 `"endpoints":{"cli":{"nativeThinking":true}}`（IDE 凭据使用 `ide` 键）。此模式通过 `additionalModelRequestFields` 传递 `max_tokens`、thinking 和 effort。支持 adaptive 的新版 Claude 会把兼容请求中的 `enabled` 转为 `adaptive` 并移除固定预算；旧版 4.5 模型仍传 `enabled` 和 `budget_tokens`。Sonnet 5.5 的 `disabled` 会转为原生 `between_tools`，该模式仅允许 `low` / `medium` / `high` effort；也可直接传 `thinking.type: "between_tools"`。`thinking.display` 支持 `summarized` / `omitted`，原样传给上游；未知字符串（包括空字符串）会忽略并使用默认显示，同时在调用日志中记录脱敏警告及修正建议，不再因此拒绝整次生成。省略或 `null` 同样使用默认显示；非字符串仍按请求格式错误拒绝。此兼容规则同时适用于两个消息接口、流式/非流式及压缩路径，不改变 thinking 类型、预算或 effort。本地参数校验及请求解析失败的日志会记录可读错误与失败阶段。历史签名按 `reasoningContent.reasoningText.{text,signature}` 传递，加密块按 `reasoningContent.redactedContent` 传递；Kiro 单条 assistant 历史只支持一个 reasoning 块，遇到多个 thinking / redacted_thinking 块或合并连续 assistant 消息时，仅保留最后一个有效的完整块，保持文本与其签名配对，不拼接多个签名对应的文本。原生参数及签名历史已在 CLI / us-east-1 的指定模型实测，结果不能外推至全部端点或模型，见 [thinking 与压缩实测](docs/LIVE_TESTING.md#thinking-历史与压缩实测)。
 
 上下文窗口使用项目内维护的模型映射：已确认的 1M 模型会在 `GET /v1/models` 的 `max_input_tokens` 和 `GET /v1/models/{model_id}` 中声明 1,000,000。新版 Kiro `metadataEvent.tokenUsage` 上报用量时，优先返回 `uncachedInputTokens`、`outputTokens` 和缓存读写数；缓存字段分别映射为 `cache_read_input_tokens` / `cache_creation_input_tokens`。重复 metadata 视为快照更新，不累加；缺失或无效的计数保留已有有效值。没有上报的输入数仍按 `contextUsageEvent` 百分比换算，没有该事件则回退本地估算；输出数未上报时使用本地估算。JSON、实时 SSE、`/cc` 缓冲 SSE 和摘要均使用此规则，摘要的缓存用量保留在 `usage.iterations` 中。上游拒绝 1M 请求时，代理无法扩展 Kiro 账号或模型本身的限制。
 
-Claude 默认旧协议模式的 `max_tokens` 仅用于本地响应/压缩处理；启用 `nativeThinking` 后会映射到 `additionalModelRequestFields.max_tokens`，新鲜账号 schema 明确不支持时省略。GPT / Kimi 的实测规则见下文。Kiro 文档所列 Claude 模型通常要求最小 1024；Sonnet 5.5、Sonnet 4.6、Opus 4.6 / 4.7 的上限为 64000，Opus 4.8 / 5 的上限为 128000。达到上游长度限制时会返回 `max_tokens` stop reason。模型列表与模型详情的输出上限共用本地默认表；账号目录可能报告不同值。temperature、top_p、top_k 和 stop_sequences 尚无已验证的 Kiro 映射，代理省略这些参数并记录警告。`tool_choice:auto` 沿用默认选择，`none` 由代理移除工具定义实现；`any` / 指定工具和 `disable_parallel_tool_use:true` 因缺少可实现其约束的映射而明确报错。2026-11-15 在 CLI / us-east-1 / `claude-haiku-5.5` 的原始请求实测：上述采样字段及工具选择字段放入 `additionalModelRequestFields` 会被上游以 400 拒绝；根层/上下文候选位置虽返回 200，但停止序列和强制工具选择未生效，无效字段同样被接受。未开展采样统计实验，不能据此断言所有模型都不支持这些参数。详见 [工具描述与生成控制实测](docs/LIVE_TESTING.md#工具描述与生成控制实测)。JSON schema 输出也尚未映射到已确认的 Kiro 原生字段。
+Claude 默认旧协议模式不发送原生 `max_tokens`，也不凭本地 token 估算判断摘要截断；启用 `nativeThinking` 后会映射到 `additionalModelRequestFields.max_tokens`，新鲜账号 schema 明确不支持时省略。GPT / Kimi 的实测规则见下文。Kiro 文档所列 Claude 模型通常要求最小 1024；Sonnet 5.5、Sonnet 4.6、Opus 4.6 / 4.7 的上限为 64000，Opus 4.8 / 5 的上限为 128000。达到上游长度限制时会返回 `max_tokens` stop reason。模型列表与模型详情的输出上限共用本地默认表；账号目录可能报告不同值。temperature、top_p、top_k 和 stop_sequences 尚无已验证的 Kiro 映射，代理省略这些参数并记录警告。`tool_choice:auto` 沿用默认选择，`none` 由代理移除工具定义实现；`any` / 指定工具和 `disable_parallel_tool_use:true` 因缺少可实现其约束的映射而明确报错。2026-11-15 在 CLI / us-east-1 / `claude-haiku-5.5` 的原始请求实测：上述采样字段及工具选择字段放入 `additionalModelRequestFields` 会被上游以 400 拒绝；根层/上下文候选位置虽返回 200，但停止序列和强制工具选择未生效，无效字段同样被接受。未开展采样统计实验，不能据此断言所有模型都不支持这些参数。详见 [工具描述与生成控制实测](docs/LIVE_TESTING.md#工具描述与生成控制实测)。JSON schema 输出也尚未映射到已确认的 Kiro 原生字段。
 
 `temperature`、`top_p`、`top_k` 会被忽略，使用 Kiro 默认采样行为；非 `null` 值会在调用日志中记录 WARN（仅记录参数名，不记录参数值），不再因此拒绝请求。省略或 `null` 不产生警告。此规则同时适用于 `/v1/messages` 和 `/cc/v1/messages` 的流式、非流式及压缩请求。
 

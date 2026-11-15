@@ -146,7 +146,7 @@ pub fn additional_model_request_fields(req: &MessagesRequest) -> Option<serde_js
     }
     if let Some(thinking) = &req.thinking {
         // Keep client intent here; endpoint-specific normalization belongs to
-        // native transport so legacy enabled budgets retain their semantics.
+        // native transport. Legacy transport never encodes controls as prompts.
         let kind = thinking.thinking_type.as_str();
         let mut config = serde_json::json!({"type":kind});
         if kind == "enabled" {
@@ -2546,18 +2546,13 @@ mod tests {
                 "Inspect this Rust project.\nStart with src/main.rs."
             );
             let assistant = &history[3]["assistantResponseMessage"];
-            if native {
-                assert_eq!(assistant["content"], "I will read the entry point.");
-                assert_eq!(
-                    assistant["reasoningContent"],
-                    serde_json::json!({
-                        "reasoningText":{"text":"Inspect the Rust entry point first.","signature":"thought-signature"}
-                    })
-                );
-            } else {
-                assert_eq!(assistant["content"], "I will read the entry point.");
-                assert!(assistant.get("reasoningContent").is_none());
-            }
+            assert_eq!(assistant["content"], "I will read the entry point.");
+            assert_eq!(
+                assistant["reasoningContent"],
+                serde_json::json!({
+                    "reasoningText":{"text":"Inspect the Rust entry point first.","signature":"thought-signature"}
+                })
+            );
             let call = &history[3]["assistantResponseMessage"]["toolUses"][0];
             assert_eq!(call["input"], serde_json::json!({"path":"src/main.rs"}));
             let result =

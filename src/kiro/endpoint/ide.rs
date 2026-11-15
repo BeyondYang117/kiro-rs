@@ -146,22 +146,9 @@ pub(super) fn native_model_body(body: &str) -> String {
         .unwrap_or_default()
         .to_owned();
     if crate::anthropic::is_non_claude(&model) {
-        // Claude signatures and redacted reasoning cannot be replayed to a
-        // different provider. Text, images and tool history remain intact.
-        if let Some(history) = request
-            .pointer_mut("/conversationState/history")
-            .and_then(Value::as_array_mut)
-        {
-            for message in history {
-                if let Some(assistant) = message
-                    .get_mut("assistantResponseMessage")
-                    .and_then(Value::as_object_mut)
-                {
-                    assistant.remove("reasoningContent");
-                }
-            }
-        }
-        return serde_json::to_string(&request).unwrap_or_else(|_| body.to_owned());
+        // The runtime accepts signed Claude reasoning history for GPT as well.
+        // Preserve it and let the selected upstream validate the original data.
+        return body.to_owned();
     }
     if let Some(thinking) = request.pointer_mut("/additionalModelRequestFields/thinking") {
         let kind = thinking.get("type").and_then(Value::as_str);
@@ -179,69 +166,24 @@ pub(super) fn native_model_body(body: &str) -> String {
     serde_json::to_string(&request).unwrap_or_else(|_| body.to_owned())
 }
 
-/// Keep the established q.amazonaws.com wire format by default. Native model
-/// controls are opt-in until the selected account/region has been verified.
+/// Legacy mode has no verified mapping for generation controls. Do not turn
+/// them into conversation instructions or delete authenticated history.
 pub(super) fn legacy_thinking_body(body: &str) -> String {
-    use serde_json::{Value, json};
-
+    use serde_json::Value;
     let Ok(mut request) = serde_json::from_str::<Value>(body) else {
         return body.to_owned();
     };
-    let fields = request
+    if let Some(fields) = request
         .as_object_mut()
-        .and_then(|root| root.remove("additionalModelRequestFields"));
-    let prefix = fields.as_ref().and_then(|fields| {
-        let thinking_type = fields.pointer("/thinking/type").and_then(Value::as_str);
-        let mut prefix = match thinking_type {
-            Some("enabled") => format!(
-                "<thinking_mode>enabled</thinking_mode><max_thinking_length>{}</max_thinking_length>",
-                fields.pointer("/thinking/budget_tokens").and_then(Value::as_i64)
-                    .unwrap_or(20_000)
-            ),
-            Some("adaptive") => "<thinking_mode>adaptive</thinking_mode>".to_owned(),
-            Some("between_tools") => "<thinking_mode>between_tools</thinking_mode>".to_owned(),
-            _ => String::new(),
-        };
-        // Effort applies to the whole response, independently of thinking mode.
-        // Claude Code may send it without a thinking block or with thinking disabled.
-        let effort = fields.pointer("/output_config/effort").and_then(Value::as_str)
-            .filter(|effort| !effort.is_empty())
-            .or_else(|| (thinking_type == Some("adaptive")).then_some("high"));
-        if let Some(effort) = effort {
-            prefix.push_str(&format!("<thinking_effort>{effort}</thinking_effort>"));
-        }
-        (!prefix.is_empty()).then_some(prefix)
-    });
-    if let Some(state) = request.get_mut("conversationState") {
-        let model = state
-            .pointer("/currentMessage/userInputMessage/modelId")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        if let Some(history) = state.get_mut("history").and_then(Value::as_array_mut) {
-            for message in history.iter_mut() {
-                if let Some(assistant) = message
-                    .get_mut("assistantResponseMessage")
-                    .and_then(Value::as_object_mut)
-                {
-                    // Legacy transport cannot replay authenticated reasoning.
-                    // Never turn it into ordinary assistant text or strip its
-                    // signature and then present it as conversation content.
-                    assistant.remove("reasoningContent");
-                }
-            }
-        }
-        if let Some(prefix) = prefix {
-            // Use a separate instruction pair, preserving user text and tools.
-            let Some(state) = state.as_object_mut() else {
-                return body.to_owned();
-            };
-            let history = state.entry("history").or_insert_with(|| json!([]));
-            if let Some(history) = history.as_array_mut() {
-                history.splice(0..0, [
-                    json!({"userInputMessage":{"content":prefix,"modelId":model,"origin":"AI_EDITOR"}}),
-                    json!({"assistantResponseMessage":{"content":"I will follow these instructions."}}),
-                ]);
+        .and_then(|root| root.remove("additionalModelRequestFields"))
+    {
+        for parameter in ["thinking", "output_config"] {
+            if fields.get(parameter).is_some() {
+                tracing::warn!(
+                    stage = "endpoint_translation",
+                    parameter,
+                    "Legacy Kiro mode has no verified mapping for this control; no prompt is injected. Enable nativeThinking for native model controls."
+                );
             }
         }
     }
@@ -301,26 +243,14 @@ mod tests {
     }
 
     #[test]
-    fn default_endpoint_does_not_send_native_controls_or_reasoning() {
+    fn default_endpoint_preserves_history_without_injecting_control_prompts() {
         let body = json!({"conversationState":{
             "currentMessage":{"userInputMessage":{"content":"continue", "modelId":"claude-sonnet-4.6"}},
             "history":[{"assistantResponseMessage":{"content":"answer", "reasoningContent":{"reasoningText":{"text":"thought", "signature":"sig"}}}}]
         }, "additionalModelRequestFields":{"thinking":{"type":"adaptive"},"output_config":{"effort":"low"}}});
         let result = transform(body.clone(), false);
         assert!(result.get("additionalModelRequestFields").is_none());
-        let history = result["conversationState"]["history"].as_array().unwrap();
-        assert!(
-            history[0]["userInputMessage"]["content"]
-                .as_str()
-                .unwrap()
-                .contains("<thinking_effort>low</thinking_effort>")
-        );
-        assert_eq!(history[2]["assistantResponseMessage"]["content"], "answer");
-        assert!(
-            history[2]["assistantResponseMessage"]
-                .get("reasoningContent")
-                .is_none()
-        );
+        assert_eq!(result["conversationState"], body["conversationState"]);
         assert_eq!(
             transform(body.clone(), true)["additionalModelRequestFields"],
             body["additionalModelRequestFields"]
@@ -332,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_reasoning_is_dropped_without_changing_text_or_tools() {
+    fn legacy_reasoning_is_preserved_without_changing_text_or_tools() {
         for reasoning in [
             json!({"reasoningText":{"text":"private thought", "signature":"sig"}}),
             json!({"reasoningText":{"text":"unsigned private thought"}}),
@@ -343,9 +273,8 @@ mod tests {
                 "history":[{"assistantResponseMessage":{"content":"answer", "toolUses":[{"toolUseId":"t1", "name":"Read", "input":{}}], "reasoningContent":reasoning}}]
             }});
             let wire = transform(body.clone(), false);
-            let mut expected =
+            let expected =
                 body["conversationState"]["history"][0]["assistantResponseMessage"].clone();
-            expected.as_object_mut().unwrap().remove("reasoningContent");
             assert_eq!(
                 wire["conversationState"]["history"][0]["assistantResponseMessage"],
                 expected
@@ -363,14 +292,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_explicit_thinking_budget_is_not_capped_by_proxy() {
+    fn legacy_explicit_thinking_does_not_become_prompt_text() {
         let body = json!({"conversationState":{"currentMessage":{"userInputMessage":{"content":"question","modelId":"claude-haiku-5.5"}}},
             "additionalModelRequestFields":{"thinking":{"type":"enabled","budget_tokens":30000}}});
-        let wire = transform(body, false);
-        assert_eq!(
-            wire["conversationState"]["history"][0]["userInputMessage"]["content"],
-            "<thinking_mode>enabled</thinking_mode><max_thinking_length>30000</max_thinking_length>"
-        );
+        let wire = transform(body.clone(), false);
+        assert_eq!(wire["conversationState"], body["conversationState"]);
+        assert!(wire.get("additionalModelRequestFields").is_none());
     }
 
     #[test]
@@ -392,20 +319,7 @@ mod tests {
                     legacy["conversationState"]["currentMessage"],
                     body["conversationState"]["currentMessage"]
                 );
-                let history = legacy["conversationState"]["history"].as_array().unwrap();
-                assert_eq!(
-                    &history[2..],
-                    body["conversationState"]["history"].as_array().unwrap()
-                );
-                let prefix = history[0]["userInputMessage"]["content"].as_str().unwrap();
-                assert!(prefix.contains(&format!("<thinking_effort>{effort}</thinking_effort>")));
-                assert_eq!(
-                    prefix.contains("<thinking_mode>"),
-                    matches!(thinking, Some("enabled" | "adaptive"))
-                );
-                if thinking == Some("enabled") {
-                    assert!(prefix.contains("<max_thinking_length>1234</max_thinking_length>"));
-                }
+                assert_eq!(legacy["conversationState"], body["conversationState"]);
                 let native = transform(body.clone(), true);
                 let mut expected = fields.clone();
                 if let Some(kind) = thinking {
@@ -443,15 +357,9 @@ mod tests {
                 fields["thinking"].get("budget_tokens").is_some(),
                 expected == "enabled"
             );
-            let legacy = transform(body, false);
+            let legacy = transform(body.clone(), false);
             assert!(legacy.get("additionalModelRequestFields").is_none());
-            if kind == "enabled" {
-                assert!(
-                    legacy
-                        .to_string()
-                        .contains("<max_thinking_length>2048</max_thinking_length>")
-                );
-            }
+            assert_eq!(legacy["conversationState"], body["conversationState"]);
         }
     }
 
