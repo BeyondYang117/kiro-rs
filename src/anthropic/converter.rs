@@ -392,16 +392,13 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
     // 4. 确定触发类型
     let chat_trigger_type = determine_chat_trigger_type(req);
 
-    // 5. 将末尾连续的 user 合并为当前轮次，避免拆开同一批工具结果。
-    let current_start = messages
-        .iter()
-        .rposition(|message| message.role != "user")
-        .map_or(0, |index| index + 1);
-    let current_messages: Vec<_> = messages[current_start..].iter().collect();
-    let merged_current = merge_user_messages(&current_messages, &model_id)?.user_input_message;
-    let text_content = merged_current.content;
-    let images = merged_current.images;
-    let mut tool_results = merged_current.user_input_message_context.tool_results;
+    // Only the final user message is currentMessage. Earlier messages retain
+    // their boundaries, including consecutive users and split tool results.
+    let current = convert_user_message(messages.last().expect("validated messages"), &model_id)?
+        .user_input_message;
+    let text_content = current.content;
+    let images = current.images;
+    let tool_results = current.user_input_message_context.tool_results;
 
     // 6. 转换工具定义（超长名称自动缩短并记录映射）
     let mut tool_name_map = HashMap::new();
@@ -429,8 +426,7 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
     let tools = convert_tools(&req.tools, &mut tool_name_map);
 
     // 7. 构建历史消息（需要先构建，以便收集历史中使用的工具）
-    let mut history = build_history(&messages[..=current_start], &model_id, &mut tool_name_map)?;
-    normalize_tool_use_ids(&mut history, &mut tool_results)?;
+    let mut history = build_history(messages, &model_id, &mut tool_name_map)?;
     // Preserve orphaned, duplicate and out-of-order tool blocks. The real Kiro
     // upstream validates their pairing and returns TOOL_USE_RESULT_MISMATCH;
     // silently removing them would turn an invalid history into another request.
@@ -631,106 +627,6 @@ fn extract_tool_result_content(content: &Option<serde_json::Value>) -> (String, 
     (text, images)
 }
 
-/// Keep IDs unique on the wire without rejecting clients that reuse IDs across turns.
-/// Identical calls in a merged assistant turn are replays; conflicting calls are ambiguous.
-fn normalize_tool_use_ids(
-    history: &mut [Message],
-    current_results: &mut [ToolResult],
-) -> Result<(), ConversionError> {
-    let mut reserved = std::collections::HashSet::new();
-    for message in history.iter() {
-        match message {
-            Message::Assistant(message) => {
-                if let Some(calls) = &message.assistant_response_message.tool_uses {
-                    reserved.extend(calls.iter().map(|call| call.tool_use_id.clone()));
-                }
-            }
-            Message::User(message) => reserved.extend(
-                message
-                    .user_input_message
-                    .user_input_message_context
-                    .tool_results
-                    .iter()
-                    .map(|result| result.tool_use_id.clone()),
-            ),
-        }
-    }
-    reserved.extend(
-        current_results
-            .iter()
-            .map(|result| result.tool_use_id.clone()),
-    );
-    let mut seen = std::collections::HashSet::new();
-    let mut remap = HashMap::new();
-    let mut previous_assistant = false;
-    for (index, message) in history.iter_mut().enumerate() {
-        match message {
-            Message::Assistant(message) => {
-                if !previous_assistant {
-                    remap.clear();
-                }
-                previous_assistant = true;
-                let Some(calls) = &mut message.assistant_response_message.tool_uses else {
-                    continue;
-                };
-                let mut unique: Vec<ToolUseEntry> = Vec::new();
-                for call in std::mem::take(calls) {
-                    if let Some(previous) = unique
-                        .iter()
-                        .find(|previous| previous.tool_use_id == call.tool_use_id)
-                    {
-                        if previous.name != call.name || previous.input != call.input {
-                            return Err(ConversionError::InvalidToolFormat(format!(
-                                "history[{index}]: conflicting tool_use calls share an id in the same assistant turn"
-                            )));
-                        }
-                        continue;
-                    }
-                    unique.push(call);
-                }
-                for call in &mut unique {
-                    if !seen.insert(call.tool_use_id.clone()) {
-                        // Stable across retries, and disjoint from every client-provided ID.
-                        let mut salt = 0usize;
-                        let replacement = loop {
-                            let digest = Sha256::digest(
-                                format!("{}:{index}:{salt}", call.tool_use_id).as_bytes(),
-                            );
-                            let candidate = format!("toolu_{}", &hex::encode(digest)[..32]);
-                            if reserved.insert(candidate.clone()) {
-                                break candidate;
-                            }
-                            salt += 1;
-                        };
-                        remap.insert(call.tool_use_id.clone(), replacement.clone());
-                        call.tool_use_id = replacement;
-                    }
-                }
-                *calls = unique;
-            }
-            Message::User(message) => {
-                previous_assistant = false;
-                for result in &mut message
-                    .user_input_message
-                    .user_input_message_context
-                    .tool_results
-                {
-                    if let Some(id) = remap.get(&result.tool_use_id) {
-                        result.tool_use_id = id.clone();
-                    }
-                }
-                remap.clear();
-            }
-        }
-    }
-    for result in current_results {
-        if let Some(id) = remap.get(&result.tool_use_id) {
-            result.tool_use_id = id.clone();
-        }
-    }
-    Ok(())
-}
-
 /// Kiro API 工具名称最大长度限制
 // Live CLI/Haiku 5.5 probes accept distinct 64-character names and reject 65.
 const TOOL_NAME_MAX_LEN: usize = 64;
@@ -844,90 +740,36 @@ fn build_history(
     tool_name_map: &mut HashMap<String, String>,
 ) -> Result<Vec<Message>, ConversionError> {
     let mut history = Vec::new();
-
-    // 2. 处理常规消息历史
-    // 最后一条消息作为 currentMessage，不加入历史
-    // 经过 prefill 预处理后，messages 末尾必定是 user，故直接截掉最后一条即可
-    let history_end_index = messages.len().saturating_sub(1);
-
-    // 收集并配对消息
-    let mut user_buffer: Vec<&super::types::Message> = Vec::new();
-    let mut assistant_buffer: Vec<&super::types::Message> = Vec::new();
-
-    for msg in messages.iter().take(history_end_index) {
-        if msg.role == "user" {
-            // 先处理累积的 assistant 消息
-            if !assistant_buffer.is_empty() {
-                history.extend(
-                    convert_assistant_turn(&assistant_buffer, tool_name_map)?
-                        .into_iter()
-                        .map(Message::Assistant),
-                );
-                assistant_buffer.clear();
-            }
-            user_buffer.push(msg);
-        } else if msg.role == "assistant" {
-            // 先处理累积的 user 消息
-            if !user_buffer.is_empty() {
-                let merged_user = merge_user_messages(&user_buffer, model_id)?;
-                history.push(Message::User(merged_user));
-                user_buffer.clear();
-            }
-            // 累积 assistant 消息（支持连续多条）
-            assistant_buffer.push(msg);
+    // The final user message is currentMessage; every prior message retains its
+    // original role, content and position. Kiro accepts consecutive roles.
+    for message in messages.iter().take(messages.len().saturating_sub(1)) {
+        match message.role.as_str() {
+            "user" => history.push(Message::User(convert_user_message(message, model_id)?)),
+            "assistant" => history.extend(
+                convert_assistant_turn(&[message], tool_name_map)?
+                    .into_iter()
+                    .map(Message::Assistant),
+            ),
+            _ => unreachable!("roles validated before conversion"),
         }
     }
-
-    // 处理末尾累积的 assistant 消息
-    if !assistant_buffer.is_empty() {
-        history.extend(
-            convert_assistant_turn(&assistant_buffer, tool_name_map)?
-                .into_iter()
-                .map(Message::Assistant),
-        );
-    }
-
-    // 处理结尾的孤立 user 消息
-    if !user_buffer.is_empty() {
-        let merged_user = merge_user_messages(&user_buffer, model_id)?;
-        history.push(Message::User(merged_user));
-    }
-
     Ok(history)
 }
 
-/// 合并多个 user 消息
-fn merge_user_messages(
-    messages: &[&super::types::Message],
+/// Convert one user message without merging adjacent messages or tool results.
+fn convert_user_message(
+    message: &super::types::Message,
     model_id: &str,
 ) -> Result<HistoryUserMessage, ConversionError> {
-    let mut content_parts = Vec::new();
-    let mut all_images = Vec::new();
-    let mut all_tool_results = Vec::new();
-
-    for msg in messages {
-        let (text, images, tool_results) = process_message_content(&msg.content)?;
-        if !text.is_empty() {
-            content_parts.push(text);
-        }
-        all_images.extend(images);
-        all_tool_results.extend(tool_results);
+    let (text, images, tool_results) = process_message_content(&message.content)?;
+    let mut user_msg = UserMessage::new(text, model_id);
+    if !images.is_empty() {
+        user_msg = user_msg.with_images(images);
     }
-
-    let content = content_parts.join("\n");
-    // 保留文本内容，即使有工具结果也不丢弃用户文本
-    let mut user_msg = UserMessage::new(&content, model_id);
-
-    if !all_images.is_empty() {
-        user_msg = user_msg.with_images(all_images);
+    if !tool_results.is_empty() {
+        user_msg =
+            user_msg.with_context(UserInputMessageContext::new().with_tool_results(tool_results));
     }
-
-    if !all_tool_results.is_empty() {
-        let mut ctx = UserInputMessageContext::new();
-        ctx = ctx.with_tool_results(all_tool_results);
-        user_msg = user_msg.with_context(ctx);
-    }
-
     Ok(HistoryUserMessage {
         user_input_message: user_msg,
     })
@@ -971,36 +813,15 @@ fn convert_assistant_turn(
             has_reasoning |= valid_reasoning;
             phase.push(block.clone());
         }
-        if !phase.is_empty() {
-            phases.push(super::types::Message {
-                role: "assistant".into(),
-                content: serde_json::json!(phase),
-            });
-        }
+        phases.push(super::types::Message {
+            role: "assistant".into(),
+            content: serde_json::json!(phase),
+        });
     }
-    let converted: Vec<_> = phases
+    phases
         .iter()
         .map(|message| convert_assistant_message(message, tool_name_map))
-        .collect::<Result<_, _>>()?;
-    if converted
-        .iter()
-        .filter(|message| {
-            message
-                .assistant_response_message
-                .reasoning_content
-                .is_some()
-        })
-        .count()
-        > 1
-    {
-        return Ok(converted);
-    }
-    // Keep existing text/tool merging when no reasoning boundary can be lost.
-    let refs: Vec<_> = phases.iter().collect();
-    if refs.is_empty() {
-        return Ok(vec![HistoryAssistantMessage::new("")]);
-    }
-    Ok(vec![merge_assistant_messages(&refs, tool_name_map)?])
+        .collect()
 }
 
 /// 转换 assistant 消息
@@ -1078,69 +899,13 @@ fn convert_assistant_message(
         _ => {}
     }
 
-    // Kiro stores native reasoning separately from assistant text.
-    let final_content = if text_content.is_empty() && !tool_uses.is_empty() {
-        " ".to_string()
-    } else {
-        text_content
-    };
-
-    let mut assistant = AssistantMessage::new(final_content);
+    // Empty tool-call text is accepted upstream; do not manufacture whitespace.
+    let mut assistant = AssistantMessage::new(text_content);
     assistant.reasoning_content = reasoning_content;
     if !tool_uses.is_empty() {
         assistant = assistant.with_tool_uses(tool_uses);
     }
 
-    Ok(HistoryAssistantMessage {
-        assistant_response_message: assistant,
-    })
-}
-
-/// 合并多个连续的 assistant 消息为一条
-/// 用于处理网络不稳定时产生的连续 assistant 消息（Issue #79）
-fn merge_assistant_messages(
-    messages: &[&super::types::Message],
-    tool_name_map: &mut HashMap<String, String>,
-) -> Result<HistoryAssistantMessage, ConversionError> {
-    assert!(!messages.is_empty());
-    if messages.len() == 1 {
-        return convert_assistant_message(messages[0], tool_name_map);
-    }
-
-    let mut all_tool_uses: Vec<ToolUseEntry> = Vec::new();
-    let mut content_parts: Vec<String> = Vec::new();
-    let mut reasoning_content = None;
-
-    for msg in messages {
-        let converted = convert_assistant_message(msg, tool_name_map)?;
-        let am = converted.assistant_response_message;
-        if !am.content.trim().is_empty() {
-            content_parts.push(am.content);
-        }
-        if let Some(tus) = am.tool_uses {
-            all_tool_uses.extend(tus);
-        }
-        if am.reasoning_content.is_some() {
-            if reasoning_content.is_some() {
-                return Err(ConversionError::InvalidMessageFormat(
-                    "Multiple reasoning phases must be converted separately".into(),
-                ));
-            }
-            reasoning_content = am.reasoning_content;
-        }
-    }
-
-    let content = if content_parts.is_empty() && !all_tool_uses.is_empty() {
-        " ".to_string()
-    } else {
-        content_parts.join("\n\n")
-    };
-
-    let mut assistant = AssistantMessage::new(content);
-    assistant.reasoning_content = reasoning_content;
-    if !all_tool_uses.is_empty() {
-        assistant = assistant.with_tool_uses(all_tool_uses);
-    }
     Ok(HistoryAssistantMessage {
         assistant_response_message: assistant,
     })
@@ -1883,19 +1648,16 @@ mod tests {
     }
 
     fn assert_wire_tool_pairs(state: &ConversationState) {
-        let mut seen = std::collections::HashSet::new();
         let mut pending = std::collections::HashSet::new();
         for message in &state.history {
             match message {
                 Message::Assistant(message) => {
-                    assert!(pending.is_empty());
                     for call in message
                         .assistant_response_message
                         .tool_uses
                         .iter()
                         .flatten()
                     {
-                        assert!(seen.insert(call.tool_use_id.clone()));
                         pending.insert(call.tool_use_id.clone());
                     }
                 }
@@ -1907,7 +1669,6 @@ mod tests {
                     {
                         assert!(pending.remove(&result.tool_use_id));
                     }
-                    assert!(pending.is_empty());
                 }
             }
         }
@@ -1920,7 +1681,6 @@ mod tests {
             assert!(pending.remove(&result.tool_use_id));
         }
         assert!(pending.is_empty());
-        assert!(!seen.is_empty());
     }
 
     #[test]
@@ -1945,21 +1705,43 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_calls_in_same_turn_remain_rejected() {
-        for second in [
-            serde_json::json!({"type":"tool_use","id":"a","name":"write","input":{}}),
-            serde_json::json!({"type":"tool_use","id":"a","name":"read","input":{"path":"other"}}),
-        ] {
-            let req = tool_validation_request(serde_json::json!([
-                {"role":"assistant","content":[{"type":"tool_use","id":"a","name":"read","input":{}}]},
-                {"role":"assistant","content":[second]},
-                {"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"ok"}]}
-            ]));
-            assert!(
-                convert_request(&req)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("conflicting tool_use")
+    fn conflicting_calls_are_preserved_for_upstream_validation() {
+        for separate in [false, true] {
+            let first = serde_json::json!({"type":"tool_use","id":"a","name":"read","input":{"path":"first"}});
+            let second = serde_json::json!({"type":"tool_use","id":"a","name":"read","input":{"path":"second"}});
+            let mut messages = if separate {
+                vec![
+                    serde_json::json!({"role":"assistant","content":[first]}),
+                    serde_json::json!({"role":"assistant","content":[second]}),
+                ]
+            } else {
+                vec![serde_json::json!({"role":"assistant","content":[first,second]})]
+            };
+            messages.push(serde_json::json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"ok"}]}));
+            let wire = serde_json::to_value(
+                convert_request(&tool_validation_request(messages.into()))
+                    .unwrap()
+                    .conversation_state,
+            )
+            .unwrap();
+            let calls: Vec<_> = wire["history"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|m| {
+                    m["assistantResponseMessage"]["toolUses"]
+                        .as_array()
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[0]["toolUseId"], "a");
+            assert_eq!(calls[1]["toolUseId"], "a");
+            assert_eq!(calls[0]["input"]["path"], "first");
+            assert_eq!(calls[1]["input"]["path"], "second");
+            assert_eq!(
+                wire["history"].as_array().unwrap().len(),
+                if separate { 2 } else { 1 }
             );
         }
     }
@@ -2001,34 +1783,6 @@ mod tests {
                 convert_request(&req),
                 Err(ConversionError::InvalidToolFormat(_))
             ));
-        }
-    }
-
-    #[test]
-    fn duplicate_tool_use_ids_are_normalized_within_and_across_turns() {
-        let call = serde_json::json!({"type":"tool_use", "id":"a", "name":"read", "input":{}});
-        let result = serde_json::json!({"type":"tool_result", "tool_use_id":"a", "content":"ok"});
-        for messages in [
-            serde_json::json!([
-                {"role":"assistant", "content":[call, call]},
-                {"role":"user", "content":[result]}
-            ]),
-            serde_json::json!([
-                {"role":"assistant", "content":[call]},
-                {"role":"assistant", "content":[call]},
-                {"role":"user", "content":[result]}
-            ]),
-            serde_json::json!([
-                {"role":"assistant", "content":[call]},
-                {"role":"user", "content":[result]},
-                {"role":"assistant", "content":[call]},
-                {"role":"user", "content":[result]}
-            ]),
-        ] {
-            let state = convert_request(&tool_validation_request(messages))
-                .unwrap()
-                .conversation_state;
-            assert_wire_tool_pairs(&state);
         }
     }
 
@@ -2159,71 +1913,7 @@ mod tests {
     }
 
     #[test]
-    fn remapped_ids_avoid_client_calls_and_orphan_results() {
-        let call = serde_json::json!({"type":"tool_use","id":"a","name":"read","input":{}});
-        let result = serde_json::json!({"type":"tool_result","tool_use_id":"a","content":"ok"});
-        let messages = serde_json::json!([
-            {"role":"assistant","content":[call]}, {"role":"user","content":[result]},
-            {"role":"assistant","content":[call]}, {"role":"user","content":[result]}
-        ]);
-        let baseline = convert_request(&tool_validation_request(messages.clone()))
-            .unwrap()
-            .conversation_state;
-        let wire = serde_json::to_value(baseline).unwrap();
-        let candidate = wire["history"][2]["assistantResponseMessage"]["toolUses"][0]["toolUseId"]
-            .as_str()
-            .unwrap();
-        for reserve_as_call in [false, true] {
-            let mut messages = messages.clone();
-            if reserve_as_call {
-                messages.as_array_mut().unwrap().extend([
-                    serde_json::json!({"role":"assistant","content":[{"type":"tool_use","id":candidate,"name":"read","input":{"path":"later"}}]}),
-                    serde_json::json!({"role":"user","content":[{"type":"tool_result","tool_use_id":candidate,"content":"later result"}]}),
-                ]);
-            } else {
-                messages[3]["content"].as_array_mut().unwrap().push(serde_json::json!(
-                    {"type":"tool_result","tool_use_id":candidate,"content":"orphan must not match generated ID"}
-                ));
-            }
-            let state = convert_request(&tool_validation_request(messages))
-                .unwrap()
-                .conversation_state;
-            if reserve_as_call {
-                assert_wire_tool_pairs(&state);
-            }
-            let wire = serde_json::to_value(state).unwrap();
-            assert_ne!(
-                wire["history"][2]["assistantResponseMessage"]["toolUses"][0]["toolUseId"],
-                candidate
-            );
-            let current = &wire["currentMessage"]["userInputMessage"]["userInputMessageContext"]["toolResults"];
-            assert_eq!(
-                current.as_array().unwrap().len(),
-                if reserve_as_call { 1 } else { 2 }
-            );
-            if !reserve_as_call {
-                assert_eq!(current[1]["toolUseId"], candidate);
-                assert_eq!(
-                    current[1]["content"][0]["text"],
-                    "orphan must not match generated ID"
-                );
-            }
-            assert_eq!(
-                current[0]["content"][0]["text"],
-                if reserve_as_call {
-                    "later result"
-                } else {
-                    "ok"
-                }
-            );
-            if reserve_as_call {
-                assert_eq!(current[0]["toolUseId"], candidate);
-            }
-        }
-    }
-
-    #[test]
-    fn remapping_does_not_leak_past_a_result_turn() {
+    fn stale_result_ids_remain_unchanged() {
         let req = tool_validation_request(serde_json::json!([
             {"role":"assistant","content":[{"type":"tool_use","id":"a","name":"read","input":{}}]},
             {"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"first"}]},
@@ -2290,37 +1980,35 @@ mod tests {
         let state = convert_request(&req).unwrap().conversation_state;
         assert_wire_tool_pairs(&state);
         let wire = serde_json::to_value(state).unwrap();
-        for (index, user) in [&wire["history"][1], &wire["currentMessage"]]
-            .iter()
-            .enumerate()
-        {
-            let assistant = &wire["history"][index * 2]["assistantResponseMessage"];
+        for turn in 0..2 {
+            let assistant = &wire["history"][turn * 3]["assistantResponseMessage"];
             assert_eq!(assistant["content"], "calling");
             assert_eq!(
                 assistant["reasoningContent"]["reasoningText"]["signature"],
                 "sig"
             );
-            let user = &user["userInputMessage"];
-            assert_eq!(user["content"], "first text\nsecond text");
-            assert_eq!(user["images"][0]["source"]["bytes"], "aGVsbG8=");
-            let results = user["userInputMessageContext"]["toolResults"]
-                .as_array()
-                .unwrap();
-            assert_eq!(results.len(), 2);
-            assert_eq!(results[0]["status"], "error");
-            assert_eq!(results[0]["content"][0]["text"], "failed");
-            assert_eq!(
-                results[0]["toolUseId"],
-                assistant["toolUses"][1]["toolUseId"]
-            );
-            assert_eq!(
-                results[1]["toolUseId"],
-                assistant["toolUses"][0]["toolUseId"]
-            );
-            assert_eq!(results[1]["content"][0]["text"], "image result");
-            if index == 0 {
-                assert_eq!(assistant["toolUses"][0]["toolUseId"], "a");
-                assert_eq!(assistant["toolUses"][1]["toolUseId"], "b");
+            assert_eq!(assistant["toolUses"][0]["toolUseId"], "a");
+            assert_eq!(assistant["toolUses"][1]["toolUseId"], "b");
+            let first = &wire["history"][turn * 3 + 1]["userInputMessage"];
+            let second = if turn == 0 {
+                &wire["history"][2]["userInputMessage"]
+            } else {
+                &wire["currentMessage"]["userInputMessage"]
+            };
+            assert_eq!(first["content"], "first text");
+            assert_eq!(second["content"], "second text");
+            assert_eq!(second["images"][0]["source"]["bytes"], "aGVsbG8=");
+            for (user, id, text, status) in [
+                (first, "b", "failed", "error"),
+                (second, "a", "image result", "success"),
+            ] {
+                let results = user["userInputMessageContext"]["toolResults"]
+                    .as_array()
+                    .unwrap();
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0]["toolUseId"], id);
+                assert_eq!(results[0]["content"][0]["text"], text);
+                assert_eq!(results[0]["status"], status);
             }
         }
     }
@@ -2418,7 +2106,7 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_phase_tools_keep_results_and_id_remapping_across_turns() {
+    fn reasoning_phase_tools_keep_original_ids_across_turns() {
         let mut messages = Vec::new();
         for turn in 0..2 {
             messages.extend([
@@ -2457,8 +2145,8 @@ mod tests {
         }
         assert_eq!(calls.len(), 4);
         assert_eq!(calls, result_ids);
-        assert_ne!(calls[0], calls[2]);
-        assert_ne!(calls[1], calls[3]);
+        assert_eq!(calls[0], calls[2]);
+        assert_eq!(calls[1], calls[3]);
     }
 
     #[test]
@@ -2543,12 +2231,20 @@ mod tests {
             assert!(state.get("agentContinuationId").is_none());
             assert!(state.get("agentTaskType").is_none());
             let history = state["history"].as_array().unwrap();
-            assert_eq!(history.len(), 4);
+            assert_eq!(history.len(), 6);
             assert_eq!(
                 history[0]["userInputMessage"]["content"],
-                "You are a Rust programming assistant.\nInspect this Rust project.\nStart with src/main.rs."
+                "You are a Rust programming assistant.\nInspect this Rust project."
             );
-            let assistant = &history[1]["assistantResponseMessage"];
+            assert_eq!(
+                history[1]["userInputMessage"]["content"],
+                "Start with src/main.rs."
+            );
+            assert_eq!(
+                history[5]["userInputMessage"]["content"],
+                "Change the greeting."
+            );
+            let assistant = &history[2]["assistantResponseMessage"];
             assert_eq!(assistant["content"], "I will read the entry point.");
             assert_eq!(
                 assistant["reasoningContent"],
@@ -2556,21 +2252,18 @@ mod tests {
                     "reasoningText":{"text":"Inspect the Rust entry point first.","signature":"thought-signature"}
                 })
             );
-            let call = &history[1]["assistantResponseMessage"]["toolUses"][0];
+            let call = &history[2]["assistantResponseMessage"]["toolUses"][0];
             assert_eq!(call["input"], serde_json::json!({"path":"src/main.rs"}));
             let result =
-                &history[2]["userInputMessage"]["userInputMessageContext"]["toolResults"][0];
+                &history[3]["userInputMessage"]["userInputMessageContext"]["toolResults"][0];
             assert_eq!(result["toolUseId"], call["toolUseId"]);
             assert_eq!(result["content"][0]["text"], code);
             assert_eq!(
-                history[3]["assistantResponseMessage"]["content"],
+                history[4]["assistantResponseMessage"]["content"],
                 "The source prints a greeting."
             );
             let current = &state["currentMessage"]["userInputMessage"];
-            assert_eq!(
-                current["content"],
-                "Change the greeting.\nPreserve the escaping and comments."
-            );
+            assert_eq!(current["content"], "Preserve the escaping and comments.");
             assert_eq!(current["modelId"], "claude-haiku-5.5");
             assert_eq!(current["origin"], "KIRO_CLI");
             assert!(!body.contains("foreign-conversation-sentinel"));
@@ -2659,7 +2352,7 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_request_merges_split_tool_results() {
+    fn test_convert_request_preserves_split_tool_results() {
         let req: MessagesRequest = serde_json::from_value(serde_json::json!({
             "model": "claude-sonnet-4-5-20250929", "max_tokens": 1024,
             "messages": [
@@ -2678,11 +2371,10 @@ mod tests {
             .user_input_message
             .user_input_message_context
             .tool_results;
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].tool_use_id, "a");
-        assert_eq!(results[1].tool_use_id, "b");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tool_use_id, "b");
         assert!(
-            matches!(state.history.last(), Some(Message::Assistant(message)) if message.assistant_response_message.tool_uses.as_ref().unwrap().len() == 2)
+            matches!(state.history.last(), Some(Message::User(message)) if message.user_input_message.user_input_message_context.tool_results[0].tool_use_id == "a")
         );
     }
 
@@ -2691,7 +2383,7 @@ mod tests {
         use super::super::types::Message as AnthropicMessage;
 
         // 测试仅包含 tool_use 的 assistant 消息（无 text 块）
-        // Kiro API 要求 content 字段不能为空
+        // Real Kiro accepts empty text alongside tool calls.
         let msg = AnthropicMessage {
             role: "assistant".to_string(),
             content: serde_json::json!([
@@ -2701,15 +2393,7 @@ mod tests {
 
         let result = convert_assistant_message(&msg, &mut HashMap::new()).expect("应该成功转换");
 
-        // 验证 content 不为空（使用占位符）
-        assert!(
-            !result.assistant_response_message.content.is_empty(),
-            "content 不应为空"
-        );
-        assert_eq!(
-            result.assistant_response_message.content, " ",
-            "仅 tool_use 时应使用 ' ' 占位符"
-        );
+        assert_eq!(result.assistant_response_message.content, "");
 
         // 验证 tool_uses 被正确保留
         let tool_uses = result
@@ -2752,8 +2436,8 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_consecutive_assistant_messages() {
-        // 测试连续 assistant 消息被正确合并（Issue #79）
+    fn test_preserve_consecutive_assistant_messages() {
+        // Consecutive assistant messages retain both signatures and text.
         use super::super::types::Message as AnthropicMessage;
 
         let msg1 = AnthropicMessage {
@@ -2873,6 +2557,6 @@ mod tests {
                 break;
             }
         }
-        assert!(found_tool_use, "合并后的 assistant 消息应包含 tool_use");
+        assert!(found_tool_use, "assistant 消息应保留 tool_use");
     }
 }

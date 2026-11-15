@@ -2579,6 +2579,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn message_boundaries_and_reused_ids_survive_all_response_modes() {
+        for (cc, buffered) in [(false, false), (true, false), (true, true)] {
+            for streaming in [false, true] {
+                let mut upstream =
+                    mock(frame("assistantResponseEvent", json!({"content":"OK"}))).await;
+                upstream.state.cc_buffered_stream = buffered;
+                let mut messages = vec![
+                    json!({"role":"user","content":"first"}),
+                    json!({"role":"user","content":"second"}),
+                    json!({"role":"assistant","content":" \n\t "}),
+                    json!({"role":"assistant","content":"separate answer"}),
+                ];
+                for turn in 0..2 {
+                    messages.extend([
+                        json!({"role":"assistant","content":[{"type":"tool_use","id":"same","name":"echo","input":{"turn":turn}}]}),
+                        json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"same","content":format!("result {turn}")}]}),
+                        json!({"role":"user","content":format!("text {turn}")}),
+                    ]);
+                }
+                let response=dispatch(upstream.state.clone(),request(json!({"model":"claude-haiku-5-5","max_tokens":1024,"stream":streaming,"messages":messages})),cc).await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                assert!(!String::from_utf8_lossy(&bytes).contains("event: error"));
+                let requests = upstream.requests.lock().unwrap();
+                assert_eq!(requests.len(), 1);
+                let state = &requests[0]["conversationState"];
+                let history = state["history"].as_array().unwrap();
+                assert_eq!(history.len(), 9);
+                assert_eq!(history[0]["userInputMessage"]["content"], "first");
+                assert_eq!(history[1]["userInputMessage"]["content"], "second");
+                assert_eq!(history[2]["assistantResponseMessage"]["content"], " \n\t ");
+                assert_eq!(
+                    history[3]["assistantResponseMessage"]["content"],
+                    "separate answer"
+                );
+                for turn in 0..2 {
+                    let call = &history[4 + turn * 3]["assistantResponseMessage"];
+                    assert_eq!(call["content"], "");
+                    assert_eq!(call["toolUses"][0]["toolUseId"], "same");
+                    assert_eq!(call["toolUses"][0]["input"]["turn"], turn);
+                    let result = &history[5 + turn * 3]["userInputMessage"]["userInputMessageContext"]
+                        ["toolResults"][0];
+                    assert_eq!(result["toolUseId"], "same");
+                    assert_eq!(result["content"][0]["text"], format!("result {turn}"));
+                }
+                assert_eq!(history[6]["userInputMessage"]["content"], "text 0");
+                assert_eq!(
+                    state["currentMessage"]["userInputMessage"]["content"],
+                    "text 1"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn orphan_tools_reach_upstream_and_errors_are_never_hidden() {
         for cc in [false, true] {
             for streaming in [false, true] {
@@ -2586,6 +2641,8 @@ mod tests {
                     "orphan-use",
                     "orphan-result",
                     "duplicate-result",
+                    "duplicate-call",
+                    "conflicting-call",
                     "history-result",
                 ] {
                     let bytes=serde_json::to_vec(&json!({"reason":"TOOL_USE_RESULT_MISMATCH","message":"Upstream pairing rejection"})).unwrap();
@@ -2595,6 +2652,13 @@ mod tests {
                     let messages = match kind {
                         "orphan-use" => {
                             json!([{"role":"assistant","content":[call]},{"role":"user","content":"skip"}])
+                        }
+                        "duplicate-call" | "conflicting-call" => {
+                            let mut second = call.clone();
+                            if kind == "conflicting-call" {
+                                second["input"]["path"] = "different-input".into();
+                            }
+                            json!([{"role":"assistant","content":[call,second]},{"role":"user","content":[result]}])
                         }
                         "orphan-result" => json!([{"role":"user","content":[result]}]),
                         "duplicate-result" => {
@@ -2617,6 +2681,22 @@ mod tests {
                                 ["path"],
                             "keep-input"
                         ),
+                        "duplicate-call" | "conflicting-call" => {
+                            let calls = state["history"][0]["assistantResponseMessage"]["toolUses"]
+                                .as_array()
+                                .unwrap();
+                            assert_eq!(calls.len(), 2);
+                            assert_eq!(calls[0]["toolUseId"], "audit-call");
+                            assert_eq!(calls[1]["toolUseId"], "audit-call");
+                            assert_eq!(
+                                calls[1]["input"]["path"],
+                                if kind == "conflicting-call" {
+                                    "different-input"
+                                } else {
+                                    "keep-input"
+                                }
+                            );
+                        }
                         "orphan-result" => assert_eq!(
                             state["currentMessage"]["userInputMessage"]["userInputMessageContext"]
                                 ["toolResults"][0]["content"][0]["text"],
@@ -4920,7 +5000,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mixed_native_search_repeated_ids_and_case_variants_keep_pairs_unique() {
+    async fn mixed_native_search_repeated_ids_and_case_variants_keep_original_ids() {
         let mut first = native_search_call("call-1"); // Also present in the client history.
         first.extend(frame(
             "metadataEvent",
@@ -4972,7 +5052,7 @@ mod tests {
             3
         );
         let client = blocks.iter().find(|b| b["type"] == "tool_use").unwrap();
-        assert_ne!(client["id"], "call-1");
+        assert_eq!(client["id"], "call-1");
         assert!(!message.to_string().contains("KIRO_NATIVE_WEB_SEARCH"));
         {
             let requests = upstream.requests.lock().unwrap();
@@ -4987,7 +5067,8 @@ mod tests {
                     .filter_map(|m| m["assistantResponseMessage"]["toolUses"].as_array())
                     .flatten()
                     .collect();
-                assert!(calls.iter().any(|call| &call["toolUseId"] == current));
+                assert_eq!(current, "call-1");
+                assert!(calls.iter().all(|call| call["toolUseId"] == "call-1"));
             }
         }
         payload.messages.push(Message {

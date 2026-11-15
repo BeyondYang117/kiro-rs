@@ -1145,43 +1145,52 @@ fn enforcement_evidence_contains_complete_upstream_counterexamples() {
 #[tokio::test]
 #[ignore = "Live tool description and generation controls probe consumes credits"]
 async fn live_raw_tool_controls_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(false, false, false, false, false, false).await
+    raw_tool_controls_probe(false, false, false, false, false, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live tool output budget comparison consumes credits"]
 async fn live_raw_tool_output_budget_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(true, false, false, false, false, false).await
+    raw_tool_controls_probe(true, false, false, false, false, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live truncation recovery comparison consumes credits"]
 async fn live_raw_tool_recovery_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(true, true, false, false, false, false).await
+    raw_tool_controls_probe(true, true, false, false, false, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live request rewrite audit consumes credits"]
 async fn live_raw_request_rewrite_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(false, false, true, false, false, false).await
+    raw_tool_controls_probe(false, false, true, false, false, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live thinking history and compaction audit consumes credits"]
 async fn live_raw_thinking_compaction_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(false, false, true, true, false, false).await
+    raw_tool_controls_probe(false, false, true, true, false, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live multi-reasoning and legacy summary audit consumes credits"]
 async fn live_raw_multi_reasoning_legacy_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(false, false, true, true, true, false).await
+    raw_tool_controls_probe(false, false, true, true, true, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "Live system and orphan tool history audit consumes credits"]
 async fn live_raw_system_orphan_history_probe() -> anyhow::Result<()> {
-    raw_tool_controls_probe(false, false, true, false, false, true).await
+    raw_tool_controls_probe(false, false, true, false, false, true, false).await
+}
+
+#[path = "live_history_identity.rs"]
+mod history_identity;
+
+#[tokio::test]
+#[ignore = "Live tool ID and message boundary audit consumes credits"]
+async fn live_raw_identity_boundary_probe() -> anyhow::Result<()> {
+    raw_tool_controls_probe(false, false, true, false, false, false, true).await
 }
 
 async fn raw_tool_controls_probe(
@@ -1191,6 +1200,7 @@ async fn raw_tool_controls_probe(
     deep_audit: bool,
     multi_audit: bool,
     history_audit: bool,
+    identity_audit: bool,
 ) -> anyhow::Result<()> {
     use crate::kiro::{machine_id, parser::decoder::EventStreamDecoder};
     use futures::StreamExt;
@@ -2223,6 +2233,23 @@ async fn raw_tool_controls_probe(
             ));
         }
     }
+    let mut identity_inputs = HashMap::new();
+    if identity_audit {
+        cases.clear();
+        rewrite_tools.clear();
+        for (label, input, candidate) in history_identity::candidates()? {
+            identity_inputs.insert(label.clone(), input);
+            history_candidates.insert(label.clone(), candidate);
+            rewrite_tools.insert(label.clone(), json!([]));
+            cases.push((
+                label,
+                "".into(),
+                json!({}),
+                "Identity and boundary audit".into(),
+                None,
+            ));
+        }
+    }
     let mut captured_phases = Vec::<(Value, String)>::new();
     let selected = std::env::var("KIRO_CONTROLS_PROBE_CASES").ok();
     let mut results = Vec::new();
@@ -2280,7 +2307,7 @@ async fn raw_tool_controls_probe(
         if rewrite_probe && outgoing.pointer(context_pointer).is_some() {
             outgoing.pointer_mut(context_pointer).unwrap()["tools"] = rewrite_tools[&label].clone();
         }
-        if history_audit {
+        if history_audit || identity_audit {
             for (key, value) in history_candidates[&label].as_object().unwrap() {
                 outgoing[key] = value.clone();
             }
@@ -2664,6 +2691,7 @@ async fn raw_tool_controls_probe(
         if rewrite_probe
             && !multi_audit
             && !history_audit
+            && !identity_audit
             && actual.pointer(context_pointer).is_some()
         {
             ensure!(
@@ -2825,7 +2853,7 @@ async fn raw_tool_controls_probe(
             json!({"expectedChars":expected.chars().count(),"expectedLines":expected.lines().count(),
                 "expectedSha256":hex::encode(Sha256::digest(expected.as_bytes())),"calls":observations})
         });
-        let wire_observation = if multi_audit || history_audit {
+        let wire_observation = if multi_audit || history_audit || identity_audit {
             let mut sanitized = actual["conversationState"].clone();
             fn sanitize(value: &mut Value) {
                 match value {
@@ -2855,7 +2883,7 @@ async fn raw_tool_controls_probe(
             None
         };
         let result = json!({"case":label,"endpoint":account.endpoint,"region":account.region,"model":actual.pointer("/conversationState/currentMessage/userInputMessage/modelId"),
-            "wireUnchanged":true,"historyCandidate":history_candidates.get(&label),"wireObservation":wire_observation,"patchPointer":pointer,"patch":patch,"prompt":prompt,
+            "wireUnchanged":true,"historyCandidate":history_candidates.get(&label),"sourceInput":identity_inputs.get(&label),"wireObservation":wire_observation,"patchPointer":pointer,"patch":patch,"prompt":prompt,
             "system":system,"metadata":metadata,"outputObservation":output_observation,
             "actualUserContent":if recovery_probe { actual.pointer("/conversationState/currentMessage/userInputMessage/content") } else { None },
             "recoveryVariant":recovery_variants.get(&label),

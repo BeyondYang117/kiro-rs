@@ -1,6 +1,6 @@
 //! Execute native search inside a generation turn while leaving client tools pending.
 
-use std::{collections::HashSet, convert::Infallible, time::Duration};
+use std::{convert::Infallible, time::Duration};
 
 use axum::{
     Json,
@@ -252,13 +252,6 @@ async fn run_rounds(
     let mut iterations = Vec::new();
     let mut uses = 0usize;
     let mut response_bytes = 0usize;
-    let mut used_ids: HashSet<String> = request
-        .messages
-        .iter()
-        .filter_map(|m| m.content.as_array())
-        .flatten()
-        .filter_map(|block| block["id"].as_str().map(str::to_owned))
-        .collect();
     loop {
         let mut converted =
             converter::convert_request(&request).map_err(|error| invalid(error.to_string()))?;
@@ -303,19 +296,9 @@ async fn run_rounds(
         }
         let mut message: Value = serde_json::from_slice(&bytes)
             .map_err(|error| Box::new(handlers::upstream_error_response(error.into())))?;
-        let mut blocks = message["content"].as_array().cloned().unwrap_or_default();
-        // Model-generated IDs can repeat across internal rounds or client history.
-        // Reassign before both emitting and replaying, preserving one-to-one pairs.
-        for block in &mut blocks {
-            if block["type"] == "tool_use" {
-                let id = block["id"].as_str().unwrap_or_default().to_owned();
-                if !used_ids.insert(id) {
-                    let id = format!("toolu_{}", uuid::Uuid::new_v4().simple());
-                    used_ids.insert(id.clone());
-                    block["id"] = json!(id);
-                }
-            }
-        }
+        let blocks = message["content"].as_array().cloned().unwrap_or_default();
+        // Preserve upstream IDs on both response and replay. Real Kiro accepts
+        // reuse across completed rounds; no global uniqueness repair is needed.
         let mut iteration = message["usage"].clone();
         iteration["type"] = json!("message");
         iterations.push(iteration);

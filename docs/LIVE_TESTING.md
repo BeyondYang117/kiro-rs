@@ -369,3 +369,42 @@ cargo test live_raw_system_orphan_history_probe -- --ignored --nocapture
 ```
 
 KIRO_CONTROLS_PROBE_CASES 可筛选逗号分隔 case 名。结果仅适用于所测账号/模型/端点/区域，不能视为全部 Kiro 协议的字段支持清单。前节中依赖原 system 配对生成的历史测试记录保留为当时行为，不代表当前仍注入该配对。
+
+## 工具 ID 与连续消息边界实测
+
+2026-11-15，继续使用同一导入账号、CLI / `us-east-1` / `claude-haiku-5.5`。本轮[逐条留档](../testdata/kiro_identity_boundary_live_2026-11-15.json)共 **47 次真实上游请求：32 次 200、15 次 400**，其中 34 次原始协议探针、13 次修改后转换器补验。待测历史在端点及模型字段转换后放入请求，断言实际 HTTP body 等于候选 body，记录 body SHA256、request ID、原始调用方输入和最终历史。每个用例只发送一次，不执行模型返回的工具。
+
+| 对照 | 真实结果 | 决定 |
+| --- | --- | --- |
+| 两轮不同 ID / 两轮复用相同 ID | 均 200，正确返回两轮各自的输入和结果 | 移除全局 ID 唯一化及工具结果 ID 重映射 |
+| 同消息或连续 assistant 中相同 ID 的重复调用；相同/不同参数；一个/两个结果 | 六种原始情况均 400 `REQUEST_BODY_INVALID` | 保留全部调用和原始 ID，由上游返回错误；不去重，也不通过本地冲突拒绝绕过上游 |
+| 中文 ID、含空格标点 ID、256 字符 ID | 均 400 `Invalid tool use format` | 透出实测错误；不据此添加字符集或长度的猜测规则 |
+| 连续 user，位于历史或当前请求之前 | 原样及合并对照均 200；普通问答均返回 Alice、Beatrice | 只将最后一条 user 放入 currentMessage，其余逐条保留 |
+| 连续 assistant | 原样及合并对照均 200；普通问答均正确返回 Lyon、Marseille | 不插入双换行，不合并消息 |
+| 多个 tool_use 分属连续 assistant；tool_result 分属连续 user（含历史/当前边界） | 均 200；普通问答读到 apple/red、pear/green | 保留调用及结果的原消息边界 |
+| 纯空白 assistant、空 assistant、仅含工具调用的空 content | 均 200 | 保留空白/空消息，不为 tool_use 填空格 |
+| 中间空 user | 400 `REQUEST_BODY_INVALID`，修改后转换器补验相同 | 不用合并或删除隐藏上游拒绝 |
+| 三轮复用 `call-1`，工具名依次为搜索别名、其大写形式、lookup | 200，返回 apple/red、pear/green、lemon/yellow | 混合搜索不再为跨轮重复的模型 ID 生成新 ID |
+
+最初“列出审计标记”的提示在普通历史上引发拒答，因此没有把这些 200 当作内容全部生效的证明；追加普通姓名、城市和水果问答验证内容可见性。回答有时会质疑合成工具的语义，记录保留完整回答。实测证明本代理可以保留这些边界并让内容到达上游，**不保证 Kiro 内部不会合并消息或规范化空白**，也不保证所有模型/端点具有相同规则。
+
+生产改动移除了 `normalize_tool_use_ids`、连续 user/assistant 合并和仅工具调用的空格占位；同一消息内多个签名推理阶段仍按此前验证分为多个 native assistant 条目。混合搜索保留生成响应和重放时的模型 ID；代理自行创建的 `server_tool_use` / `web_search_tool_result` 仍使用成对的 `srvtoolu_` ID。三轮探针只验证生成接口重放的 ID 复用，不声称真实搜索服务触发了随机 ID 碰撞；混合搜索碰撞和客户端续接由模拟上游回归覆盖。
+
+离线回归逐项比较原始协议 fixture 和实际转换结果，覆盖重复/冲突调用、原始 ID、空白及空消息、连续角色和拆开的工具结果；两个消息接口的 JSON、实时 SSE、缓冲 SSE 检查边界及 ID 不变，重复调用的真实上游错误不被隐藏。
+
+调用记录说明：在上述留档之前另有 25 次探索调用（15 次 200、10 次 400），其输出文件被后续批次覆盖；已对相同矩阵重新发送并留档。这 25 次计入实际调用次数，但不冒充具有完整 body 哈希的逐条证据。因此原始探针和转换器补验实际共调用 72 次，生产接口补验另计。
+
+复现（会消耗额度；建议使用 case 筛选）：
+
+```bash
+KIRO_LIVE_CREDENTIALS=/absolute/path/credentials.json \
+KIRO_LIVE_CONFIG=/absolute/path/config.json \
+KIRO_LIVE_ACCOUNT_ID=1 \
+KIRO_CONTROLS_PROBE_OUTPUT=/absolute/path/new-unique-output-directory \
+KIRO_CONTROLS_PROBE_CASES=raw-id-reused-turns,converted-id-reused-turns,raw-recall-users-current,converted-recall-users-current \
+cargo test --no-default-features live_raw_identity_boundary_probe -- --ignored --nocapture
+```
+
+标签及原始输入见留档和 `src/anthropic/live_history_identity.rs`；`raw-` 使用独立构造器，`converted-` 使用生产转换器。输出目录应按批次区分。
+
+修改后执行 `cargo test --all-targets --no-default-features`：**614 项通过、0 失败、11 项付费联调默认跳过**；构建、格式及差异检查通过。服务已重建并重启至 8990。另经 `/v1/messages` 与 `/cc/v1/messages` 完成[5 次真实生产接口补验](../testdata/kiro_identity_boundary_production_live_2026-11-15.json)，各记录 1 次上游尝试：连续 user 返回 Alice/Beatrice，连续 assistant 的 SSE 返回 Lyon/Marseille，复用 ID 保留两轮全部输入/结果，拆开的结果返回 apple/red 与 pear/green；参数冲突的重复调用返回上游 `400 REQUEST_BODY_INVALID`。这 5 次独立于上述 72 次探针调用。

@@ -553,6 +553,8 @@ RUST_LOG=debug ./target/release/kiro-rs
 
 工具 `input_schema` 对象原样传递给上游：不补写或替换 `type/properties/required/additionalProperties`，不删除空 `required`，不包装根层 `oneOf/allOf/anyOf` 或重写 `$ref`，不因 schema 约束冲突提前拒绝请求。schema 语义和参数约束交由上游及调用方处理。工具 schema 的 `additionalProperties`（`true`、`false` 和 schema 对象）保留并传递给上游，不因其使用 schema 对象而拒绝合法请求。2026-11-15 在 CLI / us-east-1 / `claude-haiku-5.5` 上完成原始请求验证：根层和嵌套层的四组对照，以及纯字典定义共 9 次请求全部返回 200 并完成工具调用。此结果证明这些定义被该上游接受，不代表上游严格强制所有约束；详见 [真实联调记录](docs/LIVE_TESTING.md#additionalproperties-原样上游验证)。
 
+工具调用 ID 与消息边界按调用方输入保留：跨轮复用 ID 不再自动重映射，重复或冲突的 `tool_use` 不再去重或在转换器中拒绝；无效调用由真实上游返回 400。连续 user / assistant 消息逐条传递，只有最后一条 user 是当前消息，拆开的工具结果保持原位置；保留空白和空 assistant，也不为仅含工具调用的正文填空格。混合搜索同样不改写跨轮重复的模型调用 ID。以上已通过真实 CLI / Haiku 5.5 对照验证，见 [工具 ID 与消息边界实测](docs/LIVE_TESTING.md#工具-id-与连续消息边界实测)。
+
 工具名称按精确大小写区分，`Probe` 和 `probe` 可同时声明，不再合并。当前实测接受最长 64 字符的 ASCII 字母、数字、下划线和连字符名称；更长或包含点号、冒号、中文的名称仍经可逆别名适配。历史里用过但当前未声明的工具不会自动补成可调用定义，`tool_choice:none` 也不会因此重新启用历史工具。末尾非空 assistant prefill 没有已验证映射，现明确返回 400，避免静默丢弃内容；空 assistant 占位仍兼容。[字段改写审查实测](docs/LIVE_TESTING.md#请求改写继续审查)记录了范围与反例。
 
 当前工具接口只支持普通的 `name`、`description` 和 `input_schema` 定义；不支持 Anthropic 的 `defer_loading`，也不支持 Tool Search Tool（包括 regex / BM25 搜索工具及其延迟工具引用展开流程）。这些扩展字段不会透传到 Kiro，上游也不会据此按需发现或加载工具。未来要适配，Kiro 上游需提供可声明但延迟加载工具的原生字段、服务端搜索/发现入口，以及将搜索结果中的工具引用展开为可调用 schema 的协议；生成响应还需能表达搜索和展开阶段，并让后续工具调用、结果及调用 ID 在对话历史中保持关联。若要进一步支持 Programmatic Tool Calling，上游还需支持代码执行工具、`allowed_callers` / `caller` 关系，以及代码运行期间的暂停续传和子工具结果回传能力。具备这些上游能力后，代理才可实现 Anthropic 工具定义、响应事件和历史记录之间的完整转换。

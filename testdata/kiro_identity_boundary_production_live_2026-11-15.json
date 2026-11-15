@@ -1,0 +1,409 @@
+[
+  {
+    "case": "recall-users-current",
+    "route": "/v1/messages",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "My name is Alice.",
+          "role": "user"
+        },
+        {
+          "content": "My friend's name is Beatrice.",
+          "role": "user"
+        },
+        {
+          "content": "What are our two names? Answer only the names.",
+          "role": "user"
+        }
+      ],
+      "model": "claude-haiku-5.5",
+      "stream": false
+    },
+    "httpStatus": 200,
+    "bodySha256": "3c322dda694952a200cd9f8387761a009918fcc0e1f9ac221a98846244a2156d",
+    "durationMs": 2087,
+    "response": {
+      "content": [
+        {
+          "text": "Alice and Beatrice",
+          "type": "text"
+        }
+      ],
+      "id": "msg_e689fd61fc57420dba9c1214fd892af5",
+      "model": "claude-haiku-5.5",
+      "role": "assistant",
+      "stop_reason": "end_turn",
+      "stop_sequence": null,
+      "type": "message",
+      "usage": {
+        "input_tokens": 1934,
+        "output_tokens": 6
+      }
+    },
+    "attempts": 1,
+    "upstreamAttempts": [
+      {
+        "status": 200,
+        "upstreamRequestId": "4de33f19-e8da-4a93-aa98-310b4aa80c17",
+        "endpoint": "cli",
+        "region": null
+      }
+    ]
+  },
+  {
+    "case": "recall-assistants",
+    "route": "/cc/v1/messages",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "Name two French cities.",
+          "role": "user"
+        },
+        {
+          "content": "Lyon.",
+          "role": "assistant"
+        },
+        {
+          "content": "Marseille.",
+          "role": "assistant"
+        },
+        {
+          "content": "Which two cities did you just name? Answer only the cities.",
+          "role": "user"
+        }
+      ],
+      "model": "claude-haiku-5.5",
+      "stream": true
+    },
+    "httpStatus": 200,
+    "bodySha256": "3bf7ba9cad2679846d187078e68ed112e6693f38739c53bfb41dbabcba21a898",
+    "durationMs": 1373,
+    "response": {
+      "events": [
+        {
+          "type": "ping"
+        },
+        {
+          "message": {
+            "content": [],
+            "id": "msg_07020785476240179e250f37ecccbc17",
+            "model": "claude-haiku-5.5",
+            "role": "assistant",
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "input_tokens": 1940,
+              "output_tokens": 1
+            }
+          },
+          "type": "message_start"
+        },
+        {
+          "content_block": {
+            "text": "",
+            "type": "text"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        {
+          "delta": {
+            "text": "Lyon and Marse",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        {
+          "delta": {
+            "text": "ille.",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        {
+          "delta": {
+            "stop_reason": "end_turn",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "input_tokens": 1940,
+            "output_tokens": 6
+          }
+        },
+        {
+          "type": "message_stop"
+        }
+      ],
+      "text": "Lyon and Marseille."
+    },
+    "attempts": 1,
+    "upstreamAttempts": [
+      {
+        "status": 200,
+        "upstreamRequestId": "760c8729-f6b2-4c5a-acf9-6e68dfd2662a",
+        "endpoint": "cli",
+        "region": null
+      }
+    ]
+  },
+  {
+    "case": "id-reused-turns",
+    "route": "/v1/messages",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "Inspect both turns.",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "id": "same",
+              "input": {
+                "value": "INPUT_A_31"
+              },
+              "name": "probe_echo",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "RESULT_A_41",
+              "tool_use_id": "same",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "id": "same",
+              "input": {
+                "value": "INPUT_B_53"
+              },
+              "name": "probe_echo",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "RESULT_B_67",
+              "tool_use_id": "same",
+              "type": "tool_result"
+            },
+            {
+              "text": "Do not call tools. Report every audit marker from the history in order, including tool input and result markers. Keep the answer short.",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-haiku-5.5",
+      "stream": false
+    },
+    "httpStatus": 200,
+    "bodySha256": "f5e4f11f3bae7fae7b0548bb2537b97b6d17338790c2bd50594ed3b976b2c9a9",
+    "durationMs": 1379,
+    "response": {
+      "content": [
+        {
+          "text": "INPUT_A_31, RESULT_A_41, INPUT_B_53, RESULT_B_67",
+          "type": "text"
+        }
+      ],
+      "id": "msg_cba23117c1cf4a119c1161056b7b6b43",
+      "model": "claude-haiku-5.5",
+      "role": "assistant",
+      "stop_reason": "end_turn",
+      "stop_sequence": null,
+      "type": "message",
+      "usage": {
+        "input_tokens": 2113,
+        "output_tokens": 18
+      }
+    },
+    "attempts": 1,
+    "upstreamAttempts": [
+      {
+        "status": 200,
+        "upstreamRequestId": "3c0d6fc0-d031-498a-894e-8b18b8ac7a08",
+        "endpoint": "cli",
+        "region": null
+      }
+    ]
+  },
+  {
+    "case": "duplicate-conflicting-one-result",
+    "route": "/v1/messages",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": "Inspect calls.",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "id": "same",
+              "input": {
+                "value": "INPUT_A_31"
+              },
+              "name": "probe_echo",
+              "type": "tool_use"
+            },
+            {
+              "id": "same",
+              "input": {
+                "value": "INPUT_B_53"
+              },
+              "name": "probe_echo",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "RESULT_A_41",
+              "tool_use_id": "same",
+              "type": "tool_result"
+            },
+            {
+              "text": "Do not call tools. Report every audit marker from the history in order, including tool input and result markers. Keep the answer short.",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-haiku-5.5",
+      "stream": false
+    },
+    "httpStatus": 400,
+    "bodySha256": "e96a7e300772314b9cd0de566a55815a2220543daa261ead602974781df35280",
+    "durationMs": 648,
+    "response": {
+      "error": {
+        "type": "invalid_request_error",
+        "message": "Kiro API 请求失败: 400 Bad Request {\"__type\":\"com.amazon.kiro.runtimeservice#ValidationException\",\"message\":\"Improperly formed request.\",\"reason\":\"REQUEST_BODY_INVALID\"}"
+      }
+    },
+    "attempts": 1,
+    "upstreamAttempts": [
+      {
+        "status": 400,
+        "upstreamRequestId": "e21761c6-ffc7-480b-ad3c-0b96247370cc",
+        "endpoint": "cli",
+        "region": null
+      }
+    ]
+  },
+  {
+    "case": "recall-results-split",
+    "route": "/cc/v1/messages",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": [
+            {
+              "id": "a",
+              "input": {
+                "value": "apple"
+              },
+              "name": "probe_echo",
+              "type": "tool_use"
+            },
+            {
+              "id": "b",
+              "input": {
+                "value": "pear"
+              },
+              "name": "probe_echo",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "content": "red",
+              "tool_use_id": "a",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "content": "green",
+              "tool_use_id": "b",
+              "type": "tool_result"
+            },
+            {
+              "text": "What fruit and color did each echo call return? Answer briefly.",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-haiku-5.5",
+      "stream": false
+    },
+    "httpStatus": 200,
+    "bodySha256": "0964572e48aa962f5c8e619b1123374710935e10d95b06f99bae7267e5d47e88",
+    "durationMs": 2973,
+    "response": {
+      "content": [
+        {
+          "text": "The `apple` call returned **red**, and the `pear` call returned **green**.",
+          "type": "text"
+        }
+      ],
+      "id": "msg_077f3baab9734624a6e06d8965f38f0f",
+      "model": "claude-haiku-5.5",
+      "role": "assistant",
+      "stop_reason": "end_turn",
+      "stop_sequence": null,
+      "type": "message",
+      "usage": {
+        "input_tokens": 2202,
+        "output_tokens": 27
+      }
+    },
+    "attempts": 1,
+    "upstreamAttempts": [
+      {
+        "status": 200,
+        "upstreamRequestId": "0d0e5f15-d95d-496b-aa95-44c99f8ad5b2",
+        "endpoint": "cli",
+        "region": null
+      }
+    ]
+  }
+]
