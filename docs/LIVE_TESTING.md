@@ -310,7 +310,7 @@ cargo test live_raw_thinking_compaction_probe -- --ignored --nocapture
 | 同一请求经旧自动重写逻辑处理 | 200，但返回多段 `<summary>` 摘要，违背“一句话、无 XML”要求 | 移除根据系统句自动改写、默认指令注入、工具撤除；旧请求已保存为[对照 fixture](../testdata/kiro_legacy_summary_rewrite_before_2026-11-15.json) |
 | 传统摘要末尾 assistant 作为 currentMessage / 历史后补空 user | 均 400 | 不伪造新请求以绕过；与普通 prefill 一样明确报错，调用方需以 user 结束或显式使用代理 compaction |
 
-转换器将同一 assistant 回合的 reasoning 阶段按顺序放入连续 assistant 历史，保留各段正文和工具所在位置；工具配对及跨轮 ID 重映射以整个 assistant 回合为单位，防止拆段后丢掉早期工具结果。部分纯推理或空正文组合仍可能被 Kiro 拒绝，原样透出上游错误，不本地增加段数校验或静默退回“只留最后一段”。不含多个有效 reasoning 的普通 assistant 仍沿用原有合并规则。
+转换器将同一 assistant 回合的 reasoning 阶段按顺序放入连续 assistant 历史，保留各段正文和工具所在位置；工具配对及跨轮 ID 重映射以整个 assistant 回合为单位，防止拆段后丢掉早期工具结果。对于没有可见正文、没有工具调用但带签名 reasoning 的阶段，转换器会丢弃该空阶段，避免 Kiro 的 `REQUEST_BODY_INVALID`；带工具的空正文阶段仍会保留以维持工具结果配对。其他纯推理或空正文组合仍可能被 Kiro 拒绝，原样透出上游错误。不含多个有效 reasoning 的普通 assistant 仍沿用原有合并规则。
 
 传统摘要系统句不再触发特殊行为，适用于两个消息接口、JSON、实时 SSE、缓冲 SSE，以及未到阈值的 context_management 请求；明确的 compaction/context_management 压缩功能保持按调用方配置执行。此前文档“只保留最后块”和“保留传统系统句触发转换”的说明被本轮证据取代。
 

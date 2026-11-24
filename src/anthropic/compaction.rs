@@ -2332,7 +2332,8 @@ mod tests {
                     content, expected,
                     "cc={cc}, buffered={buffered}, streaming={streaming}"
                 );
-                // Replay every signed phase and redacted block in original order.
+                // Empty signed phases are filtered before replay because Kiro
+                // rejects them as standalone assistant history entries.
                 let replay = request(json!({"model":"claude-opus-5-5", "max_tokens":1024,
                     "messages":[{"role":"user", "content":"hi"},
                         {"role":"assistant", "content":content},
@@ -2349,8 +2350,6 @@ mod tests {
                 assert_eq!(
                     phases,
                     vec![
-                        json!({"reasoningText":{"text":" first\nphase 🦀","signature":"signature-a"}}),
-                        json!({"reasoningText":{"text":"second","signature":"signature-b"}}),
                         json!({"redactedContent":"encrypted-phase"}),
                         json!({"reasoningText":{"text":"third","signature":"signature-c"}})
                     ]

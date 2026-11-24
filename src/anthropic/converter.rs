@@ -775,9 +775,10 @@ fn convert_user_message(
     })
 }
 
-/// Preserve phase boundaries using consecutive native assistant entries. Live
-/// probes validate each signature; unsupported combinations must fail upstream,
-/// rather than discard phases or inject text to make them acceptable.
+/// Preserve phase boundaries using consecutive native assistant entries. Kiro
+/// rejects signed reasoning phases whose visible assistant content is empty.
+/// Remove those phases during conversion; keep tool-bearing phases intact
+/// because their tool result may be paired by a following user message.
 fn convert_assistant_turn(
     messages: &[&super::types::Message],
     tool_name_map: &mut HashMap<String, String>,
@@ -818,10 +819,40 @@ fn convert_assistant_turn(
             content: serde_json::json!(phase),
         });
     }
-    phases
+    let converted: Vec<_> = phases
         .iter()
         .map(|message| convert_assistant_message(message, tool_name_map))
-        .collect()
+        .collect::<Result<_, _>>()?;
+
+    Ok(converted
+        .into_iter()
+        .filter_map(|phase| {
+            let response = &phase.assistant_response_message;
+            let empty_signed_reasoning = response.content.trim().is_empty()
+                && response
+                    .tool_uses
+                    .as_ref()
+                    .is_none_or(|tool_uses| tool_uses.is_empty())
+                && response
+                    .reasoning_content
+                    .as_ref()
+                    .is_some_and(|reasoning| {
+                        reasoning
+                            .pointer("/reasoningText/signature")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|signature| !signature.trim().is_empty())
+                    });
+            if empty_signed_reasoning {
+                tracing::warn!(
+                    stage = "message_conversion",
+                    "Dropping empty signed reasoning phase because Kiro rejects it"
+                );
+                None
+            } else {
+                Some(phase)
+            }
+        })
+        .collect())
 }
 
 /// 转换 assistant 消息
@@ -2040,24 +2071,22 @@ mod tests {
                 let req = tool_validation_request(messages.into());
                 let wire = serde_json::to_value(convert_request(&req).unwrap().conversation_state)
                     .unwrap();
-                let assistant = &wire["history"][1]["assistantResponseMessage"];
-                if with_signed {
-                    assert_eq!(
-                        assistant["reasoningContent"],
-                        serde_json::json!({
-                            "reasoningText":{"text":"  signed text\n", "signature":"signature-a"}
-                        })
-                    );
-                } else {
-                    assert!(assistant.get("reasoningContent").is_none());
-                }
-                assert!(!assistant["content"].as_str().unwrap().contains("unsigned"));
+                let assistants: Vec<_> = wire["history"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|message| message.get("assistantResponseMessage"))
+                    .collect();
+                assert!(assistants.iter().all(|assistant| {
+                    assistant.get("reasoningContent").is_none()
+                        && !assistant["content"].as_str().unwrap().contains("unsigned")
+                }));
             }
         }
     }
 
     #[test]
-    fn assistant_reasoning_preserves_every_phase_and_signature_in_order() {
+    fn assistant_reasoning_preserves_every_usable_phase_and_signature_in_order() {
         let first = serde_json::json!({"type":"thinking","thinking":" first thought\n","signature":"first-signature"});
         let second = serde_json::json!({"type":"thinking","thinking":"second thought","signature":"second-signature"});
         let redacted = serde_json::json!({"type":"redacted_thinking","data":"encrypted-thought"});
@@ -2088,14 +2117,21 @@ mod tests {
                 .iter()
                 .filter_map(|m| m["assistantResponseMessage"].get("reasoningContent"))
                 .collect();
-            assert_eq!(
-                phases,
-                vec![
-                    &serde_json::json!({"reasoningText":{"text":" first thought\n","signature":"first-signature"}}),
-                    &serde_json::json!({"redactedContent":"encrypted-thought"}),
-                    &serde_json::json!({"reasoningText":{"text":"second thought","signature":"second-signature"}})
-                ]
-            );
+            if separate_messages {
+                assert_eq!(
+                    phases,
+                    vec![&serde_json::json!({"redactedContent":"encrypted-thought"})]
+                );
+            } else {
+                assert_eq!(
+                    phases,
+                    vec![
+                        &serde_json::json!({"reasoningText":{"text":" first thought\n","signature":"first-signature"}}),
+                        &serde_json::json!({"redactedContent":"encrypted-thought"}),
+                        &serde_json::json!({"reasoningText":{"text":"second thought","signature":"second-signature"}})
+                    ]
+                );
+            }
             let text: String = history
                 .iter()
                 .filter_map(|m| m["assistantResponseMessage"]["content"].as_str())
@@ -2444,7 +2480,7 @@ mod tests {
             role: "assistant".to_string(),
             content: serde_json::json!([
                 {"type": "thinking", "thinking": "Let me think about this...", "signature":"first-signature"},
-                {"type": "text", "text": " "}
+                {"type": "text", "text": "I will inspect the request."}
             ]),
         };
 
@@ -2476,7 +2512,10 @@ mod tests {
                 .unwrap()["reasoningText"]["signature"],
             "second-signature"
         );
-        assert_eq!(result[0].assistant_response_message.content, " ");
+        assert_eq!(
+            result[0].assistant_response_message.content,
+            "I will inspect the request."
+        );
         assert_eq!(
             result[1].assistant_response_message.content,
             "Let me read that file."
@@ -2490,6 +2529,180 @@ mod tests {
                 .tool_use_id,
             "toolu_01ABC"
         );
+    }
+
+    #[test]
+    fn empty_signed_reasoning_phase_is_dropped_without_affecting_later_phase() {
+        use super::super::types::Message as AnthropicMessage;
+
+        let empty_phase = AnthropicMessage {
+            role: "assistant".to_string(),
+            content: serde_json::json!([
+                {"type": "thinking", "thinking": "First private phase", "signature":"first-signature"}
+            ]),
+        };
+        let usable_phase = AnthropicMessage {
+            role: "assistant".to_string(),
+            content: serde_json::json!([
+                {"type": "thinking", "thinking": "Second private phase", "signature":"second-signature"},
+                {"type": "text", "text": "The visible answer."}
+            ]),
+        };
+
+        let result =
+            convert_assistant_turn(&[&empty_phase, &usable_phase], &mut HashMap::new()).unwrap();
+
+        assert_eq!(result.len(), 1);
+        let assistant = &result[0].assistant_response_message;
+        assert_eq!(assistant.content, "The visible answer.");
+        assert_eq!(
+            assistant.reasoning_content,
+            Some(serde_json::json!({
+                "reasoningText":{"text":"Second private phase","signature":"second-signature"}
+            }))
+        );
+    }
+
+    #[test]
+    fn whitespace_signed_reasoning_phase_is_dropped_but_tool_phase_is_kept() {
+        use super::super::types::Message as AnthropicMessage;
+
+        let whitespace_phase = AnthropicMessage {
+            role: "assistant".to_string(),
+            content: serde_json::json!([
+                {"type": "thinking", "thinking": "Whitespace private phase", "signature":"whitespace-signature"},
+                {"type": "text", "text": "   "}
+            ]),
+        };
+        let tool_phase = AnthropicMessage {
+            role: "assistant".to_string(),
+            content: serde_json::json!([
+                {"type": "thinking", "thinking": "Tool private phase", "signature":"tool-signature"},
+                {"type": "tool_use", "id": "toolu_01", "name": "read_file", "input": {"path":"/tmp/a"}}
+            ]),
+        };
+
+        let result =
+            convert_assistant_turn(&[&whitespace_phase, &tool_phase], &mut HashMap::new()).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].assistant_response_message.content, "");
+        assert_eq!(
+            result[0]
+                .assistant_response_message
+                .tool_uses
+                .as_ref()
+                .unwrap()[0]
+                .tool_use_id,
+            "toolu_01"
+        );
+        assert_eq!(
+            result[0]
+                .assistant_response_message
+                .reasoning_content
+                .as_ref()
+                .unwrap()["reasoningText"]["signature"],
+            "tool-signature"
+        );
+    }
+
+    #[test]
+    fn empty_signed_tool_phase_keeps_tool_result_pairing_in_full_conversion() {
+        let request = tool_validation_request(serde_json::json!([
+            {"role":"user", "content":"Read the file."},
+            {"role":"assistant", "content":[
+                {"type":"thinking", "thinking":"Preparing the tool call.", "signature":"tool-signature"},
+                {"type":"tool_use", "id":"toolu_empty_text", "name":"read_file", "input":{"path":"/tmp/a"}}
+            ]},
+            {"role":"user", "content":[
+                {"type":"tool_result", "tool_use_id":"toolu_empty_text", "content":"file contents"}
+            ]},
+            {"role":"user", "content":"Continue."}
+        ]));
+
+        let state = convert_request(&request).unwrap().conversation_state;
+        assert_eq!(state.history.len(), 3);
+
+        let assistant = match &state.history[1] {
+            Message::Assistant(message) => &message.assistant_response_message,
+            other => panic!("expected assistant history entry, got {other:?}"),
+        };
+        assert!(assistant.content.is_empty());
+        assert_eq!(
+            assistant.tool_uses.as_ref().unwrap()[0].tool_use_id,
+            "toolu_empty_text"
+        );
+
+        let result = match &state.history[2] {
+            Message::User(message) => &message.user_input_message.user_input_message_context,
+            other => panic!("expected tool result history entry, got {other:?}"),
+        };
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_use_id, "toolu_empty_text");
+    }
+
+    #[test]
+    fn multiple_reasoning_phases_with_visible_text_remain_in_order() {
+        use super::super::types::Message as AnthropicMessage;
+
+        let first = AnthropicMessage {
+            role: "assistant".to_string(),
+            content: serde_json::json!([
+                {"type":"thinking", "thinking":"First phase", "signature":"first-signature"},
+                {"type":"text", "text":"First answer."}
+            ]),
+        };
+        let second = AnthropicMessage {
+            role: "assistant".to_string(),
+            content: serde_json::json!([
+                {"type":"thinking", "thinking":"Second phase", "signature":"second-signature"},
+                {"type":"text", "text":"Second answer."}
+            ]),
+        };
+
+        let result = convert_assistant_turn(&[&first, &second], &mut HashMap::new()).unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result[0].assistant_response_message.content,
+            "First answer."
+        );
+        assert_eq!(
+            result[1].assistant_response_message.content,
+            "Second answer."
+        );
+        assert_eq!(
+            result[0]
+                .assistant_response_message
+                .reasoning_content
+                .as_ref()
+                .unwrap()["reasoningText"]["signature"],
+            "first-signature"
+        );
+        assert_eq!(
+            result[1]
+                .assistant_response_message
+                .reasoning_content
+                .as_ref()
+                .unwrap()["reasoningText"]["signature"],
+            "second-signature"
+        );
+    }
+
+    #[test]
+    fn only_empty_signed_reasoning_produces_no_assistant_phase() {
+        use super::super::types::Message as AnthropicMessage;
+
+        let empty_phase = AnthropicMessage {
+            role: "assistant".to_string(),
+            content: serde_json::json!([
+                {"type": "thinking", "thinking": "Private phase", "signature":"signature"}
+            ]),
+        };
+
+        let result = convert_assistant_turn(&[&empty_phase], &mut HashMap::new()).unwrap();
+
+        assert!(result.is_empty());
     }
 
     #[test]
