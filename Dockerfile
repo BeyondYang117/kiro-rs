@@ -25,8 +25,8 @@ COPY --from=frontend-builder /app/admin-ui/dist /app/admin-ui/dist
 ARG TARGETARCH
 ARG BUILD_PROFILE=release
 # Re-run rust-embed when the frontend adds/removes fingerprinted assets.
-RUN --mount=type=cache,id=kiro-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=kiro-cargo-git,target=/usr/local/cargo/git \
+RUN --mount=type=cache,id=kiro-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=kiro-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=kiro-target-${TARGETARCH}-${BUILD_PROFILE},target=/app/target,sharing=locked \
     touch src/main.rs \
     && cargo build --locked --profile "$BUILD_PROFILE" --no-default-features \
