@@ -40,7 +40,8 @@ function RequestDiagnostics({ data }: { data: UpstreamRequestDiagnostics }) {
     </details>
     {data.toolDiagnostics && <details open={data.toolDiagnostics.issueCount > 0}>
       <summary className="cursor-pointer">工具结构 · 调用 {formatNumber(data.toolDiagnostics.toolUses)} / 结果 {formatNumber(data.toolDiagnostics.toolResults)} · 异常 {formatNumber(data.toolDiagnostics.issueCount)}</summary>
-      <p className="mt-2 text-muted-foreground">检查全部历史及当前消息；下方最多展示最近 12 条含工具的历史消息及前 24 个异常位置。</p>
+      <p className="mt-2">配对 {formatNumber(data.toolDiagnostics.pairCounts?.matched ?? 0)} · 错序 {formatNumber(data.toolDiagnostics.pairCounts?.out_of_order ?? 0)} · 孤立结果 {formatNumber(data.toolDiagnostics.pairCounts?.orphan_result ?? 0)} · 缺少结果 {formatNumber(data.toolDiagnostics.pairCounts?.missing_result ?? 0)} · 重复调用/结果 {formatNumber((data.toolDiagnostics.pairCounts?.duplicate_call ?? 0) + (data.toolDiagnostics.pairCounts?.duplicate_result ?? 0))}</p>
+      <p className="mt-2 text-muted-foreground">ID 以短指纹显示，不保存原始值；检查全部历史及当前消息，异常位置最多 24 项，配对最多 256 项。</p>
       <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify(data.toolDiagnostics, null, 2)}</pre>
     </details>}
   </div>

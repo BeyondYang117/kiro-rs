@@ -1,6 +1,7 @@
 //! Always-on request structure; conversation text and opaque values are excluded.
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,21 +25,34 @@ pub(crate) struct UpstreamRequestDiagnostics {
     tool_diagnostics: Option<Value>,
 }
 
-/// Inspect all turns; retain only bounded structural locations, never IDs or inputs.
+/// Inspect all turns; retain bounded locations and ID fingerprints, never raw IDs or inputs.
 fn tool_diagnostics(state: &Value) -> Value {
-    use std::collections::HashSet;
+    use std::collections::{HashSet, VecDeque};
+
+    fn id_fingerprint(id: &str) -> String {
+        let digest = Sha256::digest(id.as_bytes());
+        digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
 
     let mut uses = 0usize;
     let mut results = 0usize;
     let mut issue_count = 0usize;
     let mut issues = Vec::new();
+    let mut pairs: Vec<Value> = Vec::new();
     let mut tool_history = Vec::new();
     let mut seen = HashSet::new();
-    let mut pending = HashSet::new();
-    let mut issue = |path: String, reason: &str| {
+    let mut pending: VecDeque<(String, usize)> = VecDeque::new();
+    let mut issue = |path: String, reason: &str, id: Option<&str>| {
         issue_count += 1;
         if issues.len() < 24 {
-            issues.push(json!({"path":path,"reason":reason}));
+            let mut entry = json!({"path":path,"reason":reason});
+            if let Some(id) = id {
+                entry["idFingerprint"] = json!(id_fingerprint(id));
+            }
+            issues.push(entry);
         }
     };
     let context = &state["currentMessage"]["userInputMessage"]["userInputMessageContext"];
@@ -81,12 +95,16 @@ fn tool_diagnostics(state: &Value) -> Value {
         uses += calls.len();
         results += replies.len();
         if assistant.is_some() {
-            if !pending.is_empty() {
+            while let Some((id, pair_index)) = pending.pop_front() {
+                pairs[pair_index]["status"] = json!("missing_result");
                 issue(
-                    path.clone(),
-                    "previous tool calls have no result in the adjacent user turn",
+                    pairs[pair_index]["callPath"]
+                        .as_str()
+                        .unwrap_or(&path)
+                        .to_owned(),
+                    "tool call has no result before the next assistant turn",
+                    Some(&id),
                 );
-                pending.clear();
             }
             for (call_index, call) in calls.iter().enumerate() {
                 let path = format!("{path}.assistantResponseMessage.toolUses[{call_index}]");
@@ -95,53 +113,135 @@ fn tool_diagnostics(state: &Value) -> Value {
                     .filter(|id| !id.trim().is_empty())
                 {
                     Some(id) => {
-                        if !seen.insert(id) {
-                            issue(path.clone(), "duplicate toolUseId");
+                        let duplicate = !seen.insert(id.to_owned());
+                        let pair_index = pairs.len();
+                        pairs.push(json!({
+                            "idFingerprint":id_fingerprint(id),
+                            "callPath":path,
+                            "resultPaths":[],
+                            "status":if duplicate { "duplicate_call" } else { "pending" },
+                        }));
+                        if duplicate {
+                            issue(
+                                pairs[pair_index]["callPath"].as_str().unwrap().to_owned(),
+                                "duplicate toolUseId",
+                                Some(id),
+                            );
                         }
-                        pending.insert(id);
+                        pending.push_back((id.to_owned(), pair_index));
                     }
-                    None => issue(path.clone(), "missing or empty toolUseId"),
+                    None => {
+                        issue(path.clone(), "missing or empty toolUseId", None);
+                        pairs.push(json!({
+                            "callPath":path,
+                            "resultPaths":[],
+                            "status":"missing_id",
+                        }));
+                    }
                 }
                 if !call["input"].is_object() {
-                    issue(path.clone(), "input is not an object");
+                    issue(
+                        path.clone(),
+                        "input is not an object",
+                        call["toolUseId"].as_str(),
+                    );
                 }
                 if !call["name"]
                     .as_str()
                     .is_some_and(|name| definitions.contains(&name.to_ascii_lowercase()))
                 {
-                    issue(path, "tool name has no current definition");
+                    issue(
+                        path,
+                        "tool name has no current definition",
+                        call["toolUseId"].as_str(),
+                    );
                 }
             }
         } else {
             for (result_index, reply) in replies.iter().enumerate() {
-                if !reply["toolUseId"]
+                let result_path = format!(
+                    "{path}.userInputMessage.userInputMessageContext.toolResults[{result_index}]"
+                );
+                let Some(id) = reply["toolUseId"]
                     .as_str()
-                    .is_some_and(|id| pending.remove(id))
-                {
+                    .filter(|id| !id.trim().is_empty())
+                else {
+                    issue(result_path.clone(), "missing or empty toolUseId", None);
+                    pairs.push(json!({"resultPath":result_path,"status":"missing_id"}));
+                    continue;
+                };
+                let Some(position) = pending.iter().position(|(pending_id, _)| pending_id == id)
+                else {
+                    let reason = if seen.contains(id) {
+                        "duplicate tool result for an already matched call"
+                    } else {
+                        "orphan tool result has no preceding call"
+                    };
+                    issue(result_path.clone(), reason, Some(id));
+                    pairs.push(json!({
+                        "idFingerprint":id_fingerprint(id),
+                        "resultPath":result_path,
+                        "status":if seen.contains(id) { "duplicate_result" } else { "orphan_result" },
+                    }));
+                    continue;
+                };
+                let out_of_order = position > 0;
+                let (pending_id, pair_index) = pending.remove(position).unwrap();
+                let pair = &mut pairs[pair_index];
+                pair["resultPaths"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!(result_path));
+                if pair["status"] != "duplicate_call" {
+                    pair["status"] = json!(if out_of_order {
+                        "out_of_order"
+                    } else {
+                        "matched"
+                    });
+                }
+                if out_of_order {
                     issue(
-                        format!(
-                            "{path}.userInputMessage.userInputMessageContext.toolResults[{result_index}]"
-                        ),
-                        "tool result has no matching adjacent call or is duplicated",
+                        pair["callPath"].as_str().unwrap_or_default().to_owned(),
+                        "tool result order does not match tool call order",
+                        Some(&pending_id),
                     );
                 }
             }
-            if !pending.is_empty() {
-                issue(path, "user turn is missing tool results");
-                pending.clear();
-            }
         }
+    }
+    while let Some((id, pair_index)) = pending.pop_front() {
+        pairs[pair_index]["status"] = json!("missing_result");
+        issue(
+            pairs[pair_index]["callPath"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            "tool call has no result before the request ends",
+            Some(&id),
+        );
     }
     let tool_history_messages = tool_history.len();
     if tool_history_messages > 12 {
         tool_history.drain(..tool_history_messages - 12);
     }
+    let mut pair_counts = serde_json::Map::new();
+    for pair in &pairs {
+        if let Some(status) = pair["status"].as_str() {
+            let count = pair_counts
+                .entry(status.to_owned())
+                .or_insert_with(|| json!(0));
+            *count = json!(count.as_u64().unwrap_or_default() + 1);
+        }
+    }
     json!({
         "toolUses":uses, "toolResults":results,
+        "pairCounts":pair_counts,
         "historyMessagesWithTools":tool_history_messages,
         "recentToolHistory":tool_history,
         "historyTruncated":tool_history_messages > 12,
         "issueCount":issue_count, "issues":issues, "issuesTruncated":issue_count > 24,
+        "pairs":pairs.iter().take(256).cloned().collect::<Vec<_>>(),
+        "pairsTruncated":pairs.len() > 256,
     })
 }
 
@@ -381,12 +481,77 @@ mod tests {
             diagnostic["issues"][0]["path"],
             "history[0].assistantResponseMessage.toolUses[0]"
         );
-        assert_eq!(diagnostic["issues"][1]["path"], "history[1]");
+        assert_eq!(
+            diagnostic["issues"][1]["path"],
+            "history[0].assistantResponseMessage.toolUses[0]"
+        );
         assert_eq!(
             diagnostic["issues"][5]["path"],
             "currentMessage.userInputMessage.userInputMessageContext.toolResults[1]"
         );
         assert!(!diagnostic.to_string().contains("private"));
+    }
+
+    #[test]
+    fn tool_diagnostics_pair_ids_and_detect_order_orphans_and_duplicates() {
+        let state = json!({"history":[
+            {"assistantResponseMessage":{"toolUses":[
+                {"toolUseId":"call-a","name":"read","input":{}},
+                {"toolUseId":"call-b","name":"read","input":{}}
+            ]}},
+            {"userInputMessage":{"userInputMessageContext":{"toolResults":[
+                {"toolUseId":"call-b"}
+            ]}}},
+            {"userInputMessage":{"userInputMessageContext":{"toolResults":[
+                {"toolUseId":"call-a"}, {"toolUseId":"call-a"}, {"toolUseId":"unknown"}
+            ]}}}
+        ],"currentMessage":{"userInputMessage":{"userInputMessageContext":{"tools":[
+            {"toolSpecification":{"name":"read"}}
+        ]}}}});
+        let diagnostic = tool_diagnostics(&state);
+        assert_eq!(diagnostic["toolUses"], 2);
+        assert_eq!(diagnostic["toolResults"], 4);
+        assert_eq!(diagnostic["pairs"][0]["status"], "matched");
+        assert_eq!(
+            diagnostic["pairs"][0]["resultPaths"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(diagnostic["pairs"][1]["status"], "out_of_order");
+        assert!(diagnostic["pairs"][0]["idFingerprint"].is_string());
+        assert_eq!(diagnostic["pairs"][2]["status"], "duplicate_result");
+        assert_eq!(diagnostic["pairs"][3]["status"], "orphan_result");
+        assert_eq!(diagnostic["pairCounts"]["matched"], 1);
+        assert_eq!(diagnostic["pairCounts"]["out_of_order"], 1);
+        assert_eq!(diagnostic["pairCounts"]["duplicate_result"], 1);
+        assert_eq!(diagnostic["pairCounts"]["orphan_result"], 1);
+        assert!(
+            diagnostic
+                .to_string()
+                .contains("tool result order does not match tool call order")
+        );
+        assert!(!diagnostic.to_string().contains("call-a"));
+        assert!(!diagnostic.to_string().contains("call-b"));
+    }
+
+    #[test]
+    fn tool_diagnostics_allow_split_results_across_consecutive_user_messages() {
+        let state = json!({"history":[
+            {"assistantResponseMessage":{"toolUses":[
+                {"toolUseId":"call-a","name":"read","input":{}},
+                {"toolUseId":"call-b","name":"read","input":{}}
+            ]}},
+            {"userInputMessage":{"userInputMessageContext":{"toolResults":[{"toolUseId":"call-a"}]}}},
+            {"userInputMessage":{"userInputMessageContext":{"toolResults":[{"toolUseId":"call-b"}]}}}
+        ],"currentMessage":{"userInputMessage":{"userInputMessageContext":{"tools":[
+            {"toolSpecification":{"name":"read"}}
+        ]}}}});
+        let diagnostic = tool_diagnostics(&state);
+        assert_eq!(diagnostic["issueCount"], 0);
+        assert_eq!(diagnostic["pairs"][0]["status"], "matched");
+        assert_eq!(diagnostic["pairs"][1]["status"], "matched");
     }
 
     #[test]

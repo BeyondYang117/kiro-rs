@@ -52,12 +52,21 @@ export interface UpstreamRequestDiagnostics {
   toolDiagnostics?: {
     toolUses: number
     toolResults: number
+    pairCounts?: Record<string, number>
     historyMessagesWithTools: number
     recentToolHistory: unknown[]
     historyTruncated: boolean
     issueCount: number
     issues: { path: string; reason: string }[]
     issuesTruncated: boolean
+    pairs?: {
+      idFingerprint?: string
+      callPath?: string
+      resultPath?: string
+      resultPaths?: string[]
+      status: 'pending' | 'matched' | 'missing_result' | 'missing_id' | 'duplicate_call' | 'duplicate_result' | 'orphan_result' | 'out_of_order'
+    }[]
+    pairsTruncated?: boolean
   }
 }
 
